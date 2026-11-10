@@ -7,7 +7,9 @@
 //! interval. Accepting records the approved version; `download_verified`
 //! streams the asset to `<dest>.tmp`, hash-checks it against `SHA256SUMS`,
 //! and renames on success. Windows apply spawns the installer detached
-//! (the caller then quits); macOS apply is a later task.
+//! (the caller then quits); macOS apply unzips the staged bundle
+//! alongside, swaps it in keeping a `.bak` copy, and relaunches with
+//! `open` (the caller then quits).
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -424,6 +426,110 @@ pub fn apply_update_windows(
     spawn_detached(&argv[0], &argv[1..]).map_err(|e| format!("could not start installer: {e}"))
 }
 
+/// Staged bundle name inside the verified macOS download.
+pub const MACOS_STAGED_APP: &str = "EbbTop.app";
+
+/// Backup path for the running bundle: `<app>.bak` alongside it (the
+/// rollback copy; the updater leaves it in place, like `install.ps1`).
+pub fn macos_backup_path(running_app: &std::path::Path) -> std::path::PathBuf {
+    let mut backup = running_app.as_os_str().to_owned();
+    backup.push(".bak");
+    std::path::PathBuf::from(backup)
+}
+
+/// Scratch dir for unpacking the staged bundle: alongside the running app
+/// so the final renames stay on one filesystem. Owned by the updater; a
+/// stale one from an interrupted update is cleared before reuse.
+pub fn macos_stage_dir(running_app: &std::path::Path) -> std::path::PathBuf {
+    running_app
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join(".ebbtop-update-stage")
+}
+
+/// argv to unpack the verified download into the stage dir. `unzip` ships
+/// with macOS, so the updater needs no extra dependency; `-o` refreshes a
+/// reused stage dir without prompting. `argv[0]` is the program; the rest
+/// are its arguments.
+pub fn macos_unzip_argv(
+    staged_zip: &std::path::Path,
+    stage_dir: &std::path::Path,
+) -> Vec<String> {
+    vec![
+        "unzip".to_string(),
+        "-o".to_string(),
+        "-q".to_string(),
+        staged_zip.to_string_lossy().into_owned(),
+        "-d".to_string(),
+        stage_dir.to_string_lossy().into_owned(),
+    ]
+}
+
+/// argv to relaunch the swapped bundle: `open <app>`. Spawned detached;
+/// the caller then quits and the new bundle takes over.
+pub fn macos_relaunch_argv(running_app: &std::path::Path) -> Vec<String> {
+    vec!["open".to_string(), running_app.to_string_lossy().into_owned()]
+}
+
+/// Run a macOS apply helper (`unzip`), mapping failures to updater errors
+/// that name the step, never the full command line.
+fn run_update_helper(program: &str, args: &[String], what: &str) -> Result<(), String> {
+    let status = std::process::Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| format!("{what}: could not start {program}: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{what}: {program} exited with {status}"))
+    }
+}
+
+/// macOS apply step (spec design, section 3): unpack the verified
+/// `EbbTop.app.zip` alongside the running bundle, swap it in keeping a
+/// `.bak` copy of the old app, relaunch with `open`, and return so the
+/// caller can quit. The previous `.bak` is superseded by the
+/// just-replaced app (like `install.ps1 -Force`), so the rollback path
+/// always points at the prior build; the updater never removes `.bak`
+/// afterwards. Both inputs must already exist — the download must be
+/// hash-verified first; nothing spawns otherwise, so a bad path never
+/// kills the running app. The live run happens on a Mac; not wired into
+/// the dialog yet.
+pub fn apply_update_macos(
+    staged_zip: &std::path::Path,
+    running_app: &std::path::Path,
+) -> Result<(), String> {
+    if !staged_zip.is_file() {
+        return Err(format!("update file missing: {}", staged_zip.display()));
+    }
+    if !running_app.is_dir() {
+        return Err(format!("running app missing: {}", running_app.display()));
+    }
+    let stage = macos_stage_dir(running_app);
+    let _ = std::fs::remove_dir_all(&stage);
+    std::fs::create_dir_all(&stage)
+        .map_err(|e| format!("could not stage update in {}: {e}", stage.display()))?;
+    let unzip = macos_unzip_argv(staged_zip, &stage);
+    run_update_helper(&unzip[0], &unzip[1..], "could not unpack update")?;
+    let staged_app = stage.join(MACOS_STAGED_APP);
+    if !staged_app.is_dir() {
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(format!("update is missing {}", MACOS_STAGED_APP));
+    }
+    let backup = macos_backup_path(running_app);
+    let _ = std::fs::remove_dir_all(&backup);
+    std::fs::rename(running_app, &backup)
+        .map_err(|e| format!("could not back up running app: {e}"))?;
+    if let Err(e) = std::fs::rename(&staged_app, running_app) {
+        // Best-effort restore so the old bundle stays launchable.
+        let _ = std::fs::rename(&backup, running_app);
+        return Err(format!("could not install update: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&stage);
+    let relaunch = macos_relaunch_argv(running_app);
+    spawn_detached(&relaunch[0], &relaunch[1..]).map_err(|e| format!("could not relaunch: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -711,6 +817,58 @@ mod tests {
             .expect_err("missing files must fail before any spawn");
         assert!(
             err.contains("ebbtop.exe") || err.contains("install.ps1"),
+            "error names the missing file: {err}"
+        );
+    }
+
+    // --- macOS staged bundle update (spec section 3, macOS) ---
+
+    #[test]
+    fn macos_backup_path_appends_bak() {
+        let app = std::path::Path::new("/Applications/EbbTop.app");
+        assert_eq!(
+            macos_backup_path(app),
+            std::path::PathBuf::from("/Applications/EbbTop.app.bak")
+        );
+    }
+
+    #[test]
+    fn macos_stage_dir_sits_alongside_bundle() {
+        let app = std::path::Path::new("/Applications/EbbTop.app");
+        assert_eq!(
+            macos_stage_dir(app),
+            std::path::PathBuf::from("/Applications/.ebbtop-update-stage")
+        );
+    }
+
+    #[test]
+    fn macos_unzip_argv_extracts_zip_to_stage_dir() {
+        let zip = std::path::Path::new("/tmp/EbbTop.app.zip");
+        let stage = std::path::Path::new("/Applications/.ebbtop-update-stage");
+        assert_eq!(
+            macos_unzip_argv(zip, stage),
+            ["unzip", "-o", "-q", "/tmp/EbbTop.app.zip", "-d", "/Applications/.ebbtop-update-stage"]
+                .map(String::from)
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn macos_relaunch_argv_opens_bundle() {
+        let app = std::path::Path::new("/Applications/EbbTop.app");
+        assert_eq!(
+            macos_relaunch_argv(app),
+            ["open", "/Applications/EbbTop.app"].map(String::from).to_vec()
+        );
+    }
+
+    #[test]
+    fn apply_macos_refuses_missing_files_before_spawning() {
+        let dir = scratch_dir("applymacosmissing");
+        let err = apply_update_macos(&dir.join("EbbTop.app.zip"), &dir.join("EbbTop.app"))
+            .expect_err("missing files must fail before any spawn");
+        assert!(
+            err.contains("EbbTop.app.zip") || err.contains("EbbTop.app"),
             "error names the missing file: {err}"
         );
     }
