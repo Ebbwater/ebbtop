@@ -1,0 +1,18 @@
+[Unit]
+Description=ebbtop agent, tailnet/LAN-only (bind address in agent.env)
+After=network-online.target
+Wants=network-online.target
+# Restart forever: at boot the bind address may not exist yet, so the
+# first binds can fail until the network is up.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=%h/services/ebbtop-agent/agent.env
+ExecStart=%h/services/ebbtop-agent/bin/ebbtop-agent --port 45976
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

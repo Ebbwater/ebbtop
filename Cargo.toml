@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["crates/ebbtop-core", "crates/ebbtop-gui", "crates/ebbtop-agent"]
+# The agent builds on Linux but shares this workspace lockfile.
+
+[workspace.package]
+edition = "2024"
+version = "0.2.0"
+license = "MIT"
+publish = false
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1

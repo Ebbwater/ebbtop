@@ -1,0 +1,326 @@
+//! WebSocket upgrade and per-connection handler (request-driven).
+
+use axum::{
+    extract::ws::{Message, WebSocket},
+    extract::{Query, State, WebSocketUpgrade},
+    response::Response,
+};
+use flate2::{Compression, write::GzEncoder};
+use futures_util::StreamExt;
+use once_cell::sync::OnceCell;
+use std::collections::HashMap;
+use std::io::Write;
+use tokio::sync::Mutex;
+
+use crate::metrics::{collect_disks, collect_fast_metrics, collect_processes_all};
+use crate::proto::pb;
+use crate::state::AppState;
+
+// Payloads at or below this many bytes are sent as-is; larger ones are gzipped.
+const COMPRESSION_THRESHOLD: usize = 768;
+
+// Reusable buffer for compression to avoid allocations
+struct CompressionCache {
+    processes_vec: Vec<pb::Process>,
+}
+
+impl CompressionCache {
+    fn new() -> Self {
+        Self {
+            processes_vec: Vec::with_capacity(512), // Typical process count
+        }
+    }
+}
+
+static COMPRESSION_CACHE: OnceCell<Mutex<CompressionCache>> = OnceCell::new();
+
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    // optional auth
+    if let Some(expected) = state.auth_token.as_ref()
+        && q.get("token") != Some(expected)
+    {
+        return ws.on_upgrade(|socket| async move {
+            let _ = socket.close().await;
+        });
+    }
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+/// Per-PID cache limits: entries older than MAX_AGE are swept on every
+/// insert and the map is capped at MAX_ENTRIES (oldest evicted first), so a
+/// client walking PIDs cannot grow agent memory without bound.
+const PER_PID_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+const PER_PID_CACHE_MAX_ENTRIES: usize = 64;
+
+/// Serve a per-PID request from a TTL cache, collecting on miss. One home
+/// for the logic that get_process_metrics and get_journal_entries used to
+/// duplicate ~50 lines apiece.
+async fn respond_per_pid_cached<T, Fut>(
+    socket: &mut WebSocket,
+    cache: &Mutex<HashMap<u32, crate::state::CacheEntry<T>>>,
+    pid: u32,
+    ttl: std::time::Duration,
+    request_name: &str,
+    collect: impl FnOnce() -> Fut,
+) where
+    T: serde::Serialize + Clone,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    {
+        let cache = cache.lock().await;
+        if let Some(entry) = cache.get(&pid)
+            && entry.is_fresh(ttl)
+            && let Some(v) = entry.get()
+        {
+            let _ = send_json(socket, v).await;
+            return;
+        }
+    }
+    match collect().await {
+        Ok(resp) => {
+            {
+                let mut cache = cache.lock().await;
+                cache.retain(|_, e| e.at.is_some_and(|t| t.elapsed() < PER_PID_CACHE_MAX_AGE));
+                while cache.len() >= PER_PID_CACHE_MAX_ENTRIES {
+                    let oldest = cache.iter().min_by_key(|(_, e)| e.at).map(|(k, _)| *k);
+                    match oldest {
+                        Some(k) => cache.remove(&k),
+                        None => break,
+                    };
+                }
+                cache
+                    .entry(pid)
+                    .or_insert_with(crate::state::CacheEntry::new)
+                    .set(resp.clone());
+            }
+            let _ = send_json(socket, &resp).await;
+        }
+        Err(err) => {
+            let error_response = serde_json::json!({
+                "error": err,
+                "request": request_name,
+                "pid": pid
+            });
+            let _ = send_json(socket, &error_response).await;
+        }
+    }
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState) {
+    state
+        .client_count
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    while let Some(Ok(msg)) = socket.next().await {
+        match msg {
+            Message::Text(ref text) if text == "get_metrics" => {
+                let m = collect_fast_metrics(&state).await;
+                let _ = send_json(&mut socket, &m).await;
+            }
+            Message::Text(ref text) if text == "get_disks" => {
+                let d = collect_disks(&state).await;
+                let _ = send_json(&mut socket, &d).await;
+            }
+            Message::Text(ref text) if text == "get_processes" => {
+                let payload = collect_processes_all(&state).await;
+
+                // Get cached buffers. The Vec capacity is preserved across
+                // calls (with_capacity(512) seeds it, then we swap-back after
+                // encode so the allocation outlives any single request).
+                let cache = COMPRESSION_CACHE.get_or_init(|| Mutex::new(CompressionCache::new()));
+                let mut cache = cache.lock().await;
+
+                cache.processes_vec.clear();
+                cache
+                    .processes_vec
+                    .extend(payload.top_processes.into_iter().map(|p| pb::Process {
+                        pid: p.pid,
+                        name: p.name,
+                        cpu_usage: p.cpu_usage,
+                        mem_bytes: p.mem_bytes,
+                        user: p.user,
+                        state: p.state,
+                        start_time_ms: p.start_time_ms,
+                    }));
+
+                // Move the populated Vec into the proto, encode, then move it
+                // BACK into the cache so the next call reuses the same heap
+                // allocation. The previous code did `mem::take(...)` here but
+                // then dropped `pb` (and the Vec along with it), leaving the
+                // cache holding an empty zero-capacity Vec — defeating the
+                // whole point of `with_capacity(512)`.
+                let mut pb = pb::Processes {
+                    process_count: payload.process_count as u64,
+                    rows: std::mem::take(&mut cache.processes_vec),
+                    sampled_at_ms: payload.sampled_at_ms,
+                };
+
+                let mut buf = Vec::with_capacity(8 * 1024);
+                let encode_result = prost::Message::encode(&pb, &mut buf);
+                // Restore the (now-encoded-from) Vec to the cache before pb is
+                // dropped. We `take` it out of pb to leave that field empty,
+                // and the next request will `.clear()` before refilling.
+                cache.processes_vec = std::mem::take(&mut pb.rows);
+
+                if encode_result.is_err() {
+                    let _ = socket.send(Message::Close(None)).await;
+                } else if buf.len() <= COMPRESSION_THRESHOLD {
+                    let _ = socket.send(Message::Binary(buf)).await;
+                } else {
+                    // Create a new encoder for each message to ensure proper gzip headers
+                    let mut encoder =
+                        GzEncoder::new(Vec::with_capacity(buf.len()), Compression::fast());
+                    match encoder.write_all(&buf).and_then(|_| encoder.finish()) {
+                        Ok(compressed) => {
+                            let _ = socket.send(Message::Binary(compressed)).await;
+                        }
+                        Err(_) => {
+                            let _ = socket.send(Message::Binary(buf)).await;
+                        }
+                    }
+                }
+                drop(cache); // Explicit drop to release mutex early
+            }
+            Message::Text(ref text) if text.starts_with("get_process_metrics:") => {
+                if let Some(pid_str) = text.strip_prefix("get_process_metrics:")
+                    && let Ok(pid) = pid_str.parse::<u32>()
+                {
+                    respond_per_pid_cached(
+                        &mut socket,
+                        &state.cache_process_metrics,
+                        pid,
+                        std::time::Duration::from_millis(250),
+                        "get_process_metrics",
+                        || crate::metrics::collect_process_metrics(pid, &state),
+                    )
+                    .await;
+                }
+            }
+            Message::Text(ref text) if text.starts_with("get_journal_entries:") => {
+                if let Some(pid_str) = text.strip_prefix("get_journal_entries:")
+                    && let Ok(pid) = pid_str.parse::<u32>()
+                {
+                    respond_per_pid_cached(
+                        &mut socket,
+                        &state.cache_journal_entries,
+                        pid,
+                        std::time::Duration::from_secs(1),
+                        "get_journal_entries",
+                        || crate::metrics::collect_journal_entries(pid),
+                    )
+                    .await;
+                }
+            }
+            // ebbtop: Phase 2 kill. Exact grammar `kill:<pid>:<start_time_ms>:<TERM|INT>`;
+            // near-misses are refused (with a journal line), not silently ignored.
+            Message::Text(ref text) if text == "kill" || text.starts_with("kill:") => {
+                let out = crate::kill::handle_kill_request(text);
+                let _ = send_json(&mut socket, &out).await;
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    state
+        .client_count
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+// Small, cheap gzip for larger payloads; send text for small.
+async fn send_json<T: serde::Serialize>(ws: &mut WebSocket, value: &T) -> Result<(), axum::Error> {
+    let json = serde_json::to_string(value).expect("serialize");
+    if json.len() <= COMPRESSION_THRESHOLD {
+        return ws.send(Message::Text(json)).await;
+    }
+    let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+    enc.write_all(json.as_bytes()).ok();
+    let bin = enc.finish().unwrap_or_else(|_| json.into_bytes());
+    ws.send(Message::Binary(bin)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use prost::Message as ProstMessage;
+    use sysinfo::System;
+
+    #[tokio::test]
+    async fn test_process_list_not_empty() {
+        // Initialize system data first to ensure we have processes
+        let mut sys = System::new_all();
+        sys.refresh_all();
+
+        // Create state and put the refreshed system in it
+        let state = AppState::new();
+        {
+            let mut sys_lock = state.sys.lock().await;
+            *sys_lock = sys;
+        }
+
+        // Get processes directly using the collection function
+        let processes = collect_processes_all(&state).await;
+
+        // Convert to protobuf message format
+        let cache = COMPRESSION_CACHE.get_or_init(|| Mutex::new(CompressionCache::new()));
+        let mut cache = cache.lock().await;
+
+        // Reuse process vector to build the list
+        cache.processes_vec.clear();
+        cache
+            .processes_vec
+            .extend(processes.top_processes.into_iter().map(|p| pb::Process {
+                pid: p.pid,
+                name: p.name,
+                cpu_usage: p.cpu_usage,
+                mem_bytes: p.mem_bytes,
+                user: p.user,
+                state: p.state,
+                start_time_ms: p.start_time_ms,
+            }));
+
+        // Create the protobuf message
+        let pb = pb::Processes {
+            process_count: processes.process_count as u64,
+            rows: cache.processes_vec.clone(),
+            sampled_at_ms: processes.sampled_at_ms,
+        };
+
+        // Test protobuf encoding/decoding
+        let mut buf = Vec::new();
+        prost::Message::encode(&pb, &mut buf).expect("Failed to encode protobuf");
+        let decoded = pb::Processes::decode(buf.as_slice()).expect("Failed to decode protobuf");
+
+        // Print debug info
+        println!("Process count: {}", pb.process_count);
+        println!("Process vector length: {}", pb.rows.len());
+        println!("Encoded size: {} bytes", buf.len());
+        println!("Decoded process count: {}", decoded.rows.len());
+
+        // Print first few processes if available
+        for (i, process) in pb.rows.iter().take(5).enumerate() {
+            println!(
+                "Process {}: {} (PID: {}) CPU: {:.1}% MEM: {} bytes",
+                i + 1,
+                process.name,
+                process.pid,
+                process.cpu_usage,
+                process.mem_bytes
+            );
+        }
+
+        // Validate
+        assert!(!pb.rows.is_empty(), "Process list should not be empty");
+        assert!(
+            pb.process_count > 0,
+            "Process count should be greater than 0"
+        );
+        assert_eq!(
+            pb.process_count as usize,
+            pb.rows.len(),
+            "Process count mismatch with actual rows"
+        );
+    }
+}
