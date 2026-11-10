@@ -75,6 +75,14 @@ pub struct Config {
     /// selected, so this is collapse only, no show flag).
     #[serde(default)]
     pub collapsed_proc_detail: bool,
+    /// Last finished release check, unix millis (0 = never). Persists the
+    /// 24 h check cadence across restarts.
+    #[serde(default)]
+    pub update_last_check_ms: u64,
+    /// Release tag the user skipped ("Later"); that tag never re-prompts,
+    /// a newer one still does. Empty means none skipped.
+    #[serde(default)]
+    pub update_skipped: String,
 }
 
 impl Default for Config {
@@ -100,6 +108,8 @@ impl Default for Config {
             collapsed_disk: false,
             collapsed_proc: false,
             collapsed_proc_detail: false,
+            update_last_check_ms: 0,
+            update_skipped: String::new(),
         }
     }
 }
@@ -334,6 +344,22 @@ mod tests {
         let c = load_config_from(Some(primary.clone()));
         assert!(c.sources.is_empty());
         let _ = std::fs::remove_file(&primary);
+    }
+
+    #[test]
+    fn old_config_gets_update_defaults() {
+        let c = parse_config(r#"{"sources":[]}"#);
+        assert_eq!(c.update_last_check_ms, 0);
+        assert!(c.update_skipped.is_empty());
+    }
+
+    #[test]
+    fn skipped_version_roundtrips() {
+        let mut c = Config::default();
+        c.update_last_check_ms = 1700000000000;
+        c.update_skipped = "v0.3.0".into();
+        let back = parse_config(&serde_json::to_string(&c).expect("serialize"));
+        assert_eq!(c, back);
     }
 
     #[test]

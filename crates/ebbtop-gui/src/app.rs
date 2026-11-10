@@ -187,8 +187,11 @@ impl App {
         app.settings_open = app.token.is_none() && app.onboard.is_none();
         app.start_client(&ctx);
         // Launch release check on its own thread; never blocks startup.
+        // Skipped when a persisted check is still fresh (24 h cadence).
         app.update_auto = true;
-        app.update.start(update::fetch_latest_release);
+        if app.update.due() {
+            app.update.start(update::fetch_latest_release);
+        }
         app.update_title(&ctx);
         app
     }
@@ -196,6 +199,10 @@ impl App {
     /// Construct without a runtime or client (tests).
     pub fn with(cfg: Config, token: Option<String>, token_src: TokenSource, rt: Option<tokio::runtime::Runtime>) -> Self {
         let first_run = cfg.sources.is_empty();
+        // Seed before the move below: restores the 24 h cadence and any
+        // skipped release across restarts.
+        let update =
+            UpdateCheck::with_persisted(cfg.update_last_check_ms, cfg.update_skipped.clone(), client::now_ms());
         Self {
             url_edit: cfg.active_source().map(|s| s.url.clone()).unwrap_or_default(),
             cfg,
@@ -223,7 +230,7 @@ impl App {
             kill_tx: None,
             kill_note: None,
             pending_source: None,
-            update: UpdateCheck::new(),
+            update,
             update_open: false,
             update_auto: false,
         }
@@ -303,6 +310,9 @@ impl App {
                 UpdateStatus::Failed(e) => store::append_log(&format!("update check failed: {e}")),
                 _ => {}
             }
+            // Persist the check time so the 24 h cadence survives restarts.
+            self.cfg.update_last_check_ms = client::now_ms();
+            let _ = store::save_config(&self.cfg);
         }
         if self.update_auto && self.update.due() {
             self.update.start(update::fetch_latest_release);
@@ -1828,9 +1838,16 @@ impl App {
             });
         if accepted {
             self.update.accept();
+            // An approval supersedes any earlier skip.
+            self.cfg.update_skipped = String::new();
+            let _ = store::save_config(&self.cfg);
             store::append_log(&format!("update accepted version={version}"));
         } else if declined {
             self.update.decline();
+            // "Later" stays quiet for this tag across restarts; a newer
+            // release still prompts.
+            self.cfg.update_skipped = version.clone();
+            let _ = store::save_config(&self.cfg);
             store::append_log(&format!("update declined version={version}"));
         }
         self.update_open = open && !accepted && !declined;

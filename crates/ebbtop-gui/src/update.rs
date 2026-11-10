@@ -94,6 +94,22 @@ impl UpdateCheck {
         Self { status: UpdateStatus::Idle, last_check: None, interval, rx: None, notified: None }
     }
 
+    /// Restore persisted check state: `last_check_ms` is unix millis
+    /// (0 = never checked), `skipped` a declined release tag. A future
+    /// timestamp (clock skew) counts as due rather than parking checks.
+    pub fn with_persisted(last_check_ms: u64, skipped: String, now_ms: u64) -> Self {
+        let mut u = Self::new();
+        if last_check_ms != 0
+            && let Some(age_ms) = now_ms.checked_sub(last_check_ms)
+        {
+            u.last_check = Some(Instant::now() - Duration::from_millis(age_ms));
+        }
+        if !skipped.is_empty() {
+            u.notified = Some(skipped);
+        }
+        u
+    }
+
     pub fn status(&self) -> &UpdateStatus {
         &self.status
     }
@@ -544,6 +560,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         false
+    }
+
+    #[test]
+    fn seeded_skip_suppresses_prompt_for_same_version() {
+        let mut u = UpdateCheck::with_persisted(0, "v0.3.0".into(), 1_700_000_000_000);
+        u.status = UpdateStatus::Available { version: "v0.3.0".into() };
+        assert!(!u.should_prompt(), "skipped version must not re-prompt after restart");
+        u.status = UpdateStatus::Available { version: "v0.4.0".into() };
+        assert!(u.should_prompt(), "a newer version must still prompt");
+    }
+
+    #[test]
+    fn seeded_check_time_drives_due() {
+        let now = 1_700_000_000_000u64;
+        let fresh = UpdateCheck::with_persisted(now - 3_600_000, String::new(), now);
+        assert!(!fresh.due(), "a check 1h ago is not due");
+        let stale = UpdateCheck::with_persisted(now - 25 * 3_600_000, String::new(), now);
+        assert!(stale.due(), "a check 25h ago is due");
+        let never = UpdateCheck::with_persisted(0, String::new(), now);
+        assert!(never.due(), "no persisted check is due");
     }
 
     #[test]
