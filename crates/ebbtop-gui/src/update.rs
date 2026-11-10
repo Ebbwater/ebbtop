@@ -14,7 +14,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use ebbtop_core::update::is_update_available;
+use ebbtop_core::update::{ReleaseAsset, is_update_available, parse_release_assets};
 
 /// GitHub API endpoint for the newest stable release (`/latest` already
 /// excludes drafts and prereleases, so no extra filtering is needed).
@@ -40,10 +40,11 @@ pub fn parse_latest_tag(body: &str) -> Option<String> {
     (!tag.is_empty()).then_some(tag)
 }
 
-/// Outcome of one finished check.
+/// Outcome of one finished check. `Available` carries the release's
+/// asset list so the download step needs no second fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckOutcome {
-    Available { version: String },
+    Available { version: String, assets: Vec<ReleaseAsset> },
     UpToDate { version: String },
     Failed(String),
 }
@@ -55,7 +56,9 @@ pub fn decide(current: &str, fetched: Result<String, String>) -> CheckOutcome {
         Err(e) => CheckOutcome::Failed(e),
         Ok(body) => match parse_latest_tag(&body) {
             None => CheckOutcome::Failed("unparseable release body".into()),
-            Some(tag) if is_update_available(current, &tag) => CheckOutcome::Available { version: tag },
+            Some(tag) if is_update_available(current, &tag) => {
+                CheckOutcome::Available { version: tag, assets: parse_release_assets(&body) }
+            }
             Some(tag) => CheckOutcome::UpToDate { version: tag },
         },
     }
@@ -66,11 +69,16 @@ pub fn decide(current: &str, fetched: Result<String, String>) -> CheckOutcome {
 pub enum UpdateStatus {
     Idle,
     Checking,
-    Available { version: String },
+    Available { version: String, assets: Vec<ReleaseAsset> },
     UpToDate { version: String },
     Failed(String),
-    /// User approved this version; the download task consumes it.
-    Accepted { version: String },
+    /// User approved this version; the dialog starts the verified
+    /// download for it on the next frame.
+    Accepted { version: String, assets: Vec<ReleaseAsset> },
+    /// Verified download in flight; `done` is bytes written so far.
+    Downloading { version: String, done: u64 },
+    /// Verified download on disk, ready for the platform apply step.
+    Ready { version: String, path: std::path::PathBuf },
 }
 
 /// Background check plus prompt bookkeeping. The fetch runs on a spawned
@@ -83,6 +91,11 @@ pub struct UpdateCheck {
     rx: Option<mpsc::Receiver<CheckOutcome>>,
     /// Version already prompted for: decline re-prompts only for a newer tag.
     notified: Option<String>,
+    /// In-flight verified download: outcome plus byte-progress channels,
+    /// and the version/path they belong to.
+    dl_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    dl_prog: Option<mpsc::Receiver<u64>>,
+    dl_job: Option<(String, std::path::PathBuf)>,
 }
 
 impl UpdateCheck {
@@ -91,7 +104,16 @@ impl UpdateCheck {
     }
 
     pub fn with_interval(interval: Duration) -> Self {
-        Self { status: UpdateStatus::Idle, last_check: None, interval, rx: None, notified: None }
+        Self {
+            status: UpdateStatus::Idle,
+            last_check: None,
+            interval,
+            rx: None,
+            notified: None,
+            dl_rx: None,
+            dl_prog: None,
+            dl_job: None,
+        }
     }
 
     /// Restore persisted check state: `last_check_ms` is unix millis
@@ -151,8 +173,12 @@ impl UpdateCheck {
         }
     }
 
-    /// Drain a finished check into `status`. Returns true on a transition.
+    /// Drain a finished check or download into `status`. Returns true on
+    /// a transition (including download progress, so the dialog repaints).
     pub fn poll(&mut self) -> bool {
+        if self.poll_download() {
+            return true;
+        }
         let Some(rx) = &self.rx else { return false };
         match rx.try_recv() {
             Err(mpsc::TryRecvError::Empty) => false,
@@ -166,7 +192,9 @@ impl UpdateCheck {
                 self.rx = None;
                 self.last_check = Some(Instant::now());
                 self.status = match outcome {
-                    CheckOutcome::Available { version } => UpdateStatus::Available { version },
+                    CheckOutcome::Available { version, assets } => {
+                        UpdateStatus::Available { version, assets }
+                    }
                     CheckOutcome::UpToDate { version } => UpdateStatus::UpToDate { version },
                     CheckOutcome::Failed(e) => UpdateStatus::Failed(e),
                 };
@@ -175,26 +203,110 @@ impl UpdateCheck {
         }
     }
 
+    /// Drain the in-flight download: progress bytes refresh `Downloading`,
+    /// the outcome lands in `Ready` or `Failed`. True on any change.
+    fn poll_download(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(prog) = &self.dl_prog
+            && let Ok(done) = prog.try_recv()
+        {
+            // Keep only the latest count; the dialog reads it per frame.
+            let mut last = done;
+            while let Ok(n) = prog.try_recv() {
+                last = n;
+            }
+            if let UpdateStatus::Downloading { done: d, .. } = &mut self.status {
+                *d = last;
+                changed = true;
+            }
+        }
+        let done = match &self.dl_rx {
+            Some(rx) => match rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("download thread ended".to_string()))
+                }
+                Ok(r) => Some(r),
+            },
+            None => None,
+        };
+        if let Some(outcome) = done {
+            self.dl_rx = None;
+            self.dl_prog = None;
+            let (version, path) = self.dl_job.take().unwrap_or_default();
+            self.status = match outcome {
+                Ok(()) => UpdateStatus::Ready { version, path },
+                Err(e) => UpdateStatus::Failed(e),
+            };
+            changed = true;
+        }
+        changed
+    }
+
+    /// Start the verified download on a thread; status moves to
+    /// `Downloading` at once. No-op while one is already running.
+    pub fn start_download(
+        &mut self,
+        version: String,
+        asset_url: String,
+        sums_url: String,
+        asset: String,
+        dest: std::path::PathBuf,
+    ) {
+        if self.dl_rx.is_some() {
+            return;
+        }
+        let (out_tx, out_rx) = mpsc::channel();
+        let (prog_tx, prog_rx) = mpsc::channel();
+        self.dl_rx = Some(out_rx);
+        self.dl_prog = Some(prog_rx);
+        self.dl_job = Some((version.clone(), dest.clone()));
+        self.status = UpdateStatus::Downloading { version, done: 0 };
+        std::thread::Builder::new()
+            .name("ebbtop-update-download".into())
+            .spawn(move || {
+                let _ = out_tx.send(download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx));
+            })
+            .ok();
+    }
+
     /// True when the dialog should pop: an unprompted available version.
     pub fn should_prompt(&self) -> bool {
         match &self.status {
-            UpdateStatus::Available { version } => self.notified.as_ref() != Some(version),
+            UpdateStatus::Available { version, .. } => self.notified.as_ref() != Some(version),
             _ => false,
         }
     }
 
-    /// The dialog popped for the current available version.
+    /// The dialog popped for the current version (Available prompt or
+    /// Ready restart): that tag stays quiet until a newer one appears.
     pub fn mark_notified(&mut self) {
-        if let UpdateStatus::Available { version } = &self.status {
-            self.notified = Some(version.clone());
+        match &self.status {
+            UpdateStatus::Available { version, .. } | UpdateStatus::Ready { version, .. } => {
+                self.notified = Some(version.clone());
+            }
+            _ => {}
         }
     }
 
-    /// User approved the available version; `download_verified` consumes it.
+    /// User approved the available version; the dialog starts the verified
+    /// download for it on the next frame.
     pub fn accept(&mut self) {
-        if let UpdateStatus::Available { version } = &self.status {
-            self.status = UpdateStatus::Accepted { version: version.clone() };
+        if let UpdateStatus::Available { version, assets } = &self.status {
+            self.status = UpdateStatus::Accepted { version: version.clone(), assets: assets.clone() };
         }
+    }
+
+    /// Test hook: place the state machine in any status.
+    #[cfg(test)]
+    pub fn test_set_status(&mut self, status: UpdateStatus) {
+        self.status = status;
+    }
+
+    /// Move to `Failed` with a caller-made message (unserved platform,
+    /// missing bundle, apply refusal). The dialog shows it with a retry.
+    pub(crate) fn set_failed(&mut self, msg: String) {
+        self.status = UpdateStatus::Failed(msg);
     }
 
     /// User declined the available version; stays quiet until a newer tag.
@@ -227,6 +339,33 @@ pub fn fetch_latest_release() -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .text()
         .map_err(|e| e.to_string())
+}
+
+/// Download destination for a release asset: the OS temp dir, named
+/// `ebbtop-update-<version>-<asset>` with the version sanitized to
+/// filename-safe characters (a hostile tag must not escape the name).
+pub fn download_dest_path(version: &str, asset: &str) -> std::path::PathBuf {
+    let safe: String = version
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = if safe.is_empty() { "update".to_string() } else { safe };
+    std::env::temp_dir().join(format!("ebbtop-update-{name}-{asset}"))
+}
+
+/// Bundle dir for a running executable: the nearest ancestor ending in
+/// `.app`, or `None` when not running from a bundle (dev builds, tests).
+/// Takes the exe path so tests can pass fake ones on any platform.
+pub fn app_bundle_dir(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    exe.ancestors()
+        .find(|a| a.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")))
+        .map(|a| a.to_path_buf())
 }
 
 /// Sibling temp path for a verified download: `<dest>.tmp` in the same
@@ -509,8 +648,8 @@ fn run_update_helper(program: &str, args: &[String], what: &str) -> Result<(), S
 /// always points at the prior build; the updater never removes `.bak`
 /// afterwards. Both inputs must already exist — the download must be
 /// hash-verified first; nothing spawns otherwise, so a bad path never
-/// kills the running app. The live run happens on a Mac; not wired into
-/// the dialog yet.
+/// kills the running app. Reached from the dialog's Restart button; the
+/// live run happens on a Mac.
 pub fn apply_update_macos(
     staged_zip: &std::path::Path,
     running_app: &std::path::Path,
@@ -565,9 +704,9 @@ mod tests {
     #[test]
     fn seeded_skip_suppresses_prompt_for_same_version() {
         let mut u = UpdateCheck::with_persisted(0, "v0.3.0".into(), 1_700_000_000_000);
-        u.status = UpdateStatus::Available { version: "v0.3.0".into() };
+        u.status = UpdateStatus::Available { version: "v0.3.0".into(), assets: Vec::new() };
         assert!(!u.should_prompt(), "skipped version must not re-prompt after restart");
-        u.status = UpdateStatus::Available { version: "v0.4.0".into() };
+        u.status = UpdateStatus::Available { version: "v0.4.0".into(), assets: Vec::new() };
         assert!(u.should_prompt(), "a newer version must still prompt");
     }
 
@@ -600,7 +739,7 @@ mod tests {
     fn decide_available_only_when_newer() {
         assert_eq!(
             decide("0.2.0", Ok(r#"{"tag_name": "v0.3.0"}"#.into())),
-            CheckOutcome::Available { version: "v0.3.0".into() }
+            CheckOutcome::Available { version: "v0.3.0".into(), assets: Vec::new() }
         );
         assert_eq!(
             decide("0.3.0", Ok(r#"{"tag_name": "v0.3.0"}"#.into())),
@@ -621,13 +760,126 @@ mod tests {
     }
 
     #[test]
+    fn decide_carries_asset_urls() {
+        let body = r#"{"tag_name":"v9.9.9","assets":[{"name":"ebbtop.exe","browser_download_url":"http://x/e"},{"name":"SHA256SUMS","browser_download_url":"http://x/s"}]}"#;
+        match decide("0.2.0", Ok(body.into())) {
+            CheckOutcome::Available { version, assets } => {
+                assert_eq!(version, "v9.9.9");
+                assert_eq!(
+                    ebbtop_core::update::release_asset_url(&assets, "ebbtop.exe").as_deref(),
+                    Some("http://x/e")
+                );
+                assert_eq!(
+                    ebbtop_core::update::release_asset_url(
+                        &assets,
+                        ebbtop_core::update::SUMS_ASSET
+                    )
+                    .as_deref(),
+                    Some("http://x/s")
+                );
+            }
+            other => panic!("expected Available, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_job_reaches_ready() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/pkg.bin".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{FIXTURE_SHA256}  pkg.bin\n").into_bytes(),
+        );
+        let base = loopback_server(routes, None, 2);
+        let dir = scratch_dir("job-ready");
+        let dest = dir.join("pkg.bin");
+        let mut c = UpdateCheck::new();
+        c.start_download(
+            "v9.9.9".into(),
+            format!("{base}/pkg.bin"),
+            format!("{base}/SHA256SUMS"),
+            "pkg.bin".into(),
+            dest.clone(),
+        );
+        assert!(matches!(c.status(), UpdateStatus::Downloading { .. }));
+        for _ in 0..500 {
+            c.poll();
+            if matches!(c.status(), UpdateStatus::Ready { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        match c.status() {
+            UpdateStatus::Ready { version, path } => {
+                assert_eq!(version, "v9.9.9");
+                assert_eq!(path, &dest);
+                assert!(dest.is_file(), "verified file landed");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_job_failure_cleans_up() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/pkg.bin".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{}  pkg.bin\n", "0".repeat(64)).into_bytes(),
+        );
+        let base = loopback_server(routes, None, 2);
+        let dir = scratch_dir("job-fail");
+        let dest = dir.join("pkg.bin");
+        let mut c = UpdateCheck::new();
+        c.start_download(
+            "v9.9.9".into(),
+            format!("{base}/pkg.bin"),
+            format!("{base}/SHA256SUMS"),
+            "pkg.bin".into(),
+            dest.clone(),
+        );
+        for _ in 0..500 {
+            c.poll();
+            if matches!(c.status(), UpdateStatus::Failed(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(c.status(), UpdateStatus::Failed(_)), "got {:?}", c.status());
+        assert!(!dest.exists(), "no file left behind");
+        assert!(dir_entries(&dir).is_empty(), "partial removed");
+    }
+
+    #[test]
+    fn download_dest_names_version_and_asset() {
+        let p = download_dest_path("v0.3.0", "ebbtop.exe");
+        assert_eq!(p.file_name().unwrap(), "ebbtop-update-v0.3.0-ebbtop.exe");
+        let evil = download_dest_path("../../etc/passwd", "ebbtop.exe");
+        let name = evil.file_name().unwrap().to_string_lossy();
+        assert!(!name.contains('/'), "sanitized: {name}");
+    }
+
+    #[test]
+    fn app_bundle_dir_finds_dot_app() {
+        let exe = std::path::Path::new("/Applications/EbbTop.app/Contents/MacOS/ebbtop");
+        assert_eq!(
+            app_bundle_dir(exe).as_deref(),
+            Some(std::path::Path::new("/Applications/EbbTop.app"))
+        );
+        assert_eq!(app_bundle_dir(std::path::Path::new("/usr/local/bin/ebbtop")), None);
+    }
+
+    #[test]
     fn check_is_due_until_interval_passes() {
         let mut c = UpdateCheck::with_interval(Duration::from_secs(60));
         assert!(c.due(), "never checked: due");
         c.start(|| Ok(r#"{"tag_name": "v99.9.9"}"#.into()));
         assert!(!c.due(), "running check: not due");
         assert!(poll_settled(&mut c), "finished check transitions");
-        assert_eq!(c.status(), &UpdateStatus::Available { version: "v99.9.9".into() });
+        assert_eq!(
+            c.status(),
+            &UpdateStatus::Available { version: "v99.9.9".into(), assets: Vec::new() }
+        );
         assert!(!c.due(), "just checked: not due");
     }
 
@@ -661,7 +913,10 @@ mod tests {
         c.start(|| Ok(r#"{"tag_name": "v99.1.0"}"#.into()));
         assert!(poll_settled(&mut c));
         c.accept();
-        assert_eq!(c.status(), &UpdateStatus::Accepted { version: "v99.1.0".into() });
+        assert_eq!(
+            c.status(),
+            &UpdateStatus::Accepted { version: "v99.1.0".into(), assets: Vec::new() }
+        );
         assert!(!c.should_prompt(), "accepted version does not prompt");
     }
 

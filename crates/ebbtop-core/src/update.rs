@@ -13,6 +13,41 @@ use std::cmp::Ordering;
 pub const WINDOWS_ASSET: &str = "ebbtop.exe";
 /// Release asset served for macOS installs.
 pub const MACOS_ASSET: &str = "EbbTop.app.zip";
+/// Release asset carrying the checksums every download verifies against.
+pub const SUMS_ASSET: &str = "SHA256SUMS";
+
+/// One release artifact: filename plus its download URL, out of a
+/// `/releases/latest` body's `assets` array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseAsset {
+    pub name: String,
+    pub url: String,
+}
+
+/// Asset list out of a `/releases/latest` body. Empty when the body has
+/// no usable `assets` array; entries without string name and
+/// `browser_download_url` are skipped.
+pub fn parse_release_assets(body: &str) -> Vec<ReleaseAsset> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let Some(list) = v.get("assets").and_then(|a| a.as_array()) else {
+        return Vec::new();
+    };
+    list.iter()
+        .filter_map(|e| {
+            Some(ReleaseAsset {
+                name: e.get("name")?.as_str()?.to_string(),
+                url: e.get("browser_download_url")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Download URL for `asset` in a parsed list. `None` when absent.
+pub fn release_asset_url(assets: &[ReleaseAsset], asset: &str) -> Option<String> {
+    assets.iter().find(|a| a.name == asset).map(|a| a.url.clone())
+}
 
 /// One parsed `SHA256SUMS` line: `<hex>  <filename>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +251,28 @@ mod tests {
         assert_eq!(asset_name_for_platform("darwin"), Some(MACOS_ASSET));
         assert_eq!(asset_name_for_platform("linux"), None);
         assert_eq!(asset_name_for_platform(""), None);
+    }
+
+    #[test]
+    fn release_assets_parse_names_and_urls() {
+        let body = r#"{"tag_name":"v0.3.0","assets":[{"name":"ebbtop.exe","browser_download_url":"https://dl.example/e"},{"name":"SHA256SUMS","browser_download_url":"https://dl.example/s"},{"name":42,"browser_download_url":"x"},{"name":"y"}]}"#;
+        let assets = parse_release_assets(body);
+        assert_eq!(assets.len(), 2, "skips non-string entries: {assets:?}");
+        assert_eq!(
+            release_asset_url(&assets, "ebbtop.exe").as_deref(),
+            Some("https://dl.example/e")
+        );
+        assert_eq!(
+            release_asset_url(&assets, SUMS_ASSET).as_deref(),
+            Some("https://dl.example/s")
+        );
+        assert_eq!(release_asset_url(&assets, "missing"), None);
+    }
+
+    #[test]
+    fn release_assets_missing_array_is_empty() {
+        assert!(parse_release_assets(r#"{"tag_name":"v0.3.0"}"#).is_empty());
+        assert!(parse_release_assets("garbage").is_empty());
     }
 
     #[test]

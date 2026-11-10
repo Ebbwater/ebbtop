@@ -10,6 +10,7 @@ use egui::{Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use ebbtop_core::client::{self, ClientConfig};
 use ebbtop_core::history::{Conn, NetRate, Ring, State};
+use ebbtop_core::update as core_update;
 use ebbtop_core::view::{self, SortKey};
 use ebbtop_core::wire::{KillJob, KillSignal};
 use tokio::sync::mpsc;
@@ -302,7 +303,7 @@ impl App {
         // thread; none of this blocks the frame.
         if self.update.poll() {
             match self.update.status() {
-                UpdateStatus::Available { version } => store::append_log(&format!(
+                UpdateStatus::Available { version, .. } => store::append_log(&format!(
                     "update available {version} (current {})", update::current_version())),
                 UpdateStatus::UpToDate { version } => {
                     store::append_log(&format!("update check up to date {version}"));
@@ -623,7 +624,7 @@ impl App {
             // button; a failed check is a quiet note (spec: retry next
             // interval, app runs as before).
             match self.update.status() {
-                UpdateStatus::Available { version } => {
+                UpdateStatus::Available { version, .. } => {
                     let version = version.clone();
                     ui.label(RichText::new(format!("update {version} ready")).monospace().color(w::WARN));
                     if ui.button("Update").clicked() {
@@ -1781,10 +1782,14 @@ impl App {
         let status = match self.update.status() {
             UpdateStatus::Idle => "never checked".to_string(),
             UpdateStatus::Checking => "checking…".to_string(),
-            UpdateStatus::Available { version } => format!("{version} available"),
+            UpdateStatus::Available { version, .. } => format!("{version} available"),
             UpdateStatus::UpToDate { version } => format!("up to date ({version})"),
-            UpdateStatus::Failed(e) => format!("check failed: {e}"),
-            UpdateStatus::Accepted { version } => format!("{version} approved"),
+            UpdateStatus::Failed(e) => format!("update failed: {e}"),
+            UpdateStatus::Accepted { version, .. } => format!("{version} approved"),
+            UpdateStatus::Downloading { version, done } => {
+                format!("downloading {version} ({} MB)", done / 1_000_000)
+            }
+            UpdateStatus::Ready { version, .. } => format!("{version} ready to restart"),
         };
         ui.label(RichText::new(status).monospace().color(w::DIM));
         ui.add_space(6.0);
@@ -1793,7 +1798,7 @@ impl App {
         }
         // Re-offer a declined-but-still-available release without
         // re-popping the dialog.
-        if let UpdateStatus::Available { version } = self.update.status() {
+        if let UpdateStatus::Available { version, .. } = self.update.status() {
             let version = version.clone();
             ui.add_space(6.0);
             if ui.button(format!("Download update {version}")).clicked() {
@@ -1803,54 +1808,203 @@ impl App {
         }
     }
 
-    /// Update prompt: names the new release next to this build's version.
-    /// Download accepts (the download task consumes `Accepted`); Later
-    /// declines and stays quiet until a newer release appears.
+    /// Update dialog across the whole flow: prompt (Available), progress
+    /// (Downloading), restart (Ready), and retry (Failed). Accepting moves
+    /// to `Accepted`; the verified download starts on the next frame so
+    /// the button click never blocks. Later declines and stays quiet
+    /// until a newer release appears.
     fn update_dialog(&mut self, ctx: &egui::Context) {
-        let version = match self.update.status() {
-            UpdateStatus::Available { version } => version.clone(),
+        // Accepted is transient: kick off the download, then render the
+        // resulting Downloading (or Failed) state below.
+        if matches!(self.update.status(), UpdateStatus::Accepted { .. }) {
+            self.begin_update_download();
+        }
+        enum Act {
+            None,
+            Accept,
+            Decline,
+            Restart,
+            Recheck,
+        }
+        let mut act = Act::None;
+        let mut open = self.update_open;
+        let title: &str;
+        match self.update.status() {
+            UpdateStatus::Available { .. } | UpdateStatus::Accepted { .. } => title = "Update available",
+            UpdateStatus::Downloading { .. } => title = "Downloading update",
+            UpdateStatus::Ready { .. } => title = "Restart to update",
+            UpdateStatus::Failed(_) => title = "Update failed",
             _ => {
                 self.update_open = false;
                 return;
             }
-        };
-        let mut open = self.update_open;
-        let mut accepted = false;
-        let mut declined = false;
-        egui::Window::new("Update available")
+        }
+        egui::Window::new(title)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "EbbTop {version} is available (you have {}).",
-                    update::current_version()
-                ));
-                ui.horizontal(|ui| {
-                    if ui.button("Download update").clicked() {
-                        accepted = true;
+                match self.update.status() {
+                    UpdateStatus::Available { version, .. }
+                    | UpdateStatus::Accepted { version, .. } => {
+                        ui.label(format!(
+                            "EbbTop {version} is available (you have {}).",
+                            update::current_version()
+                        ));
+                        ui.horizontal(|ui| {
+                            if ui.button("Download update").clicked() {
+                                act = Act::Accept;
+                            }
+                            if ui.button("Later").clicked() {
+                                act = Act::Decline;
+                            }
+                        });
                     }
-                    if ui.button("Later").clicked() {
-                        declined = true;
+                    UpdateStatus::Downloading { version, done } => {
+                        ui.label(format!(
+                            "Downloading EbbTop {version}… {} MB so far.",
+                            done / 1_000_000
+                        ));
                     }
-                });
+                    UpdateStatus::Ready { version, .. } => {
+                        ui.label(format!(
+                            "EbbTop {version} is downloaded and verified."
+                        ));
+                        ui.horizontal(|ui| {
+                            if ui.button("Restart to update").clicked() {
+                                act = Act::Restart;
+                            }
+                            if ui.button("Later").clicked() {
+                                act = Act::Decline;
+                            }
+                        });
+                    }
+                    UpdateStatus::Failed(e) => {
+                        let e = e.clone();
+                        ui.label(RichText::new(format!("Update failed: {e}")).color(w::WARN));
+                        if ui.button("Check again").clicked() {
+                            act = Act::Recheck;
+                        }
+                    }
+                    _ => {}
+                }
             });
-        if accepted {
-            self.update.accept();
-            // An approval supersedes any earlier skip.
-            self.cfg.update_skipped = String::new();
-            let _ = store::save_config(&self.cfg);
-            store::append_log(&format!("update accepted version={version}"));
-        } else if declined {
-            self.update.decline();
-            // "Later" stays quiet for this tag across restarts; a newer
-            // release still prompts.
-            self.cfg.update_skipped = version.clone();
-            let _ = store::save_config(&self.cfg);
-            store::append_log(&format!("update declined version={version}"));
+        match act {
+            Act::None => {}
+            Act::Accept => self.accept_update(),
+            Act::Decline => {
+                self.decline_update();
+                open = false;
+            }
+            Act::Restart => self.restart_for_update(ctx),
+            Act::Recheck => self.update.start(update::fetch_latest_release),
         }
-        self.update_open = open && !accepted && !declined;
+        // Accepted is transient (download starts next frame); Failed stays
+        // for retry; everything else terminal closes the dialog.
+        let done = !matches!(
+            self.update.status(),
+            UpdateStatus::Available { .. }
+                | UpdateStatus::Accepted { .. }
+                | UpdateStatus::Downloading { .. }
+                | UpdateStatus::Ready { .. }
+                | UpdateStatus::Failed(_)
+        );
+        self.update_open = open && !done;
+    }
+
+    /// Start the verified download for the accepted release (spec design,
+    /// section 2). Resolves this platform's asset plus `SHA256SUMS` from
+    /// the carried asset list; a platform with no served asset, or a
+    /// release without the needed URLs, lands in `Failed` with the reason.
+    fn begin_update_download(&mut self) {
+        let (version, assets) = match self.update.status() {
+            UpdateStatus::Accepted { version, assets } => (version.clone(), assets.clone()),
+            _ => return,
+        };
+        let Some(asset) = core_update::asset_name_for_current_platform() else {
+            self.update.set_failed("updates are not served for this platform".into());
+            return;
+        };
+        let urls = match (
+            core_update::release_asset_url(&assets, asset),
+            core_update::release_asset_url(&assets, core_update::SUMS_ASSET),
+        ) {
+            (Some(a), Some(s)) => (a, s),
+            _ => {
+                self.update.set_failed(format!("release {version} has no download for this platform"));
+                return;
+            }
+        };
+        let dest = update::download_dest_path(&version, asset);
+        store::append_log(&format!("update download start version={version} asset={asset}"));
+        self.update.start_download(version, urls.0, urls.1, asset.to_string(), dest);
+    }
+
+    /// "Download update" pressed: approve and clear any earlier skip.
+    fn accept_update(&mut self) {
+        let version = match self.update.status() {
+            UpdateStatus::Available { version, .. } => version.clone(),
+            _ => return,
+        };
+        self.update.accept();
+        self.cfg.update_skipped = String::new();
+        let _ = store::save_config(&self.cfg);
+        store::append_log(&format!("update accepted version={version}"));
+    }
+
+    /// "Later" pressed: decline and persist the skip for this tag; a
+    /// newer release still prompts.
+    fn decline_update(&mut self) {
+        let version = match self.update.status() {
+            UpdateStatus::Available { version, .. } | UpdateStatus::Ready { version, .. } => {
+                version.clone()
+            }
+            _ => return,
+        };
+        // A Ready download stays on disk; declining only quiets the prompt.
+        if matches!(self.update.status(), UpdateStatus::Available { .. }) {
+            self.update.decline();
+        } else {
+            self.update.mark_notified();
+        }
+        self.cfg.update_skipped = version.clone();
+        let _ = store::save_config(&self.cfg);
+        store::append_log(&format!("update declined version={version}"));
+        self.update_open = false;
+    }
+
+    /// "Restart to update" pressed (macOS slice; Windows lands next):
+    /// swap in the verified bundle, relaunch, and quit. Anything missing
+    /// lands in `Failed` — a bad path never kills the running app.
+    fn restart_for_update(&mut self, ctx: &egui::Context) {
+        let (version, path) = match self.update.status() {
+            UpdateStatus::Ready { version, path } => (version.clone(), path.clone()),
+            _ => return,
+        };
+        #[cfg(target_os = "macos")]
+        {
+            let exe = std::env::current_exe().unwrap_or_default();
+            match update::app_bundle_dir(&exe) {
+                None => self.update.set_failed(
+                    "not running from EbbTop.app; replace the bundle by hand".into(),
+                ),
+                Some(bundle) => match update::apply_update_macos(&path, &bundle) {
+                    Ok(()) => {
+                        store::append_log(&format!(
+                            "update applied version={version}; relaunching"
+                        ));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Err(e) => self.update.set_failed(e),
+                },
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (ctx, &version, &path);
+            self.update.set_failed("restart-to-update on Windows lands in the next slice".into());
+        }
     }
 }
 
@@ -2234,6 +2388,30 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("Download update")), "accept missing: {t:?}");
         assert!(t.iter().any(|x| x.contains("Later")), "decline missing: {t:?}");
         assert!(t.iter().any(|x| x.contains("update v99.7.0 ready")), "status note missing: {t:?}");
+    }
+
+    #[test]
+    fn downloading_update_shows_progress() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.update.test_set_status(UpdateStatus::Downloading { version: "v9.9.9".into(), done: 3_000_000 });
+        app.update_open = true;
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("Downloading")), "progress missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("v9.9.9")), "version missing: {t:?}");
+        assert!(!t.iter().any(|x| x.contains("Restart to update")), "no restart while downloading: {t:?}");
+    }
+
+    #[test]
+    fn ready_update_offers_restart() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.update.test_set_status(UpdateStatus::Ready {
+            version: "v9.9.9".into(),
+            path: std::path::PathBuf::from("/tmp/ebbtop-update-v9.9.9-pkg"),
+        });
+        app.update_open = true;
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("Restart to update")), "restart missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("v9.9.9")), "version missing: {t:?}");
     }
 
     #[test]
