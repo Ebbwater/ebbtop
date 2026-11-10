@@ -4,8 +4,9 @@
 //! startup): `GET .../releases/latest`, `tag_name` out of the JSON body,
 //! semver-compare against this build's `CARGO_PKG_VERSION`. A failed check
 //! is a quiet status-bar note + log line; the next check runs at the next
-//! interval. Download, verify, apply, and restart are later tasks; accepting
-//! here only records the approved version for them to consume.
+//! interval. Accepting records the approved version; `download_verified`
+//! streams the asset to `<dest>.tmp`, hash-checks it against `SHA256SUMS`,
+//! and renames on success. Apply and restart are later tasks.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -170,7 +171,7 @@ impl UpdateCheck {
         }
     }
 
-    /// User approved the available version (download is a later task).
+    /// User approved the available version; `download_verified` consumes it.
     pub fn accept(&mut self) {
         if let UpdateStatus::Available { version } = &self.status {
             self.status = UpdateStatus::Accepted { version: version.clone() };
@@ -207,6 +208,121 @@ pub fn fetch_latest_release() -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .text()
         .map_err(|e| e.to_string())
+}
+
+/// Sibling temp path for a verified download: `<dest>.tmp` in the same
+/// directory, so the final rename is atomic.
+fn download_tmp_path(dest: &std::path::Path) -> std::path::PathBuf {
+    let mut tmp = dest.as_os_str().to_owned();
+    tmp.push(".tmp");
+    std::path::PathBuf::from(tmp)
+}
+
+/// URL with any `?query` dropped. Update artifacts are public, but callers
+/// may reuse token-carrying URLs; errors and logs must never carry them.
+fn scrub_url(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
+}
+
+/// Blocking download client shared by the verified-download path. Plain
+/// thread use only, never the UI thread.
+fn download_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent(format!("ebbtop/{}", current_version()))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Download the release asset at `url`, verify its SHA-256 against the
+/// `asset` line of the `SHA256SUMS` text at `sums_url`, and move it to
+/// `dest` (spec design, section 2).
+///
+/// Bytes stream to `<dest>.tmp` with cumulative byte counts on `progress`
+/// (a dropped receiver is not an error); the hash is computed over the
+/// stream and compared before anything touches `dest`. Any failure —
+/// sums fetch, missing sums line, transport abort, hash mismatch, rename —
+/// deletes the partial and returns an error that never contains a URL
+/// query (where tokens travel).
+pub fn download_verified(
+    url: &str,
+    sums_url: &str,
+    asset: &str,
+    dest: &std::path::Path,
+    progress: &mpsc::Sender<u64>,
+) -> Result<(), String> {
+    let tmp = download_tmp_path(dest);
+    let result = download_verified_inner(url, sums_url, asset, &tmp, progress);
+    match result {
+        Ok(()) => std::fs::rename(&tmp, dest)
+            .map_err(|e| format!("download {}: {e}", scrub_url(url))),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+fn download_verified_inner(
+    url: &str,
+    sums_url: &str,
+    asset: &str,
+    tmp: &std::path::Path,
+    progress: &mpsc::Sender<u64>,
+) -> Result<(), String> {
+    use ebbtop_core::update::{find_hash_for_asset, hashes_match};
+    use sha2::Digest;
+    use std::io::{Read, Write};
+
+    let client = download_client()?;
+    let sums = client
+        .get(sums_url)
+        .send()
+        .map_err(|e| format!("sums fetch {}: {e}", scrub_url(sums_url)))?
+        .error_for_status()
+        .map_err(|e| format!("sums fetch {}: {e}", scrub_url(sums_url)))?
+        .text()
+        .map_err(|e| format!("sums fetch {}: {e}", scrub_url(sums_url)))?;
+    let expected = find_hash_for_asset(&sums, asset).ok_or_else(|| {
+        format!("no hash for {asset} in {}", scrub_url(sums_url))
+    })?;
+
+    let mut resp = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("download {}: {e}", scrub_url(url)))?
+        .error_for_status()
+        .map_err(|e| format!("download {}: {e}", scrub_url(url)))?;
+    let mut file =
+        std::fs::File::create(tmp).map_err(|e| format!("download {}: {e}", scrub_url(url)))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut done: u64 = 0;
+    let mut chunk = [0u8; 65536];
+    loop {
+        let n = resp
+            .read(&mut chunk)
+            .map_err(|e| format!("download {}: {e}", scrub_url(url)))?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&chunk[..n])
+            .map_err(|e| format!("download {}: {e}", scrub_url(url)))?;
+        hasher.update(&chunk[..n]);
+        done += n as u64;
+        let _ = progress.send(done);
+    }
+    file.flush()
+        .map_err(|e| format!("download {}: {e}", scrub_url(url)))?;
+    drop(file);
+    let digest = hasher.finalize();
+    let mut actual = String::with_capacity(64);
+    for b in digest.iter() {
+        actual.push_str(&format!("{b:02x}"));
+    }
+    if !hashes_match(&expected, &actual) {
+        return Err(format!("hash mismatch for {asset} from {}", scrub_url(url)));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -306,5 +422,164 @@ mod tests {
         c.accept();
         assert_eq!(c.status(), &UpdateStatus::Accepted { version: "v99.1.0".into() });
         assert!(!c.should_prompt(), "accepted version does not prompt");
+    }
+
+    // --- Verified download (spec section 2) ---
+
+    /// Body bytes for the download fixtures. The expected digest below is
+    /// the well-known SHA-256 of `"abc"`, independent of this crate.
+    const FIXTURE_BYTES: &[u8] = b"abc";
+    const FIXTURE_SHA256: &str =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+    /// Minimal loopback HTTP server for download tests: `routes` maps a
+    /// request path to its canned body. When `cut` names a path, that path
+    /// instead advertises the full length but sends only `cut.1` bytes and
+    /// drops the connection (mid-stream abort). Serves `hits` requests on a
+    /// spawned thread, then exits. Query strings are ignored when matching.
+    fn loopback_server(
+        routes: std::collections::HashMap<String, Vec<u8>>,
+        cut: Option<(String, usize)>,
+        hits: usize,
+    ) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().expect("loopback addr");
+        std::thread::spawn(move || {
+            for _ in 0..hits {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut buf = vec![0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let raw = head.split_whitespace().nth(1).unwrap_or("/");
+                let path = raw.split('?').next().unwrap_or("/").to_string();
+                if let Some((ref cut_path, at)) = cut
+                    && *cut_path == path
+                {
+                    let full = routes.get(&path).cloned().unwrap_or_default();
+                    let end = at.min(full.len());
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        full.len()
+                    );
+                    let _ = stream.write_all(&full[..end]);
+                    let _ = stream.flush();
+                    // Drop the connection mid-body: truncation, not a page.
+                    continue;
+                }
+                match routes.get(&path) {
+                    Some(body) => {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(body);
+                    }
+                    None => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Fresh scratch dir per test so parallel tests never share a file.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ebbtop-update-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    /// Entries (file names) currently in `dir`.
+    fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read scratch dir")
+            .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn download_verifies_good_file() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/ebbtop.exe".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{FIXTURE_SHA256}  ebbtop.exe\n").into_bytes(),
+        );
+        let base = loopback_server(routes, None, 2);
+        let dir = scratch_dir("good");
+        let dest = dir.join("ebbtop.exe");
+        let (tx, rx) = mpsc::channel();
+        download_verified(
+            &format!("{base}/ebbtop.exe"),
+            &format!("{base}/SHA256SUMS"),
+            "ebbtop.exe",
+            &dest,
+            &tx,
+        )
+        .expect("good download verifies");
+        assert_eq!(std::fs::read(&dest).expect("read back download"), FIXTURE_BYTES);
+        assert_eq!(dir_entries(&dir), vec!["ebbtop.exe"], "no temp left behind");
+        let progress: Vec<u64> = rx.try_iter().collect();
+        assert!(!progress.is_empty(), "progress reported during download");
+        assert_eq!(*progress.last().unwrap(), FIXTURE_BYTES.len() as u64);
+    }
+
+    #[test]
+    fn download_rejects_bad_hash() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/ebbtop.exe".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{}  ebbtop.exe\n", "0".repeat(64)).into_bytes(),
+        );
+        let base = loopback_server(routes, None, 2);
+        let dir = scratch_dir("badsums");
+        let dest = dir.join("ebbtop.exe");
+        let (tx, _rx) = mpsc::channel();
+        // A token-looking query rides along to prove errors never carry it.
+        let err = download_verified(
+            &format!("{base}/ebbtop.exe?token=s3cr3t"),
+            &format!("{base}/SHA256SUMS?token=s3cr3t"),
+            "ebbtop.exe",
+            &dest,
+            &tx,
+        )
+        .expect_err("tampered sums must fail");
+        assert!(!err.contains("s3cr3t"), "error leaked token: {err}");
+        assert!(dir_entries(&dir).is_empty(), "no file or partial left behind");
+    }
+
+    #[test]
+    fn download_abort_removes_partial() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/ebbtop.exe".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{FIXTURE_SHA256}  ebbtop.exe\n").into_bytes(),
+        );
+        // Sums fetch succeeds (1 hit); the asset stream drops after 1 byte.
+        let base = loopback_server(routes, Some(("/ebbtop.exe".to_string(), 1)), 2);
+        let dir = scratch_dir("abort");
+        let dest = dir.join("ebbtop.exe");
+        let (tx, _rx) = mpsc::channel();
+        download_verified(
+            &format!("{base}/ebbtop.exe"),
+            &format!("{base}/SHA256SUMS"),
+            "ebbtop.exe",
+            &dest,
+            &tx,
+        )
+        .expect_err("truncated download must fail");
+        assert!(dir_entries(&dir).is_empty(), "partial download removed");
     }
 }
