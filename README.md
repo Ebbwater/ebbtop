@@ -166,7 +166,7 @@ That produces `target/release/ebbtop` (and `ebbtop-probe`). Fetch the token with
 | EbbTop brand fold-in | pack vendored under `crates/ebbtop-gui/assets/brand/`; window icon bytes replaced (new rgba byte-identical to the pack's 64 px PNG decode; Pillow `tobytes` is straight alpha, matching `egui::IconData`); `build.rs` links the pack's 8-frame `ebbtop.ico` instead of generating a 64-only one; new `deploy/mac/package.sh` assembles `dist/EbbTop.app` (iconutil `.icns` from the hinted PNG ladder, ad-hoc sign fail-soft). Suite still green: core 36 + GUI 59, 2 ignored; Windows check clean (soft-fail warning path exercised) | `cargo test --workspace`, `cargo check --target x86_64-pc-windows-gnu`, 2026-11-09 |
 | Owned ebbtop-agent cutover | `agent/socktop_agent` deleted; `crates/ebbtop-agent` live via `deploy/install-agent.sh`: unit `active`, listening on its tailnet/LAN address only. Agent tests 15 + 7 integration pass; loopback probe (existing client, unchanged) clean; token gate verified (right token data, wrong token no samples); 30 s tailnet acceptance 30/30 samples, metrics p50 1000 / p95 1002 ms, GPU line present (`GTX 1650 ... temp=48C`), top ground truth matches. Old `socktop_agent` binary kept at `$SVC/bin/` for `--rollback` only | `cargo test -p ebbtop-agent`, `deploy/install-agent.sh`, `deploy/acceptance-kserver.sh 30`, 2026-11-09 |
 
-Not yet done: acceptance steps 1, 2 and 4 to 7 on the Windows desktop with recorded results (step 3, LIVE after launch, is seen). Step 4's scripted half is covered above (agent-side probe + `top` ground truth in the same run); the GUI-side comparison — EbbTop totals within 5 points of btop with matching top name/PID — still needs the desktop.
+Done on the Windows desktop: steps 1–6 pass (reboot launch, stacked layout, LIVE in 1 s, p95 1138 ms, btop match, no-SSH LIVE, reboot reconnect with no token prompt). Step 7 (overnight log) is still pending.
 
 ## Acceptance (brief steps 1 to 7)
 
@@ -189,12 +189,12 @@ opens nothing.
 
 | Step | Status | How to record it |
 |---|---|---|
-| 1. Reboot desktop, one-click launch | Not recorded | Reboot, click `EbbTop`. Note whether it launches with no dialog, date/time |
-| 2. Snap to half screen | Not recorded | Snap under 1100 px; note the stacked layout applies |
-| 3. LIVE within 10 s, `interval_p95 < 2000 ms` | Seen (LIVE after launch, per Evidence); the hovered `interval_p95` value is not recorded | Hover age after step 1/6 and note the value |
-| 4. btop accuracy | Not recorded | `btop` on the agent host side by side with EbbTop, or `deploy/acceptance-kserver.sh 30`; `top` numbers are per-core, divide by the host's thread count. Record total CPU/mem deltas (pass within 5 points) and top name/PID match with EbbTop sorted by CPU% |
-| 5. No SSH windows open, still LIVE | Not recorded | Close every SSH window first, then note LIVE |
-| 6. Reboot, one-click reconnect, no token prompt | Not recorded | Reboot, one click; reconnected with no token prompt, or not |
+| 1. Reboot desktop, one-click launch | Pass (2026-11-09) | Reboot, click `EbbTop`. Note whether it launches with no dialog, date/time |
+| 2. Snap to half screen | Pass (2026-11-09) | Snap under 1100 px; note the stacked layout applies |
+| 3. LIVE within 10 s, `interval_p95 < 2000 ms` | Pass: LIVE in 1 s, p95 1138 ms (2026-11-09) | Hover age after step 1/6 and note the value |
+| 4. btop accuracy | Pass (2026-11-09) | `btop` on the agent host side by side with EbbTop, or `deploy/acceptance-kserver.sh 30`; `top` numbers are per-core, divide by the host's thread count. Record total CPU/mem deltas (pass within 5 points) and top name/PID match with EbbTop sorted by CPU% |
+| 5. No SSH windows open, still LIVE | Pass (2026-11-09) | Close every SSH window first, then note LIVE |
+| 6. Reboot, one-click reconnect, no token prompt | Pass (2026-11-09) | Reboot, one click; reconnected with no token prompt, or not |
 | 7. Overnight log check | Not recorded | Next morning run the helper above (or `deploy/parse-ebbtop-log.sh <log>` on a copied log). Paste the VERDICT plus `gaps`/`reconnects`/`interval_p95` maxima. A `disconnected` line during sleep with recovery is expected |
 
 NVML pin note (resolved 2026-11-09): the host rebooted onto 595.99.02,

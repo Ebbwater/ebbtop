@@ -7,6 +7,8 @@ members = ["crates/ebbtop-core", "crates/ebbtop-gui", "crates/ebbtop-agent"]
 edition = "2024"
 version = "0.2.0"
 license = "MIT"
+repository = "https://github.com/Ebbwater/ebbtop"
+homepage = "https://github.com/Ebbwater/ebbtop"
 publish = false
 
 [profile.release]
