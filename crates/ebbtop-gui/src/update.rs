@@ -81,6 +81,18 @@ pub enum UpdateStatus {
     Ready { version: String, path: std::path::PathBuf },
 }
 
+/// One extra release file fetched (and hash-verified against the same
+/// `SHA256SUMS`) before the main asset on the download thread. Windows
+/// uses it for `install.ps1`, which is not the restart payload but must be
+/// present for the apply step.
+#[derive(Debug, Clone)]
+pub struct ExtraDownload {
+    pub url: String,
+    pub sums_url: String,
+    pub asset: String,
+    pub dest: std::path::PathBuf,
+}
+
 /// Background check plus prompt bookkeeping. The fetch runs on a spawned
 /// thread and reports back over a channel; `poll()` drains it without
 /// blocking. `fetch` is injected so tests never touch the network.
@@ -244,7 +256,11 @@ impl UpdateCheck {
     }
 
     /// Start the verified download on a thread; status moves to
-    /// `Downloading` at once. No-op while one is already running.
+    /// `Downloading` at once. No-op while one is already running. When
+    /// `extra` is present (Windows `install.ps1`), it is verified first on
+    /// the same thread; the outcome still lands in `Ready`/`Failed` as one
+    /// job, and a failed main asset removes the extra again so a failed
+    /// update leaves no files behind.
     pub fn start_download(
         &mut self,
         version: String,
@@ -252,6 +268,7 @@ impl UpdateCheck {
         sums_url: String,
         asset: String,
         dest: std::path::PathBuf,
+        extra: Option<ExtraDownload>,
     ) {
         if self.dl_rx.is_some() {
             return;
@@ -265,7 +282,24 @@ impl UpdateCheck {
         std::thread::Builder::new()
             .name("ebbtop-update-download".into())
             .spawn(move || {
-                let _ = out_tx.send(download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx));
+                let outcome = match &extra {
+                    Some(x) => {
+                        // Progress of the helper file would pollute the
+                        // dialog's MB counter; verify it on a dropped
+                        // receiver instead.
+                        let (null_tx, _) = mpsc::channel();
+                        match download_verified(&x.url, &x.sums_url, &x.asset, &x.dest, &null_tx) {
+                            Err(e) => Err(e),
+                            Ok(()) => download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx)
+                                .map_err(|e| {
+                                    let _ = std::fs::remove_file(&x.dest);
+                                    e
+                                }),
+                        }
+                    }
+                    None => download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx),
+                };
+                let _ = out_tx.send(outcome);
             })
             .ok();
     }
@@ -485,6 +519,39 @@ fn download_verified_inner(
 
 /// Startup shortcut name managed by `deploy/windows/install.ps1`.
 pub const STARTUP_SHORTCUT_NAME: &str = "EbbTop.lnk";
+
+/// Installer script asset in a release (Windows only). It is hash-covered
+/// by the same `SHA256SUMS` file as the exe, so the updater verifies it
+/// the same way. The running install does not keep a copy (the script only
+/// copies the exe into `%LOCALAPPDATA%\ebbtop`), so the updater downloads
+/// it fresh from the release into the temp dir next to the exe.
+pub const INSTALL_PS1_ASSET: &str = "install.ps1";
+
+/// Temp path for the downloaded installer script of a release version.
+/// Same scheme as the exe download, so restart derives it from the version
+/// alone without carrying a second path through `UpdateStatus`.
+pub fn windows_installer_dest(version: &str) -> std::path::PathBuf {
+    download_dest_path(version, INSTALL_PS1_ASSET)
+}
+
+/// Extra download for the Windows installer script of a release: the
+/// script's URL out of the release asset list, verified against the same
+/// `sums_url` as the exe, landing at [`windows_installer_dest`]. `None`
+/// when the release carries no `install.ps1` — the caller then fails the
+/// update instead of restarting without an installer.
+pub fn windows_installer_extra(
+    version: &str,
+    assets: &[ReleaseAsset],
+    sums_url: &str,
+) -> Option<ExtraDownload> {
+    let url = assets.iter().find(|a| a.name == INSTALL_PS1_ASSET)?.url.clone();
+    Some(ExtraDownload {
+        url,
+        sums_url: sums_url.to_string(),
+        asset: INSTALL_PS1_ASSET.to_string(),
+        dest: windows_installer_dest(version),
+    })
+}
 
 /// Full path of the Startup shortcut for a config dir (on Windows:
 /// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\EbbTop.lnk`).
@@ -800,6 +867,7 @@ mod tests {
             format!("{base}/SHA256SUMS"),
             "pkg.bin".into(),
             dest.clone(),
+            None,
         );
         assert!(matches!(c.status(), UpdateStatus::Downloading { .. }));
         for _ in 0..500 {
@@ -837,6 +905,7 @@ mod tests {
             format!("{base}/SHA256SUMS"),
             "pkg.bin".into(),
             dest.clone(),
+            None,
         );
         for _ in 0..500 {
             c.poll();
@@ -848,6 +917,119 @@ mod tests {
         assert!(matches!(c.status(), UpdateStatus::Failed(_)), "got {:?}", c.status());
         assert!(!dest.exists(), "no file left behind");
         assert!(dir_entries(&dir).is_empty(), "partial removed");
+    }
+
+    #[test]
+    fn download_extra_helper_lands_with_main() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/pkg.bin".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert("/helper.ps1".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{FIXTURE_SHA256}  pkg.bin\n{FIXTURE_SHA256}  helper.ps1\n").into_bytes(),
+        );
+        // Four hits: sums + file for the helper, then sums + file again
+        // for the main asset (each verified download re-fetches SHA256SUMS).
+        let base = loopback_server(routes, None, 4);
+        let dir = scratch_dir("extra-ok");
+        let dest = dir.join("pkg.bin");
+        let helper = dir.join("helper.ps1");
+        let mut c = UpdateCheck::new();
+        c.start_download(
+            "v9.9.9".into(),
+            format!("{base}/pkg.bin"),
+            format!("{base}/SHA256SUMS"),
+            "pkg.bin".into(),
+            dest.clone(),
+            Some(ExtraDownload {
+                url: format!("{base}/helper.ps1"),
+                sums_url: format!("{base}/SHA256SUMS"),
+                asset: "helper.ps1".into(),
+                dest: helper.clone(),
+            }),
+        );
+        for _ in 0..500 {
+            c.poll();
+            if matches!(c.status(), UpdateStatus::Ready { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(c.status(), UpdateStatus::Ready { .. }), "got {:?}", c.status());
+        assert_eq!(std::fs::read(&dest).expect("main asset"), FIXTURE_BYTES);
+        assert_eq!(std::fs::read(&helper).expect("helper asset"), FIXTURE_BYTES);
+    }
+
+    #[test]
+    fn download_extra_failure_leaves_nothing() {
+        let mut routes = std::collections::HashMap::new();
+        routes.insert("/pkg.bin".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert("/helper.ps1".to_string(), FIXTURE_BYTES.to_vec());
+        routes.insert(
+            "/SHA256SUMS".to_string(),
+            format!("{FIXTURE_SHA256}  pkg.bin\n{}  helper.ps1\n", "0".repeat(64)).into_bytes(),
+        );
+        let base = loopback_server(routes, None, 2);
+        let dir = scratch_dir("extra-bad");
+        let dest = dir.join("pkg.bin");
+        let mut c = UpdateCheck::new();
+        c.start_download(
+            "v9.9.9".into(),
+            format!("{base}/pkg.bin"),
+            format!("{base}/SHA256SUMS"),
+            "pkg.bin".into(),
+            dest,
+            Some(ExtraDownload {
+                url: format!("{base}/helper.ps1"),
+                sums_url: format!("{base}/SHA256SUMS"),
+                asset: "helper.ps1".into(),
+                dest: dir.join("helper.ps1"),
+            }),
+        );
+        for _ in 0..500 {
+            c.poll();
+            if matches!(c.status(), UpdateStatus::Failed(_)) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(c.status(), UpdateStatus::Failed(_)), "got {:?}", c.status());
+        assert!(dir_entries(&dir).is_empty(), "no file or partial left behind");
+    }
+
+    #[test]
+    fn windows_installer_extra_resolves_script_url() {
+        let assets = vec![
+            ReleaseAsset { name: "ebbtop.exe".into(), url: "http://x/e".into() },
+            ReleaseAsset { name: "SHA256SUMS".into(), url: "http://x/s".into() },
+            ReleaseAsset { name: INSTALL_PS1_ASSET.into(), url: "http://x/i".into() },
+        ];
+        let extra = windows_installer_extra("v0.3.0", &assets, "http://x/s")
+            .expect("release carries the installer script");
+        assert_eq!(extra.url, "http://x/i");
+        assert_eq!(extra.sums_url, "http://x/s");
+        assert_eq!(extra.asset, INSTALL_PS1_ASSET);
+        assert_eq!(extra.dest, windows_installer_dest("v0.3.0"));
+    }
+
+    #[test]
+    fn windows_installer_extra_missing_script_is_none() {
+        let assets = vec![
+            ReleaseAsset { name: "ebbtop.exe".into(), url: "http://x/e".into() },
+            ReleaseAsset { name: "SHA256SUMS".into(), url: "http://x/s".into() },
+        ];
+        assert!(windows_installer_extra("v0.3.0", &assets, "http://x/s").is_none());
+    }
+
+    #[test]
+    fn windows_installer_dest_names_versioned_script() {
+        let p = windows_installer_dest("v0.3.0");
+        assert_eq!(p.file_name().unwrap(), "ebbtop-update-v0.3.0-install.ps1");
+        assert_eq!(
+            p.parent(),
+            download_dest_path("v0.3.0", "ebbtop.exe").parent(),
+            "installer sits next to the exe download"
+        );
     }
 
     #[test]

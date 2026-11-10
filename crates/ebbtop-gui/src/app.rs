@@ -1914,7 +1914,9 @@ impl App {
     }
 
     /// Start the verified download for the accepted release (spec design,
-    /// section 2). Resolves this platform's asset plus `SHA256SUMS` from
+    /// section 2). On Windows the release's `install.ps1` rides along as a
+    /// verified extra so the restart step has an installer. Resolves this
+    /// platform's asset plus `SHA256SUMS` from
     /// the carried asset list; a platform with no served asset, or a
     /// release without the needed URLs, lands in `Failed` with the reason.
     fn begin_update_download(&mut self) {
@@ -1937,8 +1939,22 @@ impl App {
             }
         };
         let dest = update::download_dest_path(&version, asset);
+        // Windows needs the installer script next to the exe for the
+        // restart step; it shares the release's SHA256SUMS, so it rides
+        // along as a verified extra on the same job. Other platforms apply
+        // with system tools and download nothing extra.
+        #[cfg(windows)]
+        let extra = update::windows_installer_extra(&version, &assets, &urls.1);
+        #[cfg(windows)]
+        if extra.is_none() {
+            self.update.set_failed(format!("release {version} has no installer for this platform"));
+            return;
+        }
+        #[cfg(not(windows))]
+        let extra: Option<update::ExtraDownload> = None;
         store::append_log(&format!("update download start version={version} asset={asset}"));
-        self.update.start_download(version, urls.0, urls.1, asset.to_string(), dest);
+        self.update
+            .start_download(version, urls.0, urls.1, asset.to_string(), dest, extra);
     }
 
     /// "Download update" pressed: approve and clear any earlier skip.
@@ -1974,9 +1990,9 @@ impl App {
         self.update_open = false;
     }
 
-    /// "Restart to update" pressed (macOS slice; Windows lands next):
-    /// swap in the verified bundle, relaunch, and quit. Anything missing
-    /// lands in `Failed` — a bad path never kills the running app.
+    /// "Restart to update" pressed: run the verified installer (Windows) or
+    /// swap in the verified bundle (macOS), relaunch, and quit. Anything
+    /// missing lands in `Failed` — a bad path never kills the running app.
     fn restart_for_update(&mut self, ctx: &egui::Context) {
         let (version, path) = match self.update.status() {
             UpdateStatus::Ready { version, path } => (version.clone(), path.clone()),
@@ -2000,10 +2016,23 @@ impl App {
                 },
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            let ps1 = update::windows_installer_dest(&version);
+            match update::apply_update_windows(&path, &ps1) {
+                Ok(()) => {
+                    store::append_log(&format!(
+                        "update applied version={version}; restarting"
+                    ));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                Err(e) => self.update.set_failed(e),
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (ctx, &version, &path);
-            self.update.set_failed("restart-to-update on Windows lands in the next slice".into());
+            self.update.set_failed("updates are not served for this platform".into());
         }
     }
 }

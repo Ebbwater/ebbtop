@@ -29,10 +29,13 @@ cargo build --release --locked --target "$T" -p ebbtop-gui -p ebbtop-core
 mkdir -p dist
 cp "target/$T/release/ebbtop.exe" "target/$T/release/ebbtop-probe.exe" dist/
 cp deploy/windows/install.ps1 dist/
-# Refuse to ship an exe that needs a non-system DLL.
+# Refuse to ship an exe that needs a non-system DLL. bcrypt.dll is inbox
+# since Vista (like the bcryptprimitives.dll already listed): rustls/ring
+# uses BCryptGenRandom on Windows, so the updater's verified-download stack
+# added it to the import table in 0.2.1 (v0.2.0 predates reqwest).
 for f in dist/ebbtop.exe dist/ebbtop-probe.exe; do
   extra=$("$LM/llvm-objdump" -p "$f" | awk '/DLL Name/{print $3}' | sort -u |
-    grep -viE '^(api-ms-win-|advapi32|bcryptprimitives|combase|dwmapi|gdi32|imm32|kernel32|ntdll|ole32|oleaut32|opengl32|shell32|uiautomationcore|user32|uxtheme|ws2_32)' || true)
+    grep -viE '^(api-ms-win-|advapi32|bcrypt|bcryptprimitives|combase|dwmapi|gdi32|imm32|kernel32|ntdll|ole32|oleaut32|opengl32|shell32|uiautomationcore|user32|uxtheme|ws2_32)' || true)
   [[ -z "$extra" ]] || { echo "$f imports non-system DLLs: $extra"; exit 1; }
 done
 (cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 > SHA256SUMS)
