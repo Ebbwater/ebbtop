@@ -15,6 +15,7 @@ use ebbtop_core::wire::{KillJob, KillSignal};
 use tokio::sync::mpsc;
 
 use crate::store::{self, Config, TokenSource};
+use crate::update::{self, UpdateCheck, UpdateStatus};
 use crate::widgets::{self as w, panel};
 
 const STALE_MS: i64 = 2000;
@@ -79,6 +80,7 @@ enum SettingsTab {
     Sources,
     Display,
     Connection,
+    Updates,
 }
 
 /// First-run wizard state. Present while the user has no sources and has
@@ -137,6 +139,13 @@ pub struct App {
     /// UI forever. Settings/onboarding call use_active_source after the
     /// lock is dropped, so they are unaffected.
     pending_source: Option<usize>,
+    /// Background release check (spec section 1) + update dialog state.
+    update: UpdateCheck,
+    update_open: bool,
+    /// Launch + interval re-checks. True in the running app; false for
+    /// harness-built apps so tests (which drive `start()` explicitly)
+    /// never spawn the real GitHub fetch from `draw`.
+    update_auto: bool,
 }
 
 fn local_time(ms: u64) -> String {
@@ -177,6 +186,9 @@ impl App {
         style_with(&ctx, app.cfg.compact);
         app.settings_open = app.token.is_none() && app.onboard.is_none();
         app.start_client(&ctx);
+        // Launch release check on its own thread; never blocks startup.
+        app.update_auto = true;
+        app.update.start(update::fetch_latest_release);
         app.update_title(&ctx);
         app
     }
@@ -211,6 +223,9 @@ impl App {
             kill_tx: None,
             kill_note: None,
             pending_source: None,
+            update: UpdateCheck::new(),
+            update_open: false,
+            update_auto: false,
         }
     }
 
@@ -274,6 +289,28 @@ impl App {
     }
 
     pub fn draw(&mut self, ui: &mut Ui) {
+        // Release check bookkeeping: drain a finished check (logging the
+        // outcome), re-check at the interval, and pop the dialog for a
+        // version the user has not seen yet. The fetch runs on its own
+        // thread; none of this blocks the frame.
+        if self.update.poll() {
+            match self.update.status() {
+                UpdateStatus::Available { version } => store::append_log(&format!(
+                    "update available {version} (current {})", update::current_version())),
+                UpdateStatus::UpToDate { version } => {
+                    store::append_log(&format!("update check up to date {version}"));
+                }
+                UpdateStatus::Failed(e) => store::append_log(&format!("update check failed: {e}")),
+                _ => {}
+            }
+        }
+        if self.update_auto && self.update.due() {
+            self.update.start(update::fetch_latest_release);
+        }
+        if self.update.should_prompt() {
+            self.update_open = true;
+            self.update.mark_notified();
+        }
         let now = client::now_ms();
         let shared = self.shared.clone();
         let st = shared.lock().unwrap_or_else(|e| e.into_inner());
@@ -360,6 +397,9 @@ impl App {
 
         if self.settings_open {
             self.settings(ui.ctx());
+        }
+        if self.update_open {
+            self.update_dialog(ui.ctx());
         }
         if self.onboard.is_some() {
             self.onboarding(ui.ctx());
@@ -568,6 +608,23 @@ impl App {
                 if let Some(note) = &self.kill_note {
                     ui.label(RichText::new(note).monospace().color(w::DIM));
                 }
+            }
+            // Release check outcome: an available release gets a prompt
+            // button; a failed check is a quiet note (spec: retry next
+            // interval, app runs as before).
+            match self.update.status() {
+                UpdateStatus::Available { version } => {
+                    let version = version.clone();
+                    ui.label(RichText::new(format!("update {version} ready")).monospace().color(w::WARN));
+                    if ui.button("Update").clicked() {
+                        self.update_open = true;
+                        self.update.mark_notified();
+                    }
+                }
+                UpdateStatus::Failed(_) if !narrow => {
+                    ui.label(RichText::new("update check failed").monospace().color(w::DIM));
+                }
+                _ => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Settings").clicked() {
@@ -1507,6 +1564,7 @@ impl App {
                         (SettingsTab::Sources, "Sources"),
                         (SettingsTab::Display, "Display"),
                         (SettingsTab::Connection, "Connection"),
+                        (SettingsTab::Updates, "Updates"),
                     ] {
                         if ui.selectable_label(self.settings_tab == tab, label).clicked() {
                             self.settings_tab = tab;
@@ -1522,6 +1580,7 @@ impl App {
                             save = true;
                         }
                     }
+                    SettingsTab::Updates => self.settings_updates(ui),
                 }
             });
         if save {
@@ -1704,6 +1763,77 @@ impl App {
             }
         }
         self.start_client(ctx);
+    }
+
+    /// Updates tab: current version, last check outcome, manual check.
+    fn settings_updates(&mut self, ui: &mut Ui) {
+        ui.label(RichText::new(format!("EbbTop {}", update::current_version())).strong().color(w::TEXT));
+        let status = match self.update.status() {
+            UpdateStatus::Idle => "never checked".to_string(),
+            UpdateStatus::Checking => "checking…".to_string(),
+            UpdateStatus::Available { version } => format!("{version} available"),
+            UpdateStatus::UpToDate { version } => format!("up to date ({version})"),
+            UpdateStatus::Failed(e) => format!("check failed: {e}"),
+            UpdateStatus::Accepted { version } => format!("{version} approved"),
+        };
+        ui.label(RichText::new(status).monospace().color(w::DIM));
+        ui.add_space(6.0);
+        if ui.button("Check for updates").clicked() {
+            self.update.start(update::fetch_latest_release);
+        }
+        // Re-offer a declined-but-still-available release without
+        // re-popping the dialog.
+        if let UpdateStatus::Available { version } = self.update.status() {
+            let version = version.clone();
+            ui.add_space(6.0);
+            if ui.button(format!("Download update {version}")).clicked() {
+                self.update_open = true;
+                self.update.mark_notified();
+            }
+        }
+    }
+
+    /// Update prompt: names the new release next to this build's version.
+    /// Download accepts (the download task consumes `Accepted`); Later
+    /// declines and stays quiet until a newer release appears.
+    fn update_dialog(&mut self, ctx: &egui::Context) {
+        let version = match self.update.status() {
+            UpdateStatus::Available { version } => version.clone(),
+            _ => {
+                self.update_open = false;
+                return;
+            }
+        };
+        let mut open = self.update_open;
+        let mut accepted = false;
+        let mut declined = false;
+        egui::Window::new("Update available")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "EbbTop {version} is available (you have {}).",
+                    update::current_version()
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Download update").clicked() {
+                        accepted = true;
+                    }
+                    if ui.button("Later").clicked() {
+                        declined = true;
+                    }
+                });
+            });
+        if accepted {
+            self.update.accept();
+            store::append_log(&format!("update accepted version={version}"));
+        } else if declined {
+            self.update.decline();
+            store::append_log(&format!("update declined version={version}"));
+        }
+        self.update_open = open && !accepted && !declined;
     }
 }
 
@@ -2051,6 +2181,54 @@ mod tests {
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("Sources")), "sources tab missing: {t:?}");
         assert!(t.iter().any(|x| x.contains("Display")), "display tab missing: {t:?}");
+    }
+
+    /// Spin a locally injected check to completion without touching the
+    /// network, so render tests never spawn the real GitHub fetch.
+    fn settle_update(app: &mut App) {
+        for _ in 0..500 {
+            if app.update.poll() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("update check thread did not report");
+    }
+
+    #[test]
+    fn updates_tab_offers_manual_check() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.settings_open = true;
+        app.settings_tab = SettingsTab::Updates;
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("Updates")), "updates tab missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("Check for updates")), "manual check missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains(update::current_version())), "current version missing: {t:?}");
+    }
+
+    #[test]
+    fn available_update_prompts_with_version() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+        settle_update(&mut app);
+        // The frame pops the dialog on its own; no manual open needed.
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("v99.7.0")), "new version missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("Download update")), "accept missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("Later")), "decline missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("update v99.7.0 ready")), "status note missing: {t:?}");
+    }
+
+    #[test]
+    fn failed_check_shows_quiet_note_and_runs_as_before() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        fake_state(&app, client::now_ms());
+        app.update.start(|| Err("offline".into()));
+        settle_update(&mut app);
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("update check failed")), "quiet note missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains(" LIVE ")), "app should run as before: {t:?}");
+        assert!(!t.iter().any(|x| x.contains("Download update")), "no dialog on failure: {t:?}");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 mod app;
 mod store;
+mod update;
 mod widgets;
 
 /// Best-effort crash reporter: the Windows GUI subsystem hides stderr, so a
