@@ -101,13 +101,74 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Build the connect URL with the token as a query parameter (agent contract).
-pub fn connect_url(base: &str, token: Option<&str>) -> anyhow::Result<url::Url> {
-    let mut u = url::Url::parse(base)?;
+/// Agent TCP port. The wizard assumes it when the user types a bare host.
+pub const AGENT_PORT: u16 = 45976;
+
+/// Agent token shape: 32 random bytes hex (64 hex chars) in `ebbtop.token`.
+pub const AGENT_TOKEN_HEX_LEN: usize = 64;
+
+/// Normalize what the user typed into a full `ws(s)://host:port/path` URL.
+///
+/// Accepts a bare hostname/IP (`k-server`), `host:port`, or a full URL.
+/// Missing scheme defaults to `ws://`, missing port to [`AGENT_PORT`],
+/// and an empty/`/` path to `/ws`. An explicit `wss://`, port, or path is
+/// kept. Leading/trailing whitespace is ignored.
+pub fn normalize_base_url(raw: &str) -> anyhow::Result<String> {
+    let t = raw.trim();
     anyhow::ensure!(
-        matches!(u.scheme(), "ws" | "wss"),
-        "url must start with ws:// or wss://"
+        !t.is_empty(),
+        "URL is empty: enter a host like 192.168.1.10 or ws://host:45976/ws"
     );
+    let with_scheme = if t.contains("://") { t.to_string() } else { format!("ws://{t}") };
+    let mut u =
+        url::Url::parse(&with_scheme).map_err(|e| anyhow::anyhow!("bad URL {raw:?}: {e}"))?;
+    match u.scheme() {
+        "ws" | "wss" => {}
+        s => anyhow::bail!("bad URL: scheme {s:?} must be ws:// or wss://"),
+    }
+    if u.host_str().unwrap_or("").is_empty() {
+        anyhow::bail!("bad URL {raw:?}: missing host");
+    }
+    if u.port().is_none() {
+        u.set_port(Some(AGENT_PORT))
+            .map_err(|_| anyhow::anyhow!("bad URL {raw:?}: cannot set port"))?;
+    }
+    if u.path().is_empty() || u.path() == "/" {
+        u.set_path("/ws");
+    }
+    Ok(u.as_str().to_string())
+}
+
+/// Strip surrounding whitespace (including pasted newlines) from a token.
+/// Internal whitespace is dropped too: tokens are one hex word.
+pub fn clean_token(raw: &str) -> String {
+    raw.split_whitespace().collect()
+}
+
+/// Advisory shape check for a cleaned token. `None` means it looks like an
+/// agent token; `Some(msg)` is a warning, never an error (old tokens and
+/// test values still connect).
+pub fn token_warning(cleaned: &str) -> Option<String> {
+    if cleaned.is_empty() {
+        return None;
+    }
+    let hex = cleaned.len() == AGENT_TOKEN_HEX_LEN
+        && cleaned.bytes().all(|b| b.is_ascii_hexdigit());
+    if hex {
+        None
+    } else {
+        Some(
+            "token looks unusual: the agent token is 64 hex characters from ebbtop.token".to_string(),
+        )
+    }
+}
+
+/// Build the connect URL with the token as a query parameter (agent contract).
+/// The base is normalized first (see [`normalize_base_url`]), so a bare
+/// hostname works everywhere a full URL does.
+pub fn connect_url(base: &str, token: Option<&str>) -> anyhow::Result<url::Url> {
+    let normalized = normalize_base_url(base)?;
+    let mut u = url::Url::parse(&normalized)?;
     if let Some(t) = token.filter(|t| !t.is_empty()) {
         u.query_pairs_mut().append_pair("token", t);
     }
@@ -334,6 +395,52 @@ mod tests {
         assert_eq!(u.as_str(), "ws://h:1/ws?token=a+b%26c");
         assert_eq!(connect_url("ws://h:1/ws", None).unwrap().as_str(), "ws://h:1/ws");
         assert!(connect_url("http://h/ws", None).is_err());
+    }
+
+    #[test]
+    fn normalize_bare_host_gets_defaults() {
+        assert_eq!(
+            normalize_base_url("myserver").unwrap(),
+            "ws://myserver:45976/ws"
+        );
+        assert_eq!(
+            normalize_base_url("  192.168.1.10  ").unwrap(),
+            "ws://192.168.1.10:45976/ws"
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_explicit_parts() {
+        assert_eq!(
+            normalize_base_url("192.168.1.10:1234").unwrap(),
+            "ws://192.168.1.10:1234/ws"
+        );
+        assert_eq!(
+            normalize_base_url("wss://h:1/custom").unwrap(),
+            "wss://h:1/custom"
+        );
+        assert_eq!(
+            normalize_base_url("ws://h/ws").unwrap(),
+            "ws://h:45976/ws"
+        );
+        assert!(normalize_base_url("http://h/ws").is_err());
+        assert!(normalize_base_url("   ").is_err());
+    }
+
+    #[test]
+    fn connect_url_accepts_bare_host() {
+        let u = connect_url("myserver", Some("t")).unwrap();
+        assert_eq!(u.as_str(), "ws://myserver:45976/ws?token=t");
+    }
+
+    #[test]
+    fn token_clean_and_warning() {
+        assert_eq!(clean_token("  abc\n"), "abc");
+        assert_eq!(clean_token("a b c"), "abc");
+        let good = "a".repeat(64);
+        assert!(token_warning(&good).is_none());
+        assert!(token_warning("short").is_some());
+        assert!(token_warning("").is_none());
     }
 
     #[test]

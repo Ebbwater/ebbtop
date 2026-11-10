@@ -91,6 +91,11 @@ struct Onboard {
     msg: Option<String>,
     rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     testing: bool,
+    /// Triple (name, normalized URL, cleaned token) of the last green Test.
+    /// `Save and connect` is gated on this matching the current fields.
+    tested: Option<(String, String, String)>,
+    /// Triple the in-flight probe is testing (set at spawn, checked at poll).
+    probe_for: Option<(String, String, String)>,
 }
 
 pub struct App {
@@ -1176,29 +1181,42 @@ impl App {
     }
 
     /// Name/URL checks shared by Settings add and the onboarding test.
-    fn validate_source(&self, name: &str, url: &str) -> Result<(), String> {
+    /// Returns the normalized URL (`ws(s)://host:port/path` with the agent
+    /// port and `/ws` assumed) so callers store and probe one value.
+    fn validate_source(&self, name: &str, url: &str) -> Result<String, String> {
         let name = name.trim();
-        let url = url.trim();
         if name.is_empty() {
             return Err("name is empty".to_string());
         }
         if self.cfg.sources.iter().any(|s| s.name == name) {
             return Err(format!("source \"{name}\" already exists"));
         }
-        if let Err(e) = client::connect_url(url, None) {
-            return Err(format!("bad URL: {e}"));
-        }
-        Ok(())
+        client::normalize_base_url(url).map_err(|e| format!("bad URL: {e}"))
     }
 
     /// Validate and append a source. Pure cfg mutation; the caller saves.
+    /// The stored URL is the normalized form (bare hosts gain `ws://`,
+    /// port 45976 and `/ws`).
     fn add_source(&mut self, name: &str, url: &str) -> Result<(), String> {
-        self.validate_source(name, url)?;
-        self.cfg.sources.push(store::Source { name: name.trim().to_string(), url: url.trim().to_string() });
+        let normalized = self.validate_source(name, url)?;
+        self.cfg.sources.push(store::Source { name: name.trim().to_string(), url: normalized });
         if self.cfg.sources.len() == 1 {
             self.cfg.active = 0;
         }
         Ok(())
+    }
+
+    /// Current wizard triple: (trimmed name, normalized URL or "", cleaned
+    /// token). Used to gate Save on a green Test of these exact values.
+    fn onboard_current(&self) -> (String, String, String) {
+        match self.onboard.as_ref() {
+            Some(ob) => (
+                ob.name.trim().to_string(),
+                client::normalize_base_url(&ob.url).unwrap_or_default(),
+                client::clean_token(&ob.token),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        }
     }
 
     /// Remove a source and keep `active` valid. Pure cfg mutation; the
@@ -1272,15 +1290,21 @@ impl App {
             Some(ob) => (ob.name.clone(), ob.url.clone(), ob.token.clone()),
             None => return,
         };
-        if let Err(e) = self.validate_source(&name, &url) {
-            if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some(e);
+        let normalized = match self.validate_source(&name, &url) {
+            Ok(u) => u,
+            Err(e) => {
+                if let Some(ob) = self.onboard.as_mut() {
+                    ob.msg = Some(e);
+                }
+                return;
             }
-            return;
-        }
-        if tok.trim().is_empty() {
+        };
+        let tok = client::clean_token(&tok);
+        if tok.is_empty() {
             if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some("paste the agent token".to_string());
+                ob.msg = Some(
+                    "paste the agent token: on the agent host run `ssh user@host cat services/ebbtop-agent/ebbtop.token`".to_string(),
+                );
             }
             return;
         }
@@ -1295,36 +1319,42 @@ impl App {
             ob.rx = Some(rx);
             ob.testing = true;
             ob.msg = None;
+            ob.probe_for = Some((name.trim().to_string(), normalized.clone(), tok.clone()));
         }
-        let tok = tok.trim().to_string();
         rt.spawn(async move {
-            let r = client::probe_once(&url, Some(tok.as_str()), Duration::from_secs(5)).await;
+            let r = client::probe_once(&normalized, Some(tok.as_str()), Duration::from_secs(5)).await;
             let _ = tx.send(r.map(|ok| ok.hostname));
         });
     }
 
-    /// Wizard save: validates, stores the source + token, connects. A
-    /// keyring failure keeps the token for this session (as in Settings)
-    /// rather than blocking first run.
+    /// Wizard save: requires a green Test of the exact current values, then
+    /// stores the source + token and connects. A keyring failure keeps the
+    /// token for this session (as in Settings) rather than blocking first run.
     fn onboard_save(&mut self, ctx: &egui::Context) {
-        let (name, url, tok) = match self.onboard.as_ref() {
-            Some(ob) => (ob.name.clone(), ob.url.clone(), ob.token.clone()),
-            None => return,
-        };
-        if tok.trim().is_empty() {
+        let current = self.onboard_current();
+        let tested_ok = self.onboard.as_ref().and_then(|ob| ob.tested.clone()) == Some(current.clone());
+        if !tested_ok {
             if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some("paste the agent token".to_string());
+                ob.msg = Some("Test the connection first — Save unlocks after a green Test for these exact values".to_string());
             }
             return;
         }
-        if let Err(e) = self.add_source(&name, &url) {
+        let (name, _, tok) = current;
+        if tok.is_empty() {
+            if let Some(ob) = self.onboard.as_mut() {
+                ob.msg = Some(
+                    "paste the agent token: on the agent host run `ssh user@host cat services/ebbtop-agent/ebbtop.token`".to_string(),
+                );
+            }
+            return;
+        }
+        if let Err(e) = self.add_source(&name, &self.onboard.as_ref().map(|ob| ob.url.clone()).unwrap_or_default()) {
             if let Some(ob) = self.onboard.as_mut() {
                 ob.msg = Some(e);
             }
             return;
         }
         self.cfg.active = self.cfg.sources.len() - 1;
-        let tok = tok.trim().to_string();
         let user = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_default();
         match store::save_token_for(&user, &tok) {
             Ok(()) => self.token_src = TokenSource::Keyring,
@@ -1334,7 +1364,7 @@ impl App {
             }
         }
         self.token = Some(tok);
-        self.url_edit = url;
+        self.url_edit = self.cfg.active_source().map(|s| s.url.clone()).unwrap_or_default();
         let _ = store::save_config(&self.cfg);
         self.onboard = None;
         self.start_client(ctx);
@@ -1350,10 +1380,17 @@ impl App {
                 Some(r) => {
                     ob.testing = false;
                     ob.rx = None;
-                    ob.msg = Some(match r {
-                        Ok(host) => format!("connected: {host}"),
-                        Err(e) => client::probe_hint(&e),
-                    });
+                    match r {
+                        Ok(host) => {
+                            ob.tested = ob.probe_for.clone();
+                            ob.msg = Some(format!("connected: {host}"));
+                        }
+                        Err(e) => {
+                            ob.tested = None;
+                            ob.msg = Some(client::probe_hint(&e));
+                        }
+                    }
+                    ob.probe_for = None;
                 }
                 None if ob.rx.is_none() => ob.testing = false,
                 None => {}
@@ -1368,9 +1405,22 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.label("Add your first host. The token is stored in the OS credential store.");
+                ui.label(RichText::new("Agent port 45976; token file ~/services/ebbtop-agent/ebbtop.token on the agent host.").small().color(w::DIM));
+                ui.label(RichText::new("Fetch it with: ssh user@host cat services/ebbtop-agent/ebbtop.token (| pbcopy / | Set-Clipboard)").small().color(w::DIM));
+                ui.label(RichText::new("Tip: a bare hostname works — ws://, :45976 and /ws are added.").small().color(w::DIM));
                 ui.add_space(6.0);
                 let mut test = false;
                 let mut save = false;
+                // Snapshot for the gated Save button; computed before the
+                // mutable borrow of the wizard fields below.
+                let current = self.onboard_current();
+                let tested = self.onboard.as_ref().and_then(|ob| ob.tested.clone());
+                let can_save = tested.is_some() && tested == Some(current.clone())
+                    && !current.0.is_empty()
+                    && !current.1.is_empty()
+                    && !current.2.is_empty();
+                let assumed = if current.1.is_empty() { None } else { Some(current.1.clone()) };
+                let tok_warn = client::token_warning(&current.2);
                 {
                     let ob = self.onboard.as_mut().expect("wizard open");
                     egui::Grid::new("onboard").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
@@ -1378,24 +1428,34 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver"));
                         ui.end_row();
                         ui.label("URL");
-                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text("ws://host:port/ws"));
+                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text("myserver or ws://host:45976/ws"));
                         ui.end_row();
                         ui.label("Token");
                         ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text("paste the agent token"));
                         ui.end_row();
                     });
+                    if let Some(u) = assumed {
+                        ui.label(RichText::new(format!("will connect to {u}")).small().color(w::DIM));
+                    }
+                    if let Some(w) = tok_warn {
+                        ui.label(RichText::new(w).small().color(w::WARN));
+                    }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button("Test").clicked() {
                             test = true;
                         }
-                        if ui.button("Save and connect").clicked() {
+                        let save_btn = ui.add_enabled(can_save, egui::Button::new("Save and connect"));
+                        if save_btn.clicked() {
                             save = true;
                         }
                         if ui.button("Skip").clicked() {
                             skip = true;
                         }
                     });
+                    if !can_save {
+                        ui.label(RichText::new("Save unlocks after a green Test for these exact values.").small().color(w::DIM));
+                    }
                     if ob.testing {
                         ui.label(RichText::new("testing…").color(w::DIM));
                     }
@@ -2103,6 +2163,30 @@ mod tests {
         app.add_source("b", "ws://b/ws").expect("valid add");
         assert_eq!(app.cfg.sources.len(), 1);
         assert_eq!(app.cfg.sources[0].name, "b");
+    }
+
+    #[test]
+    fn validate_source_normalizes_bare_host() {
+        let app = App::with(Config::default(), None, TokenSource::Missing, None);
+        let normalized = app.validate_source("h", "myserver").expect("bare host must pass");
+        assert_eq!(normalized, "ws://myserver:45976/ws");
+    }
+
+    #[test]
+    fn onboard_save_requires_green_test() {
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        {
+            let ob = app.onboard.as_mut().unwrap();
+            ob.name = "h".into();
+            ob.url = "ws://127.0.0.1:1/ws".into();
+            ob.token = "s3cr3t".into();
+        }
+        let ctx = egui::Context::default();
+        app.onboard_save(&ctx);
+        assert!(app.onboard.is_some(), "save must not complete before a green Test");
+        assert!(app.cfg.sources.is_empty(), "no source without a green Test");
+        let m = app.onboard.as_ref().unwrap().msg.clone().unwrap_or_default();
+        assert!(m.contains("Test"), "unhelpful: {m}");
     }
 
     fn ring_with_rate(rx: f64, tx: f64) -> Ring<NetRate> {
