@@ -5,6 +5,7 @@
 #    ground truth for the "top process name/PID match" check.
 # Prints no secret. Usage: deploy/acceptance-kserver.sh [seconds]
 set -euo pipefail
+export PATH="$HOME/.cargo/bin:$PATH"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SECS="${1:-60}"
 TOKEN_FILE="${EBBTOP_TOKEN_FILE:-$HOME/services/ebbtop-agent/ebbtop.token}"
