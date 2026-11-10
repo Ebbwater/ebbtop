@@ -40,6 +40,8 @@ New proto fields are additive. The client decodes a legacy agent too, with empty
 
 ## Install
 
+Prebuilt binaries live on the [Releases page](https://github.com/Ebbwater/ebbtop/releases): `ebbtop.exe` + `ebbtop-probe.exe` + `install.ps1` (Windows), `EbbTop.app.zip` (macOS). The agent binary is built on the host itself by `install-agent.sh` (one Rust toolchain, no download).
+
 ### Agent host (Linux)
 
 ```
@@ -62,20 +64,24 @@ host.
 
 ### Windows client
 
-Prebuilt (cross-built on Linux by `deploy/cross-build-windows.sh`: llvm-mingw, static CRT, only system DLLs, refuses to ship otherwise). In PowerShell on the desktop:
+Download `ebbtop.exe`, `ebbtop-probe.exe`, `install.ps1` and `SHA256SUMS` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases) and compare hashes. In PowerShell on the desktop:
 
 ```
 mkdir $env:TEMP\ebbtop; cd $env:TEMP\ebbtop
-scp "<user>@<agent-host>:ebbtop/dist/*" .
+# (place the four downloaded files here)
 Get-FileHash ebbtop.exe -Algorithm SHA256      # compare with SHA256SUMS
 powershell -ExecutionPolicy Bypass -File install.ps1 -Exe .\ebbtop.exe -Autostart
-ssh <user>@<agent-host> cat services/ebbtop-agent/ebbtop.token | Set-Clipboard
 ```
+
+Or fetch the same files from the build host with
+`scp "<user>@<agent-host>:ebbtop/dist/*" .` (same hashes as the release).
+Fetch the agent token with
+`ssh <user>@<agent-host> cat services/ebbtop-agent/ebbtop.token | Set-Clipboard`.
 
 Then click `EbbTop` on the Desktop: the onboarding wizard takes the host
 URL and token once (Test checks the connection before saving).
 
-Or build natively, about 1 GB, no Visual Studio (no C dependencies in the Windows graph):
+Only build from source if you are changing the client (about 1 GB toolchain, no Visual Studio, no C dependencies in the Windows graph):
 
 ```
 winget install Rustlang.Rustup                       # once
@@ -90,7 +96,9 @@ Config: `%APPDATA%\ebbtop\config.json` (sources, graph window, interface, disk p
 
 ### macOS client
 
-Same workspace, no VM and no exe change: `ebbtop` builds natively on Apple
+Easiest: download `EbbTop.app.zip` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases), unzip, and `open EbbTop.app` (or drag it to /Applications; first launch may need right-click > Open — the bundle is ad-hoc signed). Then onboard with the host URL and token as below.
+
+Or build from source. Same workspace, no VM and no exe change: `ebbtop` builds natively on Apple
 Silicon (`aarch64-apple-darwin`). `ebbtop-core` has no
 Windows-only APIs (tokio/tungstenite, prost, serde, flate2 only); the only
 OS-specific code in `ebbtop-gui` is the `windows_subsystem` cfg (a no-op on
