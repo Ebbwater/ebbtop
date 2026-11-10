@@ -6,7 +6,8 @@
 //! is a quiet status-bar note + log line; the next check runs at the next
 //! interval. Accepting records the approved version; `download_verified`
 //! streams the asset to `<dest>.tmp`, hash-checks it against `SHA256SUMS`,
-//! and renames on success. Apply and restart are later tasks.
+//! and renames on success. Windows apply spawns the installer detached
+//! (the caller then quits); macOS apply is a later task.
 
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -325,6 +326,104 @@ fn download_verified_inner(
     Ok(())
 }
 
+/// Startup shortcut name managed by `deploy/windows/install.ps1`.
+pub const STARTUP_SHORTCUT_NAME: &str = "EbbTop.lnk";
+
+/// Full path of the Startup shortcut for a config dir (on Windows:
+/// `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\EbbTop.lnk`).
+/// Takes the dir so tests can pass a scratch dir on any platform.
+pub fn startup_shortcut_path(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir
+        .join("Microsoft")
+        .join("Windows")
+        .join("Start Menu")
+        .join("Programs")
+        .join("Startup")
+        .join(STARTUP_SHORTCUT_NAME)
+}
+
+/// True when the Startup shortcut exists under `config_dir`.
+pub fn autostart_enabled_in(config_dir: &std::path::Path) -> bool {
+    startup_shortcut_path(config_dir).is_file()
+}
+
+/// True when the Startup shortcut exists (spec section 3: preserve
+/// Autostart by passing `-Autostart` to `install.ps1`).
+pub fn autostart_enabled() -> bool {
+    dirs::config_dir().map(|d| autostart_enabled_in(&d)).unwrap_or(false)
+}
+
+/// argv for the Windows apply step (spec design, section 3): `powershell
+/// -ExecutionPolicy Bypass -File <install.ps1> -Exe <downloaded exe>`,
+/// plus `-Autostart` when the Startup shortcut exists so the swapped
+/// install keeps its autostart shortcut. `argv[0]` is the program; the
+/// rest are its arguments.
+pub fn windows_apply_argv(
+    install_ps1: &std::path::Path,
+    downloaded_exe: &std::path::Path,
+    autostart: bool,
+) -> Vec<String> {
+    let mut argv = vec![
+        "powershell".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-File".to_string(),
+        install_ps1.to_string_lossy().into_owned(),
+        "-Exe".to_string(),
+        downloaded_exe.to_string_lossy().into_owned(),
+    ];
+    if autostart {
+        argv.push("-Autostart".to_string());
+    }
+    argv
+}
+
+/// Detached child spawn: the installer outlives this process (it kills the
+/// running exe and swaps in the verified download). On Windows the child
+/// gets no console (`DETACHED_PROCESS | CREATE_NO_WINDOW`); elsewhere a
+/// plain spawn (the apply step only runs on Windows in practice).
+fn spawn_detached(program: &str, args: &[String]) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new(program)
+            .args(args)
+            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new(program).args(args).spawn().map(|_| ())
+    }
+}
+
+/// Windows apply step (spec design, section 3): run
+/// `powershell -ExecutionPolicy Bypass -File install.ps1 -Exe <download>`
+/// detached so the script can kill this process, keep `.bak`, and swap the
+/// exe; the caller then quits and the relaunched install takes over.
+/// `-Autostart` is added when the Startup shortcut exists. Both files must
+/// already exist — the download must be hash-verified first; nothing
+/// spawns otherwise, so a bad path never kills the running app. The
+/// updater never deletes `.bak`; rollback stays the script's `-Rollback`
+/// path.
+pub fn apply_update_windows(
+    downloaded_exe: &std::path::Path,
+    install_ps1: &std::path::Path,
+) -> Result<(), String> {
+    if !downloaded_exe.is_file() {
+        return Err(format!("update file missing: {}", downloaded_exe.display()));
+    }
+    if !install_ps1.is_file() {
+        return Err(format!("installer script missing: {}", install_ps1.display()));
+    }
+    let autostart = autostart_enabled();
+    let argv = windows_apply_argv(install_ps1, downloaded_exe, autostart);
+    spawn_detached(&argv[0], &argv[1..]).map_err(|e| format!("could not start installer: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,6 +656,63 @@ mod tests {
         .expect_err("tampered sums must fail");
         assert!(!err.contains("s3cr3t"), "error leaked token: {err}");
         assert!(dir_entries(&dir).is_empty(), "no file or partial left behind");
+    }
+
+    // --- Windows apply and restart (spec section 3, Windows) ---
+
+    #[test]
+    fn windows_apply_argv_preserves_autostart_flag() {
+        let ps1 = std::path::Path::new("C:\\Tools\\install.ps1");
+        let exe = std::path::Path::new("C:\\Temp\\ebbtop.exe");
+        assert_eq!(
+            windows_apply_argv(ps1, exe, true),
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", "C:\\Tools\\install.ps1", "-Exe", "C:\\Temp\\ebbtop.exe", "-Autostart"]
+                .map(String::from)
+                .to_vec()
+        );
+        assert_eq!(
+            windows_apply_argv(ps1, exe, false),
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", "C:\\Tools\\install.ps1", "-Exe", "C:\\Temp\\ebbtop.exe"]
+                .map(String::from)
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn startup_shortcut_path_points_at_startup_folder() {
+        let dir = std::path::Path::new("/cfg");
+        assert_eq!(
+            startup_shortcut_path(dir),
+            std::path::PathBuf::from(
+                "/cfg/Microsoft/Windows/Start Menu/Programs/Startup/EbbTop.lnk"
+            )
+        );
+    }
+
+    #[test]
+    fn autostart_detected_from_shortcut_presence() {
+        let dir = scratch_dir("autostart");
+        assert!(!autostart_enabled_in(&dir), "no shortcut yet");
+        let startup = dir
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs")
+            .join("Startup");
+        std::fs::create_dir_all(&startup).expect("startup dir");
+        std::fs::write(startup.join("EbbTop.lnk"), "link").expect("shortcut file");
+        assert!(autostart_enabled_in(&dir), "shortcut present");
+    }
+
+    #[test]
+    fn apply_windows_refuses_missing_files_before_spawning() {
+        let dir = scratch_dir("applymissing");
+        let err = apply_update_windows(&dir.join("ebbtop.exe"), &dir.join("install.ps1"))
+            .expect_err("missing files must fail before any spawn");
+        assert!(
+            err.contains("ebbtop.exe") || err.contains("install.ps1"),
+            "error names the missing file: {err}"
+        );
     }
 
     #[test]
