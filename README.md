@@ -55,12 +55,18 @@ EBBTOP_ADDR=<this host's tailnet/LAN IP> ~/ebbtop/deploy/install-agent.sh       
 appears after boot. Enable linger so it starts without a login
 (`loginctl enable-linger $USER`).
 
-A second host is just another agent: copy the `ebbtop-agent` binary over
-(no Rust needed there), write `~/services/ebbtop-agent/agent.env`
-(`EBBTOP_BIND`, TTLs, `EBBTOP_TOKEN`) plus the user unit on port 45976,
-fetch the token from `~/services/ebbtop-agent/ebbtop.token` (mode 600),
-and add the host in the client via Settings/source picker, one token per
-host.
+A second host is one command (no Rust needed there — the binary ships from
+your machine, x86_64 Linux targets only):
+
+```
+EBBTOP_SSH_OPTS="-i ~/.ssh/mykey" ~/ebbtop/deploy/install-agent-remote.sh user@host
+```
+
+It checks the arch, detects the tailnet bind address (or pass it explicitly),
+installs and starts the user unit on port 45976, keeps an existing token,
+and probes the agent before printing the client setup. Then add the host in
+the client via Settings/source picker, one token per host
+(`ssh user@host cat services/ebbtop-agent/ebbtop.token`).
 
 ### Windows client
 
