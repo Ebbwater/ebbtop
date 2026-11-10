@@ -177,12 +177,14 @@ impl App {
             Some(s) => store::load_token_for(&s.name),
             None => (None, TokenSource::Missing),
         };
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("ebbtop-client")
-            .build()
-            .ok();
+        // Lazy runtime: fresh installs (no sources) skip the thread spawn
+        // at launch so the wizard opens instantly; the runtime is built
+        // on demand by `ensure_rt` on the first Test/connect.
+        let rt = if cfg.active_source().is_some() {
+            Self::build_rt()
+        } else {
+            None
+        };
         let mut app = Self::with(cfg, token, token_src, rt);
         style_with(&ctx, app.cfg.compact);
         app.settings_open = app.token.is_none() && app.onboard.is_none();
@@ -242,12 +244,32 @@ impl App {
         self.shared.clone()
     }
 
+    fn build_rt() -> Option<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("ebbtop-client")
+            .build()
+            .ok()
+    }
+
+    /// Build the client runtime on first use (fresh installs skip it at
+    /// launch; the first Test/connect pays it instead).
+    fn ensure_rt(&mut self) {
+        if self.rt.is_none() {
+            self.rt = Self::build_rt();
+        }
+    }
+
     fn start_client(&mut self, ctx: &egui::Context) {
         if let Some(t) = self.task.take() {
             t.abort();
         }
         *self.shared.lock().unwrap_or_else(|e| e.into_inner()) = State::default();
         self.kill_tx = None;
+        if self.cfg.active_source().is_some() {
+            self.ensure_rt();
+        }
         let Some(rt) = &self.rt else { return };
         // No sources yet (fresh install): leave the status at CONNECTING
         // until onboarding adds the first source.
@@ -1330,6 +1352,7 @@ impl App {
     /// One-shot connection test for a source row. The result arrives on
     /// `test_rx` and is polled in `settings()`.
     fn start_probe(&mut self, idx: usize) {
+        self.ensure_rt();
         let Some(s) = self.cfg.sources.get(idx) else { return };
         let Some(rt) = &self.rt else {
             self.source_msg = Some("test unavailable (no runtime)".to_string());
@@ -1376,6 +1399,7 @@ impl App {
             }
             return;
         }
+        self.ensure_rt();
         let Some(rt) = &self.rt else {
             if let Some(ob) = self.onboard.as_mut() {
                 ob.msg = Some("test unavailable (no runtime)".to_string());
@@ -2523,7 +2547,7 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_test_without_runtime_says_so() {
+    fn onboarding_test_builds_runtime_on_demand() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         {
             let ob = app.onboard.as_mut().unwrap();
@@ -2532,8 +2556,16 @@ mod tests {
             ob.token = "t".into();
         }
         app.onboard_test();
-        let m = app.onboard.as_ref().unwrap().msg.clone().unwrap_or_default();
-        assert!(m.contains("no runtime"), "unhelpful: {m}");
+        // Lazy runtime: the first Test builds it instead of reporting
+        // "no runtime"; the probe is in flight (or failed fast), never
+        // the missing-runtime note.
+        let ob = app.onboard.as_ref().unwrap();
+        assert!(ob.rx.is_some() || ob.testing, "probe never started");
+        assert!(
+            !ob.msg.clone().unwrap_or_default().contains("no runtime"),
+            "unexpected: {:?}",
+            ob.msg
+        );
     }
 
     #[test]

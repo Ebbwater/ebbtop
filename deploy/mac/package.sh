@@ -27,8 +27,14 @@ cd "$REPO"
 VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 [[ -n "$VERSION" ]] || { echo "could not read version from Cargo.toml" >&2; exit 1; }
 
-echo "== release build (ebbtop $VERSION)"
-cargo build --release --locked -p ebbtop-gui
+SKIP_BUILD=false
+if [[ "${1:-}" == "--skip-build" ]]; then SKIP_BUILD=true; fi
+if [[ "$SKIP_BUILD" == true ]]; then
+  echo "== reuse existing release binary (skip build)"
+else
+  echo "== release build (ebbtop $VERSION)"
+  cargo build --release --locked -p ebbtop-gui
+fi
 BIN="target/release/ebbtop"
 # Unique build number per packaging run: IconServices keys cached Dock icons
 # by bundle id + version, so a fresh build number busts the stale-icon cache

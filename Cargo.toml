@@ -12,6 +12,9 @@ homepage = "https://github.com/Ebbwater/ebbtop"
 publish = false
 
 [profile.release]
-lto = "thin"
+# Trimmed for fast local/Mac rebuilds: no LTO and wide codegen units.
+# Frame budget has huge headroom (p50 ~0.6ms), so trade a little
+# optimizer output for a much faster build. `strip` stays (size).
+lto = false
 strip = true
-codegen-units = 1
+codegen-units = 16
