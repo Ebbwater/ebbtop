@@ -691,6 +691,17 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
             new_name
         };
 
+    // Resolve a cgroup path through the same per-pid cache. One extra
+    // /proc/<pid>/cgroup read per pid, then cached until the pid exits.
+    let resolve_cgroup = |tracker: &mut crate::state::ProcCpuTracker, pid: u32| -> String {
+        if let Some(cached) = tracker.cgroups.get(&pid) {
+            return cached.clone();
+        }
+        let path = crate::proc_util::read_cgroup_path(pid).unwrap_or_default();
+        tracker.cgroups.insert(pid, path.clone());
+        path
+    };
+
     // On first run or if total delta is tiny, report zeros.
     if last_total == 0 || total_now <= last_total {
         // ebbtop: boot time for start_time_ms (one read per poll, not per pid).
@@ -699,6 +710,7 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
         for p in sys.processes().values() {
             let pid = p.pid().as_u32();
             let name = resolve_name(&mut tracker, pid, p);
+            let cgroup = resolve_cgroup(&mut tracker, pid);
             let start_time_ms = btime
                 .zip(read_starttime_ticks(pid))
                 .map(|(b, t)| crate::proc_util::start_time_ms(b, t))
@@ -711,6 +723,7 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
                 user: user_name(p),
                 state: p.status().to_string(),
                 start_time_ms,
+                cgroup,
             });
         }
         // Stash the just-collected jiffies for next call's delta, then prune
@@ -721,9 +734,11 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
         let crate::state::ProcCpuTracker {
             ref last_per_pid,
             ref mut names,
+            ref mut cgroups,
             ..
         } = *tracker;
         names.retain(|pid, _| last_per_pid.contains_key(pid));
+        cgroups.retain(|pid, _| last_per_pid.contains_key(pid));
         return ProcessesPayload {
             process_count: total_count,
             top_processes: procs,
@@ -743,6 +758,7 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
         let du = now.saturating_sub(prev) as f32;
         let cpu = ((du / dt) * 100.0).clamp(0.0, 100.0);
         let name = resolve_name(&mut tracker, pid, p);
+        let cgroup = resolve_cgroup(&mut tracker, pid);
         let start_time_ms = btime
             .zip(read_starttime_ticks(pid))
             .map(|(b, t)| crate::proc_util::start_time_ms(b, t))
@@ -755,6 +771,7 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
             user: user_name(p),
             state: p.status().to_string(),
             start_time_ms,
+            cgroup,
         });
     }
     // Save current jiffies map for next call and prune dead pids from the
@@ -763,9 +780,11 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
     let crate::state::ProcCpuTracker {
         ref last_per_pid,
         ref mut names,
+        ref mut cgroups,
         ..
     } = *tracker;
     names.retain(|pid, _| last_per_pid.contains_key(pid));
+    cgroups.retain(|pid, _| last_per_pid.contains_key(pid));
     drop(tracker);
 
     let payload = ProcessesPayload {
@@ -852,6 +871,7 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
                 user: String::new(), // ebbtop: Linux-only user lookup
                 state: p.status().to_string(),
                 start_time_ms: 0, // ebbtop: Linux-only
+                cgroup: String::new(), // ebbtop: Linux-only
             });
         }
 

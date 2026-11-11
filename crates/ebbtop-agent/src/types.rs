@@ -32,6 +32,9 @@ pub struct ProcessInfo {
     pub state: String,
     /// ebbtop: agent epoch ms when the process started (0 = unknown).
     pub start_time_ms: u64,
+    /// ebbtop: cgroup path (unified v2 "0::" path, or the v1 systemd path).
+    /// Empty when unreadable or on a platform without cgroups.
+    pub cgroup: String,
 }
 
 /// ebbtop: cumulative bytes since boot for one whole disk.

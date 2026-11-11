@@ -25,14 +25,15 @@ The client is multi-host with onboarding, Settings and a source picker
 4. Metrics JSON gains `load_avg`, `uptime_s` and `disk_io` (per whole disk, cumulative bytes from `/proc/diskstats`; loop, ram, zram and dm-* skipped so LVM is not double-counted).
 5. GPU collection enabled (`--features gpu`) with gfxinfo's AMD/libdrm path off. NVML tries the versioned `libnvidia-ml.so.1` soname, then an optional explicit `EBBTOP_AGENT_NVML_LIB` path. `GpuMetrics` gains an additive `temperature_c` field (null when unavailable).
 6. Phase 2 kill (see below): `Process.start_time_ms` (proto field 7) and a `kill:<pid>:<start_time_ms>:<TERM|INT>` request handler with journal audit.
+7. `Process.cgroup` (proto field 8): the process's cgroup path, unified v2 `0::` path or the v1 `name=systemd` path, with the `0::` prefix stripped so both hierarchies look the same. Read once per pid and cached until the pid exits. `ebbtop-core` turns it into a workload with `view::workload_key`, which prefers the nearest systemd `.service` unit (a container's own unit on a quadlet host), then a `libpod-<id>` scope, then a `.scope`, else the host. `view::container_id` pulls the id out of a podman scope so a client can label it with a name and image; `view::group_by_workload` sums pids, CPU and RSS per workload. The path is data, not policy: grouping stays in the client so one agent serves every view.
 
-New proto fields are additive. The client decodes a legacy agent too, with empty user/state and no process timestamp.
+New proto fields are additive. The client decodes a legacy agent too, with empty user/state/cgroup and no process timestamp.
 
 ### Contract
 
 - Endpoint: `ws://<agent-host>:45976/ws?token=<token>`. Port 45976; check with `ss -tlnp`.
 - Token: 32 random bytes hex, in `~/services/ebbtop-agent/agent.env` and `ebbtop.token` (mode 600). Client keeps one token per host in the OS credential store (service `ebbtop`, user = source name). `EBBTOP_TOKEN` env overrides for tests.
-- Request/response, one in flight: `get_metrics` gives JSON with `sampled_at_ms`; `get_processes` gives protobuf; `get_disks` gives JSON; Phase 2 `kill:<pid>:<start_time_ms>:<TERM|INT>` (on demand, queued between ticks on the same connection) gives a small JSON reply. Frames over 768 bytes are gzipped binary.
+- Request/response, one in flight: `get_metrics` gives JSON with `sampled_at_ms`; `get_processes` gives protobuf (each row carries `cgroup`, field 8, for client-side workload grouping); `get_disks` gives JSON; Phase 2 `kill:<pid>:<start_time_ms>:<TERM|INT>` (on demand, queued between ticks on the same connection) gives a small JSON reply. Frames over 768 bytes are gzipped binary.
 - Client tick: 1000 ms (`MissedTickBehavior::Skip`), disks every 5 ticks, 3 s reply deadline, reconnect backoff 0.5 s doubling to 4 s, forever.
 - Agent metrics cache TTL: 100 ms (`SOCKTOP_AGENT_METRICS_TTL_MS`, upstream 250). In a 15 min soak at 250 ms, one delayed poll followed by a fast one got a cached repeat, giving one 2047 ms interval.
 - Agent process cache TTL: 500 ms (`SOCKTOP_AGENT_PROCESSES_TTL_MS`). At 900 ms a 1 s poll sometimes got a cached repeat (process interval p95 2002 ms in the first smoke run), so 500 ms it is.

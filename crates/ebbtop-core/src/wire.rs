@@ -111,6 +111,12 @@ pub struct Process {
     /// for Phase 2 kill). 0 = unpatched agent.
     #[prost(uint64, tag = "7")]
     pub start_time_ms: u64,
+    /// ebbtop: cgroup path the process runs in, e.g.
+    /// "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/libpod-payload-<id>".
+    /// Empty on a legacy agent or a platform without cgroups. The client
+    /// decides how to group; see `view::workload_key`.
+    #[prost(string, tag = "8")]
+    pub cgroup: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -389,6 +395,7 @@ mod tests {
                 user: "kyler".into(),
                 state: "Sleeping".into(),
                 start_time_ms: 1_700_000_002_500,
+                cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service".into(),
             }],
             sampled_at_ms: 99,
         };

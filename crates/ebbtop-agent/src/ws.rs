@@ -144,6 +144,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         user: p.user,
                         state: p.state,
                         start_time_ms: p.start_time_ms,
+                        cgroup: p.cgroup,
                     }));
 
                 // Move the populated Vec into the proto, encode, then move it
@@ -279,6 +280,7 @@ mod tests {
                 user: p.user,
                 state: p.state,
                 start_time_ms: p.start_time_ms,
+                cgroup: p.cgroup,
             }));
 
         // Create the protobuf message

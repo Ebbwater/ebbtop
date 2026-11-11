@@ -16,4 +16,5 @@ message Process {
   string user = 5;                    // ebbtop: owner name (uid if unknown)
   string state = 6;                   // ebbtop: sysinfo status, e.g. "Sleeping"
   uint64 start_time_ms = 7;           // ebbtop: agent epoch ms when the process started (0 = unknown)
+  string cgroup = 8;                  // ebbtop: cgroup path, e.g. "/user.slice/.../davy-pg.service/libpod-payload-<id>" ("" = legacy agent)
 }

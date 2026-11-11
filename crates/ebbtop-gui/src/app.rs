@@ -2128,10 +2128,10 @@ mod tests {
         let mut rows: Vec<Process> = (1..=400)
             .map(|i| Process { pid: i, name: format!("proc{i}"), cpu_usage: 0.1, mem_bytes: 1 << 20,
                 user: if i % 3 == 0 { "root".into() } else { "kyler".into() }, state: "Sleeping".into(),
-                start_time_ms: 1_700_000_000_000 + i as u64 })
+                start_time_ms: 1_700_000_000_000 + i as u64, cgroup: String::new() })
             .collect();
         rows.push(Process { pid: 4242, name: "hottest-proc".into(), cpu_usage: 87.5, mem_bytes: 3 << 30,
-            user: "kyler".into(), state: "Runnable".into(), start_time_ms: 1_700_000_002_500 });
+            user: "kyler".into(), state: "Runnable".into(), start_time_ms: 1_700_000_002_500, cgroup: String::new() });
         s.apply(Event::Processes { p: Processes { process_count: 401, rows, sampled_at_ms: now - 500 }, recv_ms: now - 497 }, now);
         // Detail for the hottest pid: 30 points of CPU history so the
         // proc-detail graph has something to draw. Only shown when 4242 is
@@ -2306,7 +2306,7 @@ mod tests {
     #[test]
     fn keyboard_selection_moves_in_filtered_order() {
         fn proc(pid: u32) -> Process {
-            Process { pid, name: format!("p{pid}"), cpu_usage: 0.0, mem_bytes: 0, user: "kyler".into(), state: "Sleeping".into(), start_time_ms: 1 }
+            Process { pid, name: format!("p{pid}"), cpu_usage: 0.0, mem_bytes: 0, user: "kyler".into(), state: "Sleeping".into(), start_time_ms: 1, cgroup: String::new() }
         }
         let rows = vec![proc(10), proc(20), proc(30)];
         let idx = vec![0, 1, 2];

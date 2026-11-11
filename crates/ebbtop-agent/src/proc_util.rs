@@ -12,6 +12,30 @@ pub fn parse_uptime(s: &str) -> Option<u64> {
     s.split_whitespace().next()?.parse::<f64>().ok().map(|f| f as u64)
 }
 
+/// /proc/<pid>/cgroup: prefer the unified (v2) entry "0::/path"; fall back to
+/// the v1 systemd entry "N:name=systemd:/path". Returns the path only, so the
+/// client sees one shape on both hierarchies.
+pub fn parse_cgroup_path(s: &str) -> Option<String> {
+    let mut systemd = None;
+    for line in s.lines() {
+        let mut f = line.splitn(3, ':');
+        let (_id, controller, path) = (f.next()?, f.next()?, f.next()?);
+        if controller.is_empty() {
+            return Some(path.trim().to_string());
+        }
+        if systemd.is_none() && controller.split(',').any(|c| c == "name=systemd") {
+            systemd = Some(path.trim().to_string());
+        }
+    }
+    systemd
+}
+
+/// Read one process's cgroup path. None if the pid vanished or the file is
+/// unreadable (hidepid, permissions); the caller reports an empty path.
+pub fn read_cgroup_path(pid: u32) -> Option<String> {
+    parse_cgroup_path(&std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?)
+}
+
 /// Whole-disk devices only: skip loop/ram/zram and device-mapper (which
 /// would double-count I/O already seen on the physical disk).
 fn wanted(name: &str, whole_disks: &[String]) -> bool {
@@ -106,5 +130,26 @@ mod tests {
         // 100 ticks = 1 s, so exact: (1_700_000_000 * 100 + 250) * 10 = start+2.5 s
         assert_eq!(start_time_ms(1_700_000_000, 250), 1_700_000_002_500);
         assert_eq!(start_time_ms(1_700_000_000, 0), 1_700_000_000_000);
+    }
+
+    #[test]
+    fn cgroup_path_v2_v1_and_garbage() {
+        // Unified hierarchy (this host) — the "0::" line is the answer.
+        assert_eq!(
+            parse_cgroup_path("0::/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service\n"),
+            Some("/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service".to_string())
+        );
+        // Mixed hierarchy: prefer "0::" even when a v1 systemd line is present.
+        assert_eq!(
+            parse_cgroup_path("1:name=systemd:/old\n0::/new\n"),
+            Some("/new".to_string())
+        );
+        // v1 only.
+        assert_eq!(
+            parse_cgroup_path("1:cpu:/a\n2:name=systemd:/user.slice/x.service\n"),
+            Some("/user.slice/x.service".to_string())
+        );
+        assert_eq!(parse_cgroup_path(""), None);
+        assert_eq!(parse_cgroup_path("nonsense\n"), None);
     }
 }

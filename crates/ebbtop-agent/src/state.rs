@@ -21,6 +21,11 @@ pub struct ProcCpuTracker {
     /// On a Pi with ~150-300 mostly-stable processes this avoids re-allocating
     /// the same `String`s on every processes poll (~once per 1.5s).
     pub names: HashMap<u32, String>,
+    /// PID → cgroup path. Read once per pid and reused: /proc/<pid>/cgroup is
+    /// an extra open per process per poll, and the path only changes for a pid
+    /// that is moved between cgroups, which is rare enough to accept a stale
+    /// value until the pid exits. Pruned with `names`.
+    pub cgroups: HashMap<u32, String>,
 }
 
 #[cfg(not(target_os = "linux"))]
