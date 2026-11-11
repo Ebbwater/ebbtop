@@ -168,6 +168,20 @@ pub fn container_id(segment: &str) -> Option<&str> {
     (rest.len() >= 12 && rest.bytes().all(|b| b.is_ascii_hexdigit())).then_some(rest)
 }
 
+/// Compact label for a workload key in a table cell: "(host)" for the empty
+/// key, a container id shortened to its 12-character form, or a unit name
+/// without the ".service" suffix.
+pub fn workload_label(key: &str) -> String {
+    if key.is_empty() {
+        return "(host)".to_string();
+    }
+    if let Some(id) = key.strip_prefix("libpod-") {
+        let n = id.len().min(12);
+        return format!("libpod-{}", &id[..n]);
+    }
+    key.strip_suffix(".service").unwrap_or(key).to_string()
+}
+
 /// One workload roll-up: a container, a systemd unit, or the host.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkloadGroup {
@@ -309,6 +323,14 @@ mod tests {
         assert_eq!(container_id(&format!("libpod-{ID}.scope")), Some(ID));
         assert_eq!(container_id("libpod-notanid"), None);
         assert_eq!(container_id("davy-pg.service"), None);
+    }
+
+    #[test]
+    fn workload_labels_are_short_but_identifying() {
+        assert_eq!(workload_label(""), "(host)");
+        assert_eq!(workload_label("davy-pg.service"), "davy-pg");
+        assert_eq!(workload_label("init.scope"), "init.scope");
+        assert_eq!(workload_label(&format!("libpod-{ID}")), "libpod-65326a2caf20");
     }
 
     #[test]

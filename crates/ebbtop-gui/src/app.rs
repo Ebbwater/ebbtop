@@ -109,6 +109,10 @@ pub struct App {
     token: Option<String>,
     token_src: TokenSource,
     filter: String,
+    /// Workload selected in the roll-up pane, applied on top of `filter`.
+    /// None shows every workload. Set by clicking a workload row, cleared by
+    /// clicking it again or the chip in the proc header.
+    workload_filter: Option<String>,
     sort: SortKey,
     desc: bool,
     selected: Option<u32>,
@@ -215,6 +219,7 @@ impl App {
             token,
             token_src,
             filter: String::new(),
+            workload_filter: None,
             sort: SortKey::Cpu,
             desc: true,
             selected: None,
@@ -405,6 +410,7 @@ impl App {
                 // Detail pane sits between the top boxes and the process
                 // table; it is hidden unless a row is selected.
                 self.proc_detail_box(ui, &st, slots);
+                self.workloads_box(ui, &st);
                 self.proc_box(ui, &st);
             });
         drop(st);
@@ -1153,6 +1159,82 @@ impl App {
         }
     }
 
+    /// Workload roll-up: one row per cgroup boundary (container, unit, host),
+    /// summed from the current process sample. Clicking a row filters the
+    /// process table to that workload; clicking the active row clears it.
+    fn workloads_box(&mut self, ui: &mut Ui, st: &State) {
+        if st.procs.is_none() || st.workloads.is_empty() {
+            return;
+        }
+        // Short window: the process table matters more than the roll-up, and
+        // the pane would push its first rows offscreen (seen at 480x420).
+        if ui.available_height() < 240.0 {
+            return;
+        }
+        let mut open = !self.cfg.collapsed_workloads;
+        let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
+        panel(ui, "workloads", &mut open, |ui| {
+            let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
+            let narrow = ui.available_width() < 640.0;
+            let mut pick: Option<String> = None;
+            let mut tb = TableBuilder::new(ui)
+                .striped(true)
+                .sense(egui::Sense::click())
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                .auto_shrink([false, true])
+                .max_scroll_height(row_h * 7.0)
+                .column(Column::remainder().at_least(120.0).clip(true))
+                .column(Column::exact(52.0))
+                .column(Column::exact(64.0))
+                .column(Column::exact(64.0));
+            if !narrow {
+                tb = tb.column(Column::exact(76.0));
+            }
+            tb.header(row_h + 2.0, |mut h| {
+                for name in ["Workload", "PIDs", "CPU%", "MEM%"] {
+                    h.col(|ui| {
+                        ui.label(RichText::new(name).monospace().strong().color(w::TEXT));
+                    });
+                }
+                if !narrow {
+                    h.col(|ui| {
+                        ui.label(RichText::new("MEM").monospace().strong().color(w::TEXT));
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(row_h, st.workloads.len(), |mut row| {
+                    let g = &st.workloads[row.index()];
+                    let active = self.workload_filter.as_deref() == Some(g.key.as_str());
+                    row.set_selected(active);
+                    let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
+                    let memf = g.mem_bytes as f32 * 100.0 / mem_total as f32;
+                    row.col(|ui| { ui.label(mono(view::workload_label(&g.key), if active { w::ACCENT } else { w::TEXT })); });
+                    row.col(|ui| { ui.label(mono(g.pids.to_string(), w::DIM)); });
+                    row.col(|ui| { w::cpu_bar_cell(ui, g.cpu_usage / 100.0, &format!("{:5.1}", g.cpu_usage)); });
+                    row.col(|ui| { ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0))); });
+                    if !narrow {
+                        row.col(|ui| { ui.label(mono(view::bytes(g.mem_bytes), w::DIM)); });
+                    }
+                    if row.response().clicked() {
+                        pick = Some(g.key.clone());
+                    }
+                });
+            });
+            if let Some(key) = pick {
+                self.workload_filter = if self.workload_filter.as_deref() == Some(key.as_str()) {
+                    None
+                } else {
+                    Some(key)
+                };
+            }
+        });
+        if !open != self.cfg.collapsed_workloads {
+            self.cfg.collapsed_workloads = !open;
+            let _ = store::save_config(&self.cfg);
+        }
+    }
+
     fn proc_box(&mut self, ui: &mut Ui, st: &State) {
         let mut open = !self.cfg.collapsed_proc;
         panel(ui, "proc", &mut open, |ui| {
@@ -1161,8 +1243,15 @@ impl App {
                 return;
             };
             let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
-            let idx = view::select_rows(&p.rows, &self.filter, self.sort, self.desc);
+            let idx = {
+                let mut v = view::select_rows(&p.rows, &self.filter, self.sort, self.desc);
+                if let Some(w) = &self.workload_filter {
+                    v.retain(|&i| st.row_workload.get(i).is_some_and(|k| k == w));
+                }
+                v
+            };
             let want_focus = !self.settings_open && ui.input(|i| i.key_pressed(egui::Key::Slash));
+            let mut clear_workload = false;
             ui.horizontal(|ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filter name / user / pid (/)").desired_width(220.0));
                 if want_focus {
@@ -1172,10 +1261,22 @@ impl App {
                     self.filter.clear();
                 }
                 ui.label(RichText::new(format!("{} of {}", idx.len(), p.rows.len())).monospace().color(w::DIM));
+                if let Some(wk) = &self.workload_filter {
+                    let chip = format!("workload: {} ✕", view::workload_label(wk));
+                    let resp = ui
+                        .add(egui::Label::new(RichText::new(chip).monospace().color(w::ACCENT)).sense(egui::Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if resp.clicked() {
+                        clear_workload = true;
+                    }
+                }
                 if p.sampled_at_ms > 0 {
                     ui.label(RichText::new(format!("at {}", local_time(p.sampled_at_ms))).monospace().color(w::DIM));
                 }
             });
+            if clear_workload {
+                self.workload_filter = None;
+            }
 
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
             let mut sort = (self.sort, self.desc);
@@ -1207,6 +1308,8 @@ impl App {
             tb = tb.column(Column::exact(20.0)).column(Column::exact(64.0)).column(Column::exact(64.0));
             if !narrow {
                 tb = tb.column(Column::exact(76.0));
+                // Workload: display only (click a workloads row to filter).
+                tb = tb.column(Column::exact(120.0).clip(true));
             }
             let mut cols: Vec<(&str, SortKey)> = vec![("PID", SortKey::Pid), ("Name", SortKey::Name)];
             if !narrow {
@@ -1237,6 +1340,11 @@ impl App {
                         };
                     }
                 }
+                if !narrow {
+                    h.col(|ui| {
+                        ui.label(RichText::new("Workload").monospace().strong().color(w::TEXT));
+                    });
+                }
             })
             .body(|body| {
                 body.rows(row_h, idx.len(), |mut row| {
@@ -1254,6 +1362,8 @@ impl App {
                     row.col(|ui| { ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0))); });
                     if !narrow {
                         row.col(|ui| { ui.label(mono(view::bytes(r.mem_bytes), w::DIM)); });
+                        let wk = st.row_workload.get(idx[row.index()]).map(String::as_str).unwrap_or("");
+                        row.col(|ui| { ui.label(mono(view::workload_label(wk), w::DIM)); });
                     }
                     if row.response().clicked() {
                         selected = if selected == Some(r.pid) { None } else { Some(r.pid) };
@@ -2177,6 +2287,43 @@ mod tests {
         *app.shared().lock().unwrap() = s;
     }
 
+    /// Replace the fake process list with rows carrying real cgroup paths, so
+    /// a screenshot shows several workload groups instead of one host group.
+    fn workload_rows(app: &App, now: u64) {
+        const PG: &str = "65326a2caf20c491810c381f5b09e81c74c0fef5819e05ddd4205ec0335d25d7";
+        const HS: &str = "f2e4d8568a2bbe0a6d80e69459da094966a34b4695c4dc5488f09d440eb06db9";
+        const CI: &str = "38e7002d091ca2f3a0c1d3c39f32a1f3d8f9b1a0";
+        let base = "/user.slice/user-1000.slice/user@1000.service/app.slice";
+        let mk = |pid: u32, name: &str, user: &str, mem: u64, cpu: f32, cg: String| Process {
+            pid,
+            name: name.into(),
+            cpu_usage: cpu,
+            mem_bytes: mem,
+            user: user.into(),
+            state: "Sleeping".into(),
+            start_time_ms: 1_700_000_000_000 + pid as u64,
+            cgroup: cg,
+        };
+        let rows = vec![
+            mk(1, "systemd", "root", 16 << 20, 0.2, "/init.scope".into()),
+            mk(2730, "postgres", "100998", 640 << 20, 3.4, format!("{base}/davy-pg.service/libpod-payload-{PG}")),
+            mk(2862, "postgres", "100998", 240 << 20, 1.1, format!("{base}/davy-pg.service/libpod-payload-{PG}")),
+            mk(2727, "conmon", "kyler", 3 << 20, 0.4, format!("{base}/davy-pg.service/runtime")),
+            mk(2920, "hindsight-api", "kyler", 900 << 20, 6.2, format!("{base}/davy-hindsight.service/libpod-payload-{HS}")),
+            mk(2855, "postgres", "100998", 180 << 20, 0.9, format!("{base}/davy-hindsight.service/libpod-payload-{HS}")),
+            mk(2853, "conmon", "kyler", 2 << 20, 0.3, format!("{base}/davy-hindsight.service/runtime")),
+            mk(2066, "Runner.Worker", "kyler", 210 << 20, 2.7, format!("{base}/wn-ci-runner-2.service/libpod-payload-{CI}")),
+            mk(2061, "node", "kyler", 300 << 20, 4.0, format!("{base}/wn-ci-runner-2.service/libpod-payload-{CI}")),
+            mk(2106, "hermes", "kyler", 660 << 20, 0.8, format!("{base}/hermes-gateway.service")),
+        ];
+        let shared = app.shared();
+        let mut s = shared.lock().unwrap();
+        s.apply(Event::Processes {
+            p: Processes { process_count: rows.len() as u64, rows, sampled_at_ms: now },
+            recv_ms: now,
+        }, now);
+    }
+
     fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
         fn walk(s: &egui::Shape, out: &mut Vec<String>) {
             match s {
@@ -2198,11 +2345,28 @@ mod tests {
     /// presses the harness needs to observe). Focus is forced on: the
     /// headless context starts unfocused, so keys would otherwise not land.
     fn render_with(app: &mut App, w: f32, h: f32, events: Vec<egui::Event>) -> Vec<String> {
+        render_age(app, w, h, events, Some(0))
+    }
+
+    /// Render with the newest metrics sample pinned to a fixed age. The
+    /// status badge flips LIVE to STALE after 2 s of wall clock, so a render
+    /// that lands late under a parallel test run would otherwise render STALE
+    /// for a fixture that was live when it was applied. Tests that assert the
+    /// badge state it here (Some(5_000) for STALE) instead of relying on
+    /// scheduling.
+    fn render_age(app: &mut App, w: f32, h: f32, events: Vec<egui::Event>, age_ms: Option<u64>) -> Vec<String> {
         let ctx = egui::Context::default();
         style(&ctx);
         let mut last = vec![];
         let mut pending = Some(events);
         for _ in 0..3 {
+            if let Some(age) = age_ms {
+                let shared = app.shared();
+                let mut s = shared.lock().unwrap();
+                if s.last_new_sample_recv_ms != 0 {
+                    s.last_new_sample_recv_ms = client::now_ms().saturating_sub(age);
+                }
+            }
             let mut input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
                 focused: true,
@@ -2293,7 +2457,8 @@ mod tests {
         let now = client::now_ms();
         fake_state(&app, now - 5_000); // newest sample 5 s old
         app.filter = "ROOT".into();
-        let t = render(&mut app, 960.0, 1000.0);
+        // Pin the age so the badge is STALE regardless of when this frame runs.
+        let t = render_age(&mut app, 960.0, 1000.0, vec![], Some(5_000));
         assert!(t.iter().any(|x| x.contains(" STALE ")), "{t:?}");
         assert!(t.iter().any(|x| x == "133 of 401"));
         app.shared().lock().unwrap().apply(
@@ -3098,6 +3263,9 @@ mod tests {
                 .wgpu()
                 .build_ui(|ui| {
                     style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
                     app.draw(ui)
                 });
             for _ in 0..4 {
@@ -3122,6 +3290,9 @@ mod tests {
                 .wgpu()
                 .build_ui(|ui| {
                     style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
                     app.draw(ui)
                 });
             for _ in 0..4 {
@@ -3141,6 +3312,9 @@ mod tests {
                 .wgpu()
                 .build_ui(|ui| {
                     style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
                     app.draw(ui)
                 });
             for _ in 0..4 {
@@ -3163,6 +3337,9 @@ mod tests {
                 .wgpu()
                 .build_ui(|ui| {
                     style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
                     app.draw(ui)
                 });
             for _ in 0..4 {
@@ -3170,6 +3347,32 @@ mod tests {
             }
             let img = harness.render().expect("render");
             let path = dir.join(format!("ebbtop-{w}x{h}-settings.png"));
+            img.save(&path).expect("save");
+            eprintln!("wrote {}", path.display());
+        }
+        // Workload roll-up pane and column, with container group rows.
+        {
+            let (w, h) = (1920.0f32, 1080.0f32);
+            let now = client::now_ms();
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, now);
+            workload_rows(&app, now);
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(w, h))
+                .wgpu()
+                .build_ui(|ui| {
+                    style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
+                    app.draw(ui)
+                });
+            for _ in 0..4 {
+                harness.step();
+            }
+            let img = harness.render().expect("render");
+            let path = dir.join(format!("ebbtop-{w}x{h}-workloads.png"));
             img.save(&path).expect("save");
             eprintln!("wrote {}", path.display());
         }
@@ -3200,5 +3403,55 @@ mod tests {
         let mut v: Vec<f64> = (0..n).map(|_| { let t = std::time::Instant::now(); run(&mut app); t.elapsed().as_secs_f64() * 1e3 }).collect();
         v.sort_by(f64::total_cmp);
         eprintln!("frame_cost_ms p50={:.2} p95={:.2} max={:.2} (n={n})", v[n / 2], v[n * 95 / 100], v[n - 1]);
+    }
+
+    /// Workloads pane and per-row workload column, rendered headlessly with
+    /// real cgroup paths from k-server. Also covers the click-to-filter path
+    /// (the filter state is what a click sets; the click itself is egui's).
+    #[test]
+    fn workloads_panel_groups_rows_and_filters_the_proc_table() {
+        const PG_ID: &str = "65326a2caf20c491810c381f5b09e81c74c0fef5819e05ddd4205ec0335d25d7";
+        const HS_ID: &str = "f2e4d8568a2bbe0a6d80e69459da094966a34b4695c4dc5488f09d440eb06db9";
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        let now = client::now_ms();
+        let base = "/user.slice/user-1000.slice/user@1000.service/app.slice";
+        let rows = vec![
+            Process { pid: 1, name: "systemd".into(), cpu_usage: 0.1, mem_bytes: 1 << 20, user: "root".into(),
+                state: "Sleeping".into(), start_time_ms: 1, cgroup: "/init.scope".into() },
+            Process { pid: 2730, name: "postgres".into(), cpu_usage: 4.0, mem_bytes: 900 << 20, user: "100998".into(),
+                state: "Sleeping".into(), start_time_ms: 2,
+                cgroup: format!("{base}/davy-pg.service/libpod-payload-{PG_ID}") },
+            Process { pid: 2727, name: "conmon".into(), cpu_usage: 0.5, mem_bytes: 3 << 20, user: "kyler".into(),
+                state: "Sleeping".into(), start_time_ms: 3,
+                cgroup: format!("{base}/davy-pg.service/runtime") },
+            Process { pid: 2920, name: "hindsight-api".into(), cpu_usage: 1.0, mem_bytes: 700 << 20, user: "kyler".into(),
+                state: "Sleeping".into(), start_time_ms: 4,
+                cgroup: format!("{base}/davy-hindsight.service/libpod-payload-{HS_ID}") },
+            // Legacy agent row: no cgroup reported, belongs to the host group.
+            Process { pid: 999, name: "legacy-proc".into(), cpu_usage: 0.0, mem_bytes: 2 << 20, user: "kyler".into(),
+                state: "Sleeping".into(), start_time_ms: 5, cgroup: String::new() },
+        ];
+        {
+            let shared = app.shared();
+            let mut s = shared.lock().unwrap();
+            s.apply(Event::Connected, now);
+            s.apply(Event::Processes {
+                p: Processes { process_count: 5, rows, sampled_at_ms: now },
+                recv_ms: now,
+            }, now);
+        }
+        let t = render(&mut app, 1600.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("workloads")), "pane title missing: {t:?}");
+        assert!(t.iter().any(|x| x == "Workload"), "workload column header missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("davy-pg")), "davy-pg group missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("davy-hindsight")), "hindsight group missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("init.scope")), "unit group missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains("(host)")), "host group missing: {t:?}");
+
+        app.workload_filter = Some("davy-pg.service".into());
+        let t2 = render(&mut app, 1600.0, 1000.0);
+        assert!(t2.iter().any(|x| x.contains("2 of 5")), "workload filter not applied: {t2:?}");
+        assert!(t2.iter().any(|x| x.contains("workload: davy-pg")), "active chip missing: {t2:?}");
+        assert!(!t2.iter().any(|x| x.contains("hindsight-api")), "unrelated row still listed: {t2:?}");
     }
 }

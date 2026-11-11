@@ -5,6 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use crate::client::Event;
+use crate::view::{self, WorkloadGroup};
 use crate::wire::{DiskInfo, KillResult, Metrics, ProcessMetricsResponse, Processes};
 
 /// 5 minutes at 1 s.
@@ -135,6 +136,11 @@ pub struct State {
     pub last_new_sample_recv_ms: u64,
     pub procs: Option<Processes>,
     pub procs_recv_ms: u64,
+    /// Workload key per process row, parallel to `procs.rows`. Recomputed with
+    /// the sample so the GUI does not re-derive a string per row per frame.
+    pub row_workload: Vec<String>,
+    /// Workload roll-up for the current sample, biggest memory first.
+    pub workloads: Vec<WorkloadGroup>,
     pub disks: Vec<DiskInfo>,
     pub cpu: Ring<Point>,
     pub mem_pct: Ring<Point>,
@@ -177,6 +183,8 @@ impl Default for State {
             last_new_sample_recv_ms: 0,
             procs: None,
             procs_recv_ms: 0,
+            row_workload: Vec::new(),
+            workloads: Vec::new(),
             disks: Vec::new(),
             cpu: Ring::new(HISTORY_LEN),
             mem_pct: Ring::new(HISTORY_LEN),
@@ -226,6 +234,9 @@ impl State {
                     }
                     self.prev_procs_t = Some(t);
                 }
+                // Derived once per sample: 400 rows at 1 Hz, not per frame.
+                self.row_workload = p.rows.iter().map(|r| view::workload_key(&r.cgroup)).collect();
+                self.workloads = view::group_by_workload(&p.rows);
                 self.procs = Some(p);
                 self.procs_recv_ms = recv_ms;
             }

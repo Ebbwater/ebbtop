@@ -75,6 +75,9 @@ pub struct Config {
     /// selected, so this is collapse only, no show flag).
     #[serde(default)]
     pub collapsed_proc_detail: bool,
+    /// Collapse for the workload roll-up pane above the process table.
+    #[serde(default)]
+    pub collapsed_workloads: bool,
     /// Last finished release check, unix millis (0 = never). Persists the
     /// 24 h check cadence across restarts.
     #[serde(default)]
@@ -108,6 +111,7 @@ impl Default for Config {
             collapsed_disk: false,
             collapsed_proc: false,
             collapsed_proc_detail: false,
+            collapsed_workloads: false,
             update_last_check_ms: 0,
             update_skipped: String::new(),
         }
