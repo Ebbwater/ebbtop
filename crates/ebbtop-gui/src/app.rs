@@ -101,16 +101,16 @@ struct Onboard {
     probe_for: Option<(String, String, String)>,
 }
 
-/// Hover + sizing outcome of one linked table. The two bodies scroll
-/// independently; only the group frame and the shared hover mirror link them.
-/// `viewport` sizes the proc body cap; `hover` drives the mirror.
+/// Sizing outcome of one linked table. The two bodies scroll independently
+/// and each keeps its own hover highlight, so nothing about hover is shared
+/// between them; only the group frame links their layout.
+/// `viewport` sizes the proc body cap.
 struct LinkedTable {
     viewport: f32,
-    hover: Option<String>,
 }
 
 impl LinkedTable {
-    const NONE: Self = Self { viewport: 0.0, hover: None };
+    const NONE: Self = Self { viewport: 0.0 };
 }
 
 pub struct App {
@@ -125,9 +125,6 @@ pub struct App {
     /// None shows every workload. Set by clicking a workload row, cleared by
     /// clicking it again or the chip in the proc header.
     workload_filter: Option<String>,
-    /// Workload whose row is hovered in either table. Mirrors the hover
-    /// highlight across the workloads/proc pair. Transient, not persisted.
-    hover_workload: Option<String>,
     /// Proc panel chrome (title + filter + table header + margins), measured
     /// each frame so the proc body cap leaves room for it and the group does
     /// not overflow in a normal window.
@@ -241,7 +238,6 @@ impl App {
             token_src,
             filter: String::new(),
             workload_filter: None,
-            hover_workload: None,
             proc_chrome: 0.0,
             group_scroll_max: 0.0,
             sort: SortKey::Cpu,
@@ -464,7 +460,7 @@ impl App {
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         let y0 = ui.cursor().min.y;
-                        let wl = self.workloads_box(ui, &st, group_h);
+                        self.workloads_box(ui, &st, group_h);
                         let wl_h = ui.cursor().min.y - y0;
                         // Proc fills what the roll-up leaves (minus its own
                         // chrome), with a floor so a short window scrolls the
@@ -473,14 +469,9 @@ impl App {
                         let y1 = ui.cursor().min.y;
                         let proc = self.proc_box(ui, &st, proc_cap);
                         self.proc_chrome = (ui.cursor().min.y - y1) - proc.viewport;
-                        (wl, proc)
                     });
-                let (wl, proc) = group_out.inner;
                 self.group_scroll_max =
                     (group_out.content_size.y - group_out.inner_rect.height()).max(0.0);
-                // Hover mirror: whichever table saw a hover owns the key this
-                // frame; both tables highlight it on the next one.
-                self.hover_workload = wl.hover.or(proc.hover);
                 // The two bodies scroll independently: egui keeps each one's
                 // offset by id_salt, so no cross-table sync is applied here.
             });
@@ -1278,7 +1269,6 @@ impl App {
         let mut open = !self.cfg.collapsed_workloads;
         let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
         let mut scroll = LinkedTable::NONE;
-        let mut hover: Option<String> = None;
         w::panel(ui, "workloads", &mut open, |ui| {
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
             let narrow = ui.available_width() < 640.0;
@@ -1313,10 +1303,6 @@ impl App {
                     let g = &st.workloads[row.index()];
                     let active = self.workload_filter.as_deref() == Some(g.key.as_str());
                     row.set_selected(active);
-                    // Hover mirror: highlight the row matching the shared key.
-                    if self.hover_workload.as_deref() == Some(g.key.as_str()) {
-                        row.set_hovered(true);
-                    }
                     let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
                     let memf = g.mem_bytes as f32 * 100.0 / mem_total as f32;
                     row.col(|ui| { ui.label(mono(view::workload_label(&g.key), if active { w::ACCENT } else { w::TEXT })); });
@@ -1325,9 +1311,6 @@ impl App {
                     row.col(|ui| { ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0))); });
                     if !narrow {
                         row.col(|ui| { ui.label(mono(view::bytes(g.mem_bytes), w::DIM)); });
-                    }
-                    if row.response().container_hovered() {
-                        hover = Some(g.key.clone());
                     }
                     if row.response().clicked() {
                         pick = Some(g.key.clone());
@@ -1347,14 +1330,12 @@ impl App {
             self.cfg.collapsed_workloads = !open;
             let _ = store::save_config(&self.cfg);
         }
-        scroll.hover = hover;
         scroll
     }
 
     fn proc_box(&mut self, ui: &mut Ui, st: &State, max_h: f32) -> LinkedTable {
         let mut open = !self.cfg.collapsed_proc;
         let mut scroll = LinkedTable::NONE;
-        let mut hover: Option<String> = None;
         w::panel(ui, "proc", &mut open, |ui| {
             let Some(p) = &st.procs else {
                 ui.label(RichText::new("waiting for data").color(w::DIM));
@@ -1470,10 +1451,6 @@ impl App {
                     let r = &p.rows[idx[row.index()]];
                     let row_wk = st.row_workload.get(idx[row.index()]).map(String::as_str);
                     row.set_selected(selected == Some(r.pid));
-                    // Hover mirror: highlight rows owned by the shared key.
-                    if self.hover_workload.as_deref().is_some() && row_wk == self.hover_workload.as_deref() {
-                        row.set_hovered(true);
-                    }
                     let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
                     let memf = r.mem_bytes as f32 * 100.0 / mem_total as f32;
                     row.col(|ui| { ui.label(mono(r.pid.to_string(), w::DIM)); });
@@ -1487,9 +1464,6 @@ impl App {
                     if !narrow {
                         row.col(|ui| { ui.label(mono(view::bytes(r.mem_bytes), w::DIM)); });
                         row.col(|ui| { ui.label(mono(view::workload_label(row_wk.unwrap_or("")), w::DIM)); });
-                    }
-                    if row.response().container_hovered() {
-                        hover = row_wk.map(|s| s.to_string());
                     }
                     if row.response().clicked() {
                         selected = if selected == Some(r.pid) { None } else { Some(r.pid) };
@@ -1505,7 +1479,6 @@ impl App {
             self.cfg.collapsed_proc = collapsed;
             let _ = store::save_config(&self.cfg);
         }
-        scroll.hover = hover;
         scroll
     }
 
@@ -4240,7 +4213,7 @@ mod tests {
         assert!(!t2.iter().any(|x| x.contains("hindsight-api")), "unrelated row still listed: {t2:?}");
     }
 
-    // ---- Linked tables: group scroll, independent inner scrolls, hover mirror ----
+    // ---- Linked tables: group scroll, independent inner scrolls, hover ----
 
     fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
         fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
@@ -4398,75 +4371,149 @@ mod tests {
             "workloads must not follow the proc scroll: {wl_y:.1} -> {wl_y_after:.1}");
     }
 
-    #[test]
-    fn hover_detection_sets_shared_key() {
-        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
-        let now = client::now_ms();
-        workload_rows(&app, now);
-        let ctx = egui::Context::default();
-        style(&ctx);
-        let (w, h) = (1600.0, 1000.0);
-        // Settle, then aim at the davy-pg workload row's NAME (topmost occurrence;
-        // the same label also appears lower down in the proc Workload column).
-        let s0 = frame(&ctx, &mut app, w, h, vec![]);
-        let target = text_rects(&s0).iter()
-            .filter(|(s, _)| s == "davy-pg")
-            .map(|(_, r)| r.center())
-            .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
-            .expect("davy-pg workload row");
-        let mut shapes = s0;
-        for _ in 0..3 {
-            shapes = frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(target)]);
-        }
-        // Hovering the label text itself must set the key: a child label covering
-        // the pointer defeats Response::hovered(), so detection uses container_hovered().
-        assert_eq!(app.hover_workload.as_deref(), Some("davy-pg.service"),
-            "hovering the workload name must set the shared key");
-        // End-to-end: the detected key mirrors onto the member proc rows.
-        let hover_fill = egui::Color32::from_gray(70);
-        let tr = text_rects(&shapes);
-        let pid_rect = tr.iter().find(|(s, _)| s == "2730").map(|(_, r)| *r).expect("proc row 2730");
-        assert!(fill_rects(&shapes).iter().any(|(fr, c)| *c == hover_fill && fr.contains(pid_rect.center())),
-            "detected hover must mirror onto the proc row");
-        // Moving the pointer off the tables clears the key.
-        for _ in 0..3 {
-            frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))]);
-        }
-        assert_eq!(app.hover_workload, None, "hover must clear when the pointer leaves");
+    /// Fill egui paints for a hovered table row under `Visuals::dark()`
+    /// (`visuals.widgets.hovered.bg_fill`). Nothing else in these panes uses it.
+    fn row_hover_fill() -> egui::Color32 {
+        egui::Color32::from_gray(70)
     }
 
+    /// True when a row-hover fill covers the label's centre: that row is being
+    /// painted as hovered.
+    fn row_highlighted(shapes: &[egui::epaint::ClippedShape], label: &egui::Rect) -> bool {
+        let c = label.center();
+        fill_rects(shapes).iter().any(|(fr, fill)| *fill == row_hover_fill() && fr.contains(c))
+    }
+
+    /// Y centre of the topmost rendered label with exactly this text. Both
+    /// tables put their leading column at x ≈ 17, so the table header and the
+    /// data rows under it share a column and are told apart only by y.
+    fn header_y(shapes: &[egui::epaint::ClippedShape], header: &str) -> f32 {
+        text_rects(shapes)
+            .into_iter()
+            .filter(|(s, r)| s == header && r.left() < 60.0)
+            .map(|(_, r)| r.center().y)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap_or_else(|| panic!("no {header:?} header label in the leading column"))
+    }
+
+    /// The rows of one table, from the labels in its leading column: process
+    /// rows open with a numeric pid, workload rows with the workload name. The
+    /// header above them is skipped by y, so no implementation symbol is
+    /// involved — only rendered text rects.
+    fn table_rows(shapes: &[egui::epaint::ClippedShape], pids: bool) -> Vec<(String, egui::Rect)> {
+        let header = if pids { "PID" } else { "Workload" };
+        let cutoff = header_y(shapes, header) + 4.0;
+        text_rects(shapes)
+            .into_iter()
+            .filter(|(s, r)| r.left() < 60.0 && !s.is_empty() && r.center().y > cutoff)
+            .filter(|(s, _)| s.chars().all(|c| c.is_ascii_digit()) == pids)
+            .collect()
+    }
+
+    /// A point inside a row's band that is clear of its own label text: a label
+    /// under the pointer makes that cell non-hovered, so the row response would
+    /// report no hover at all.
+    fn row_aim(row: &egui::Rect) -> egui::Pos2 {
+        egui::pos2(400.0, row.center().y)
+    }
+
+    /// Aim at a row for a few frames: egui's own row hover is captured for the
+    /// next frame, so a single frame would race it.
+    fn aim_at(ctx: &egui::Context, app: &mut App, w: f32, h: f32, target: egui::Pos2) -> Vec<egui::epaint::ClippedShape> {
+        let mut shapes = frame(ctx, app, w, h, vec![]);
+        for _ in 0..4 {
+            shapes = frame(ctx, app, w, h, vec![egui::Event::PointerMoved(target)]);
+        }
+        shapes
+    }
+
+    /// The row labelled `label` in one table's leading column.
+    fn row_labelled(shapes: &[egui::epaint::ClippedShape], label: &str, pids: bool) -> egui::Rect {
+        table_rows(shapes, pids)
+            .into_iter()
+            .find(|(s, _)| s == label)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("no row labelled {label:?} in the {} table",
+                if pids { "proc" } else { "workloads" }))
+    }
+
+    /// The single row the pointer is aimed at (its leading-column label rect).
+    fn aim_row(ctx: &egui::Context, app: &mut App, w: f32, h: f32, label: &str, pids: bool)
+        -> (Vec<egui::epaint::ClippedShape>, egui::Rect) {
+        let idle = frame(ctx, app, w, h, vec![]);
+        let row = row_labelled(&idle, label, pids);
+        let shapes = aim_at(ctx, app, w, h, row_aim(&row));
+        (shapes, row)
+    }
+
+    /// Hovering a workload row must not light any process row, and hovering a
+    /// process row must not light any workload row — not even, in the second
+    /// case, the row of the workload that row belongs to.
     #[test]
-    fn hover_mirrors_between_workloads_and_proc() {
+    fn hover_does_not_mirror_between_tables() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         let now = client::now_ms();
         workload_rows(&app, now);
         let ctx = egui::Context::default();
         style(&ctx);
         let (w, h) = (1600.0, 1000.0);
-        let s1 = frame(&ctx, &mut app, w, h, vec![]);
-        let tr = text_rects(&s1);
-        let hover_fill = egui::Color32::from_gray(70);
-        // A row is mirror-highlighted when a hovered-fill rect covers its label.
-        let highlighted = |shapes: &[egui::epaint::ClippedShape], label: &str| -> bool {
-            let Some(r) = tr.iter().find(|(s, _)| s == label).map(|(_, r)| *r) else { return false };
-            fill_rects(shapes).iter().any(|(fr, c)| *c == hover_fill && fr.contains(r.center()))
-        };
-        // Workload -> proc: the davy-pg key lights its member process rows…
-        app.hover_workload = Some("davy-pg.service".into());
-        let s2 = frame(&ctx, &mut app, w, h, vec![]);
-        assert!(highlighted(&s2, "2730"), "davy-pg proc row not mirrored");
-        assert!(highlighted(&s2, "2862"), "second davy-pg proc row not mirrored");
-        // …and not rows of another workload.
-        assert!(!highlighted(&s2, "hindsight-api"), "unrelated proc row wrongly mirrored");
-        // Proc -> workload: the davy-hindsight key lights its workload row and procs.
-        app.hover_workload = Some("davy-hindsight.service".into());
-        let s3 = frame(&ctx, &mut app, w, h, vec![]);
-        assert!(highlighted(&s3, "hindsight-api"), "hindsight proc row not mirrored");
-        assert!(highlighted(&s3, "davy-hindsight"), "hindsight workload row not mirrored");
-        // Clearing the hover removes the mirror.
-        app.hover_workload = None;
-        let s4 = frame(&ctx, &mut app, w, h, vec![]);
-        assert!(!highlighted(&s4, "2730"), "mirror not cleared");
+
+        // Workload -> proc: davy-pg owns pid 2730, 2862 and 2727, so a mirror
+        // would light exactly those.
+        let (shapes, row) = aim_row(&ctx, &mut app, w, h, "davy-pg", false);
+        assert!(row_highlighted(&shapes, &row),
+            "the hovered workload row must still show its own hover highlight");
+        for (label, rect) in table_rows(&shapes, true) {
+            assert!(!row_highlighted(&shapes, &rect),
+                "hovering workload davy-pg lit proc row pid {label}: {rect:?}");
+        }
+
+        // Proc -> workload: hovering pid 2730 (a davy-pg process) must not light
+        // the davy-pg roll-up row or any other workload row.
+        let (shapes, row) = aim_row(&ctx, &mut app, w, h, "2730", true);
+        assert!(row_highlighted(&shapes, &row),
+            "the hovered proc row must still show its own hover highlight");
+        for (label, rect) in table_rows(&shapes, false) {
+            assert!(!row_highlighted(&shapes, &rect),
+                "hovering proc row 2730 lit workload row {label:?}: {rect:?}");
+        }
+    }
+
+    /// Within-table hover survives as the table's own feedback: hovering one row
+    /// highlights that row and no neighbouring row, and the other table shows no
+    /// hover highlight at all in the same frame.
+    #[test]
+    fn within_table_hover_highlights_only_hovered_row() {
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        let now = client::now_ms();
+        workload_rows(&app, now);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (1600.0, 1000.0);
+
+        // Proc table: exactly the aimed-at pid row is highlighted.
+        let (shapes, _) = aim_row(&ctx, &mut app, w, h, "2730", true);
+        let rows = table_rows(&shapes, true);
+        assert!(rows.len() > 2, "proc table should show several rows: {rows:?}");
+        let lit: Vec<&str> = rows.iter().filter(|(_, r)| row_highlighted(&shapes, r))
+            .map(|(s, _)| s.as_str()).collect();
+        assert_eq!(lit, vec!["2730"], "only the hovered proc row may be highlighted: {lit:?}");
+        for (label, rect) in table_rows(&shapes, false) {
+            assert!(!row_highlighted(&shapes, &rect),
+                "workload row {label:?} highlighted while hovering a proc row: {rect:?}");
+        }
+
+        // Workload table: exactly the aimed-at workload row is highlighted.
+        let (shapes, _) = aim_row(&ctx, &mut app, w, h, "davy-pg", false);
+        let rows = table_rows(&shapes, false);
+        assert!(rows.len() > 2, "workloads table should show several rows: {rows:?}");
+        let lit: Vec<&str> = rows.iter().filter(|(_, r)| row_highlighted(&shapes, r))
+            .map(|(s, _)| s.as_str()).collect();
+        assert_eq!(lit, vec!["davy-pg"], "only the hovered workload row may be highlighted: {lit:?}");
+        for (label, rect) in table_rows(&shapes, true) {
+            assert!(!row_highlighted(&shapes, &rect),
+                "proc row {label:?} highlighted while hovering a workload row: {rect:?}");
+        }
     }
 
 }
