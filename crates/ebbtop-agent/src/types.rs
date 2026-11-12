@@ -70,6 +70,10 @@ pub struct Metrics {
     pub uptime_s: Option<u64>,
     /// ebbtop: per-disk cumulative I/O counters.
     pub disk_io: Vec<DiskIo>,
+    /// ebbtop: CPU model from `/proc/cpuinfo` `model name`. None when the
+    /// file/field is missing, the value is empty, or this is not Linux —
+    /// never a placeholder, so a client can tell "unknown" from a real name.
+    pub cpu_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

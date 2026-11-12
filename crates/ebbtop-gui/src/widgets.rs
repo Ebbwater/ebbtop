@@ -146,11 +146,34 @@ pub fn meter(ui: &mut Ui, label: &str, frac: f32, right: &str, color: Option<Col
     p.galley(pos2(rect.right() - rg.size().x, ly), rg, TEXT);
 }
 
+/// Short form of a GPU name: the body rows and the panel header both drop
+/// the "NVIDIA " vendor prefix, so one model never reads two ways.
+pub fn short_gpu_name(name: &str) -> &str {
+    name.strip_prefix("NVIDIA ").unwrap_or(name)
+}
+
 /// Titled box with btop-like border. Title is proportional (phase 1);
 /// numbers inside stay monospace. Clicking the title collapses/expands
 /// (`open` false = collapsed, content is skipped so frame cost drops
 /// and siblings reflow). Arrow is ASCII (proportional lacks ▼/▶).
 pub fn panel(ui: &mut Ui, title: &str, open: &mut bool, add: impl FnOnce(&mut Ui)) {
+    panel_with_model(ui, title, None, open, add);
+}
+
+/// `panel` plus a hardware model on the title line, e.g. `v cpu · i7-9750H`.
+///
+/// The model rides on the header label itself, not a second widget, so it
+/// stays visible while the panel is collapsed and costs no extra row. The
+/// label is truncated (`…`, auto tooltip) rather than wrapped, so an
+/// over-long model cannot grow the header row or push siblings aside at the
+/// minimum width. `model` None/blank leaves the title alone — no separator.
+pub fn panel_with_model(
+    ui: &mut Ui,
+    title: &str,
+    model: Option<&str>,
+    open: &mut bool,
+    add: impl FnOnce(&mut Ui),
+) {
     egui::Frame::new()
         .fill(BOX)
         .stroke(Stroke::new(1.0, LINE))
@@ -159,11 +182,22 @@ pub fn panel(ui: &mut Ui, title: &str, open: &mut bool, add: impl FnOnce(&mut Ui
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let arrow = if *open { "v " } else { "> " };
-            let txt = format!("{arrow}{title}");
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let fmt = |color: Color32| egui::text::TextFormat { font_id: font.clone(), color, ..Default::default() };
+            let mut job = egui::text::LayoutJob::default();
+            job.append(&format!("{arrow}{title}"), 0.0, fmt(ACCENT));
+            if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+                job.append(" · ", 0.0, fmt(LINE));
+                job.append(m, 0.0, fmt(DIM));
+            }
             // Clickable label (not selectable_label): same height as the
             // old plain label, so headers don't push content out of the
             // scroll view at half-screen (see `renders_...` test).
-            let resp = ui.add(egui::Label::new(egui::RichText::new(txt).strong().color(ACCENT)).sense(Sense::click()));
+            let resp = ui.add(
+                egui::Label::new(job)
+                    .truncate()
+                    .sense(Sense::click()),
+            );
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.clicked() {
                 *open = !*open;

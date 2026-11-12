@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::store::{self, Config, TokenSource};
 use crate::update::{self, UpdateCheck, UpdateStatus};
-use crate::widgets::{self as w, panel};
+use crate::widgets as w;
 
 const STALE_MS: i64 = 2000;
 
@@ -759,7 +759,10 @@ impl App {
 
     fn cpu_box(&mut self, ui: &mut Ui, st: &State, slots: usize, graph_h: f32) {
         let mut open = !self.cfg.collapsed_cpu;
-        panel(ui, "cpu", &mut open, |ui| {
+        // The header carries the machine's model so it stays readable while
+        // the box is collapsed. None (legacy agent) => label alone.
+        let model = st.metrics.as_ref().and_then(|m| m.cpu_model.as_deref());
+        w::panel_with_model(ui, "cpu", model, &mut open, |ui| {
             let Some(m) = &st.metrics else {
                 ui.label(RichText::new("waiting for data").color(w::DIM));
                 return;
@@ -807,9 +810,12 @@ impl App {
             return;
         };
         let mut open = !self.cfg.collapsed_gpu;
-        panel(ui, "gpu", &mut open, |ui| {
+        // Header carries the first GPU's model (short form, same as the body
+        // rows) so it stays readable while the box is collapsed.
+        let model = gpus.first().map(|g| w::short_gpu_name(&g.name));
+        w::panel_with_model(ui, "gpu", model, &mut open, |ui| {
             for (i, g) in gpus.iter().enumerate() {
-                let short = g.name.strip_prefix("NVIDIA ").unwrap_or(&g.name);
+                let short = w::short_gpu_name(&g.name);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("G{i} {short}")).monospace().strong().color(w::TEXT))
                         .on_hover_text(&g.name);
@@ -853,7 +859,7 @@ impl App {
 
     fn mem_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
         let mut open = !self.cfg.collapsed_mem;
-        panel(ui, "mem", &mut open, |ui| {
+        w::panel(ui, "mem", &mut open, |ui| {
             let Some(m) = &st.metrics else { return };
             let f = |u: u64, t: u64| if t == 0 { 0.0 } else { u as f32 / t as f32 };
             w::meter(ui, "Used", f(m.mem_used, m.mem_total),
@@ -879,7 +885,7 @@ impl App {
 
     fn net_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
         let mut open = !self.cfg.collapsed_net;
-        panel(ui, "net", &mut open, |ui| {
+        w::panel(ui, "net", &mut open, |ui| {
             let ifaces = st.interfaces();
             if ifaces.is_empty() {
                 return;
@@ -932,7 +938,7 @@ impl App {
 
     fn disk_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
         let mut open = !self.cfg.collapsed_disk;
-        panel(ui, "disk", &mut open, |ui| {
+        w::panel(ui, "disk", &mut open, |ui| {
             // Fullest first: the disks most likely to need attention stay
             // visible. Capped at four meters; the busiest-disk graphs below
             // carry the live rates, so per-disk text lines are gone.
@@ -1029,7 +1035,7 @@ impl App {
     fn proc_detail_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
         let Some(pid) = self.selected else { return };
         let mut open = !self.cfg.collapsed_proc_detail;
-        panel(ui, "proc-detail", &mut open, |ui| {
+        w::panel(ui, "proc-detail", &mut open, |ui| {
             let row = st.procs.as_ref().and_then(|pp| pp.rows.iter().find(|r| r.pid == pid));
             let detail = st.proc_detail.as_ref().filter(|d| d.process.pid == pid);
             let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
@@ -1229,7 +1235,7 @@ impl App {
         let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
         let mut scroll = LinkedTable::NONE;
         let mut hover: Option<String> = None;
-        panel(ui, "workloads", &mut open, |ui| {
+        w::panel(ui, "workloads", &mut open, |ui| {
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
             let narrow = ui.available_width() < 640.0;
             let mut pick: Option<String> = None;
@@ -1305,7 +1311,7 @@ impl App {
         let mut open = !self.cfg.collapsed_proc;
         let mut scroll = LinkedTable::NONE;
         let mut hover: Option<String> = None;
-        panel(ui, "proc", &mut open, |ui| {
+        w::panel(ui, "proc", &mut open, |ui| {
             let Some(p) = &st.procs else {
                 ui.label(RichText::new("waiting for data").color(w::DIM));
                 return;
@@ -2310,6 +2316,7 @@ mod tests {
                     load_avg: Some([1.25, 0.9, 0.7]),
                     uptime_s: Some(453_201),
                     disk_io: vec![ebbtop_core::wire::DiskIo { name: "nvme0n1".into(), read_bytes: k * 4_000_000, written_bytes: k * 1_000_000 }],
+                    cpu_model: Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz".into()),
                 },
                 recv_ms: t + 3,
             }, t);
@@ -2511,13 +2518,225 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("> cpu")), "collapsed cpu title missing: {t:?}");
         assert!(!t.iter().any(|x| x.contains("69.0%")), "cpu content should be hidden");
         assert!(t.iter().any(|x| x.contains("> gpu")), "collapsed gpu title missing");
-        assert!(!t.iter().any(|x| x.contains("GTX 1650")), "gpu content should be hidden");
+        // The header line itself carries the model (stays visible collapsed),
+        // so the body is what has to disappear: per-GPU row label and VRAM.
+        assert!(!t.iter().any(|x| x.contains("VRAM")), "gpu content should be hidden: {t:?}");
+        assert!(!t.iter().any(|x| x.contains("G0 ")), "gpu body row should be hidden: {t:?}");
         // Expand again: titles flip back to v.
         app.cfg.collapsed_cpu = false;
         app.cfg.collapsed_gpu = false;
         let t = render(&mut app, 1920.0, 1080.0);
         assert!(t.iter().any(|x| x.contains("v cpu")));
         assert!(t.iter().any(|x| x.contains("GTX 1650")));
+    }
+
+    /// One panel header is a single galley (arrow + type label + model), so
+    /// the header text is exactly the shape that starts with `> kind`/`v kind`.
+    /// Matching on the boundary keeps `cpu` from also matching `cpu-something`.
+    fn header_text(t: &[String], kind: &str) -> Option<String> {
+        t.iter()
+            .find(|s| ["> ", "v "].iter().any(|a| s.strip_prefix(a).is_some_and(|r| {
+                r == kind || r.strip_prefix(kind).is_some_and(|rest| rest.starts_with(" · "))
+            })))
+            .cloned()
+    }
+
+    /// GPU model rides on the header line and survives collapsing. Applied
+    /// unchanged to the base commit this fails: the base header is bare
+    /// `> gpu` with no model anywhere while collapsed.
+    #[test]
+    fn gpu_header_shows_model_when_collapsed() {
+        let mut cfg = Config::default();
+        cfg.collapsed_gpu = true;
+        let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
+        fake_state(&app, client::now_ms());
+        let t = render(&mut app, 1920.0, 1080.0);
+        let h = header_text(&t, "gpu").unwrap_or_else(|| panic!("gpu header missing: {t:?}"));
+        assert!(h.contains("GTX 1650"), "collapsed gpu header must name the model: {h:?}");
+        // Same short form the body rows use: the "NVIDIA " prefix is stripped.
+        assert!(!h.contains("NVIDIA"), "header must use the body's short form: {h:?}");
+        assert!(h.starts_with("> gpu"), "collapsed header keeps the > glyph: {h:?}");
+        // The body really is hidden (the model in the header is all that is left).
+        assert!(!t.iter().any(|x| x.contains("VRAM")), "collapsed gpu body leaked: {t:?}");
+        // Expanded: the header keeps the same model.
+        app.cfg.collapsed_gpu = false;
+        let t = render(&mut app, 1920.0, 1080.0);
+        let h = header_text(&t, "gpu").expect("gpu header while expanded");
+        assert!(h.starts_with("v gpu") && h.contains("GTX 1650"), "expanded header: {h:?}");
+        // Invariant 6: the per-GPU body row keeps its own `G0` label and the
+        // full name (tooltip source) is untouched by the header going short.
+        assert!(t.iter().any(|x| x.contains("G0 GeForce GTX 1650")),
+            "per-GPU body row must keep its G0 label: {t:?}");
+    }
+
+    /// CPU model rides on the header line and survives collapsing, in both
+    /// states. The revert probe (header call site switched back to the plain
+    /// `panel`) leaves this compiling and fails on the model assertion.
+    #[test]
+    fn cpu_header_shows_model_when_collapsed() {
+        let mut cfg = Config::default();
+        cfg.collapsed_cpu = true;
+        let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
+        fake_state(&app, client::now_ms());
+        let t = render(&mut app, 1920.0, 1080.0);
+        let h = header_text(&t, "cpu").unwrap_or_else(|| panic!("cpu header missing: {t:?}"));
+        assert!(h.starts_with("> cpu"), "collapsed header keeps the > glyph: {h:?}");
+        assert!(h.contains("i7-9750H"), "collapsed cpu header must name the model: {h:?}");
+        app.cfg.collapsed_cpu = false;
+        let t = render(&mut app, 1920.0, 1080.0);
+        let h = header_text(&t, "cpu").expect("cpu header while expanded");
+        assert!(h.starts_with("v cpu") && h.contains("i7-9750H"), "expanded header: {h:?}");
+    }
+
+    /// The three sizes `screenshot` writes. The model must be on both headers
+    /// at every one, so the committed snapshots are not the only evidence.
+    #[test]
+    fn headers_show_models_at_every_snapshot_size() {
+        for (w, h) in [(960.0f32, 1040.0f32), (1920.0, 1080.0), (640.0, 520.0)] {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, client::now_ms());
+            let t = render(&mut app, w, h);
+            let cpu = header_text(&t, "cpu").unwrap_or_else(|| panic!("{w}x{h}: no cpu header"));
+            let gpu = header_text(&t, "gpu").unwrap_or_else(|| panic!("{w}x{h}: no gpu header"));
+            assert!(cpu.contains("i7-9750H"), "{w}x{h}: cpu model missing: {cpu:?}");
+            assert!(gpu.contains("GTX 1650"), "{w}x{h}: gpu model missing: {gpu:?}");
+        }
+    }
+
+    /// Legacy agent (`cpu_model == None`) and a host with no GPUs: the header
+    /// is the type label alone — no separator, no `None`/`unknown` filler,
+    /// and the window still renders end to end.
+    #[test]
+    fn headers_show_label_alone_without_model() {
+        let mut cfg = Config::default();
+        cfg.collapsed_cpu = true;
+        let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
+        fake_state(&app, client::now_ms());
+        {
+            let shared = app.shared();
+            let mut s = shared.lock().unwrap();
+            let m = s.metrics.as_mut().unwrap();
+            m.cpu_model = None; // legacy agent
+            m.gpus = None; // no GPU on this host
+        }
+        let t = render(&mut app, 1920.0, 1080.0);
+        assert_eq!(header_text(&t, "cpu").as_deref(), Some("> cpu"),
+            "absent model must leave the bare label, no dangling separator: {t:?}");
+        assert!(header_text(&t, "gpu").is_none(), "no gpu panel without GPUs: {t:?}");
+        assert!(!t.iter().any(|x| x.contains("None")), "placeholder leaked: {t:?}");
+        assert!(!t.iter().any(|x| x.contains("unknown")), "placeholder leaked: {t:?}");
+        // End to end still renders: the window, and the cpu body once expanded.
+        assert!(t.iter().any(|x| x.contains("k-server")), "window must still render: {t:?}");
+        app.cfg.collapsed_cpu = false;
+        let t = render(&mut app, 1920.0, 1080.0);
+        assert_eq!(header_text(&t, "cpu").as_deref(), Some("v cpu"),
+            "expanded header without a model is still the bare label: {t:?}");
+        assert!(t.iter().any(|x| x.contains("C11")), "cpu body must still render: {t:?}");
+    }
+
+    /// A header click still toggles the panel after the label gained the model:
+    /// the click target is the same response, and the whole header line (label
+    /// + model) toggles, in both directions.
+    #[test]
+    fn header_click_still_toggles_the_panel() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, client::now_ms());
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (1920.0, 1080.0);
+        let s0 = frame(&ctx, &mut app, w, h, vec![]);
+        // Aim at the *model* part of the cpu header: dots after the label, so
+        // the toggle does not depend on hitting the two glyph words.
+        let (text, rect) = text_rects(&s0)
+            .into_iter()
+            .find(|(s, _)| s.starts_with("v cpu"))
+            .expect("cpu header");
+        assert!(text.contains("i7-9750H"), "header carries the model: {text:?}");
+        let target = egui::pos2(rect.right() - 6.0, rect.center().y);
+
+        let click = |ctx: &egui::Context, app: &mut App| {
+            let btn = |pressed: bool| egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(ctx, app, w, h, vec![egui::Event::PointerMoved(target)]);
+            frame(ctx, app, w, h, vec![btn(true)]);
+            frame(ctx, app, w, h, vec![btn(false)]);
+            // The toggle lands during the click frame; the next frame paints
+            // the new arrow and body state.
+            frame(ctx, app, w, h, vec![])
+        };
+        let s = click(&ctx, &mut app);
+        assert!(app.cfg.collapsed_cpu, "clicking the header must collapse the cpu panel");
+        let t = texts(&s);
+        let h_text = header_text(&t, "cpu").expect("collapsed cpu header");
+        assert!(h_text.starts_with("> cpu") && h_text.contains("i7-9750H"),
+            "collapsed after the click, model still visible: {h_text:?}");
+
+        let s = click(&ctx, &mut app);
+        assert!(!app.cfg.collapsed_cpu, "a second click must expand it again");
+        let t = texts(&s);
+        let h_text = header_text(&t, "cpu").expect("expanded cpu header");
+        assert!(h_text.starts_with("v cpu") && h_text.contains("i7-9750H"),
+            "expanded after the click, model still visible: {h_text:?}");
+    }
+
+    /// An over-long model elides with `…` on one row at the minimum width and
+    /// does not grow the header row.
+    #[test]
+    fn long_model_elides_without_growing_the_header() {
+        // Longer than the 640 px header can hold (a plain `~90 char` model
+        // still fits there), so elision is genuinely exercised.
+        const LONG: &str = "Intel(R) Xeon(R) Platinum 8480C CPU @ 2.00GHz \
+(preproduction qualification sample, 2 sockets, microcode 0x2b000590, all-core turbo 3.80GHz)";
+        let mut cfg = Config::default();
+        cfg.collapsed_cpu = true;
+        cfg.collapsed_gpu = true;
+        let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
+        fake_state(&app, client::now_ms());
+        app.shared().lock().unwrap().metrics.as_mut().unwrap().cpu_model = Some(LONG.into());
+
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (640.0, 520.0);
+        // The rendered rows, not the layout job's source text: elision bends
+        // the last row, and `Galley::text()` still returns the full job text.
+        let header = |shapes: &[egui::epaint::ClippedShape]| -> (Vec<String>, f32) {
+            fn walk(s: &egui::Shape, out: &mut Vec<(String, Vec<(String, f32)>)>) {
+                match s {
+                    egui::Shape::Text(t) => out.push((
+                        t.galley.text().to_string(),
+                        t.galley.rows.iter().map(|r| (r.text(), r.size.y)).collect(),
+                    )),
+                    egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, out)),
+                    _ => {}
+                }
+            }
+            let mut all = vec![];
+            shapes.iter().for_each(|c| walk(&c.shape, &mut all));
+            let (_, rows) = all
+                .into_iter()
+                .find(|(job, _)| job.starts_with("> cpu"))
+                .unwrap_or_else(|| panic!("cpu header missing"));
+            let height = rows.iter().map(|(_, h)| *h).sum::<f32>();
+            (rows.into_iter().map(|(t, _)| t).collect(), height)
+        };
+
+        let (rows, height) = header(&frame(&ctx, &mut app, w, h, vec![]));
+        assert_eq!(rows.len(), 1, "header must stay one row: {rows:?}");
+        assert!(rows[0].ends_with('…'), "over-long model must elide: {:?}", rows[0]);
+
+        // Row height is the plain label's row height: the model does not grow
+        // it, so siblings below the header never shift at the minimum size.
+        app.shared().lock().unwrap().metrics.as_mut().unwrap().cpu_model = None;
+        let (bare, bare_height) = header(&frame(&ctx, &mut app, w, h, vec![]));
+        assert_eq!(bare, vec!["> cpu".to_string()]);
+        assert!((height - bare_height).abs() < 0.5,
+            "header row grew: {bare_height} -> {height}");
     }
 
     #[test]
@@ -2931,6 +3150,7 @@ mod tests {
                         DiskIo { name: "nvme0n1".into(), read_bytes: k * 1_000_000, written_bytes: k * 100_000 },
                         DiskIo { name: "sda".into(), read_bytes: k * 100, written_bytes: k * 10 },
                     ],
+                    cpu_model: None,
                 },
                 recv_ms: t + 20,
             }, now);
@@ -3426,6 +3646,32 @@ mod tests {
             }
             let img = harness.render().expect("render");
             let path = dir.join(format!("ebbtop-{w}x{h}-settings.png"));
+            img.save(&path).expect("save");
+            eprintln!("wrote {}", path.display());
+        }
+        // CPU and GPU panels collapsed: the header line is the only place the
+        // model can appear, so this is the visual proof for the collapsed state.
+        {
+            let (w, h) = (960.0f32, 1040.0f32);
+            let mut cfg = Config::default();
+            cfg.collapsed_cpu = true;
+            cfg.collapsed_gpu = true;
+            let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, client::now_ms());
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(w, h))
+                .wgpu()
+                .build_ui(|ui| {
+                    style(ui.ctx());
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
+                    app.draw(ui)
+                });
+            for _ in 0..4 {
+                harness.step();
+            }
+            let img = harness.render().expect("render");
+            let path = dir.join(format!("ebbtop-{w}x{h}-collapsed.png"));
             img.save(&path).expect("save");
             eprintln!("wrote {}", path.display());
         }

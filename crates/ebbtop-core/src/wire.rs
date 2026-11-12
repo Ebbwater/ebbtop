@@ -87,6 +87,11 @@ pub struct Metrics {
     /// ebbtop.
     #[serde(default)]
     pub disk_io: Vec<DiskIo>,
+    /// ebbtop: CPU model string the agent read from `/proc/cpuinfo`
+    /// (`model name`). None on a legacy agent, a non-Linux agent or an
+    /// unreadable /proc — the GUI then shows the type label alone.
+    #[serde(default)]
+    pub cpu_model: Option<String>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -355,6 +360,28 @@ mod tests {
         assert_eq!(a.networks[0].transmitted, 20);
         assert_eq!(a.load_avg, None); // unpatched agent
         assert!(a.disk_io.is_empty());
+    }
+
+    /// The `METRICS` fixture above predates `cpu_model`; it must keep
+    /// decoding, with the field defaulting to None (legacy agent).
+    #[test]
+    fn metrics_without_cpu_model_decodes_legacy() {
+        assert!(!METRICS.contains("cpu_model"), "fixture must stay legacy-shaped");
+        let m = decode_metrics(Frame::Text(METRICS)).unwrap();
+        assert_eq!(m.cpu_model, None);
+        // Same for an agent that explicitly sends null.
+        let explicit = METRICS.replace(r#""gpus":null}"#, r#""gpus":null,"cpu_model":null}"#);
+        assert_eq!(decode_metrics(Frame::Text(&explicit)).unwrap().cpu_model, None);
+    }
+
+    #[test]
+    fn cpu_model_decodes_when_present() {
+        let s = METRICS.replace(
+            r#""gpus":null}"#,
+            r#""gpus":null,"cpu_model":"Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"}"#,
+        );
+        let m = decode_metrics(Frame::Text(&s)).unwrap();
+        assert_eq!(m.cpu_model.as_deref(), Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"));
     }
 
     #[test]

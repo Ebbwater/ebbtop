@@ -198,6 +198,41 @@ fn refresh_components_if_stale(components: &mut sysinfo::Components) {
 
 // Static caches for unchanging data
 static HOSTNAME: OnceCell<String> = OnceCell::new();
+
+/// Parse the CPU model out of `/proc/cpuinfo` text.
+///
+/// Returns the first `model name` line's value, trimmed. None when the field
+/// is absent, its value is empty, or the text has no such line at all — the
+/// caller must never substitute a placeholder, so the client can tell "this
+/// agent did not report a model" from a real one.
+pub fn parse_cpuinfo_model_name(s: &str) -> Option<String> {
+    let line = s.lines().find(|l| {
+        l.split_once(':').is_some_and(|(k, _)| k.trim() == "model name")
+    })?;
+    let value = line.split_once(':')?.1.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// The machine's CPU model. Read once: `/proc/cpuinfo` does not change while
+/// the agent runs. None off Linux or when even that read fails.
+pub fn cpu_model() -> Option<String> {
+    static MODEL: OnceCell<Option<String>> = OnceCell::new();
+    MODEL
+        .get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            {
+                std::fs::read_to_string("/proc/cpuinfo")
+                    .ok()
+                    .and_then(|s| parse_cpuinfo_model_name(&s))
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                None
+            }
+        })
+        .clone()
+}
+
 struct NetworkNameCache {
     names: Vec<String>,
     infos: Vec<NetworkInfo>,
@@ -358,6 +393,7 @@ pub async fn collect_fast_metrics(state: &AppState) -> Metrics {
         load_avg: crate::proc_util::load_avg(),
         uptime_s: crate::proc_util::uptime_s(),
         disk_io: crate::proc_util::disk_io(),
+        cpu_model: cpu_model(),
     };
     {
         let mut cache = state.cache_metrics.lock().await;
@@ -1581,6 +1617,39 @@ mod tests {
     #[test]
     fn cpu_times_are_microseconds() {
         assert_eq!(procstat::TICK_US, 10_000);
+    }
+
+    /// `/proc/cpuinfo` `model name` is the CPU model. The fixture text is
+    /// what real kernels look like (tab before the colon, per-core repeats);
+    /// the None cases are a missing field, an empty value and empty input.
+    /// Nothing here reads the live /proc, so it runs on any platform.
+    #[test]
+    fn cpu_model_parses_proc_cpuinfo_model_name() {
+        const CPUINFO: &str = "processor\t: 0\n\
+vendor_id\t: GenuineIntel\n\
+cpu family\t: 6\n\
+model\t\t: 158\n\
+model name\t: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\n\
+stepping\t: 10\n\
+cpu MHz\t\t: 2599.998\n\
+\n\
+processor\t: 1\n\
+model name\t: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\n";
+        assert_eq!(
+            parse_cpuinfo_model_name(CPUINFO).as_deref(),
+            Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz")
+        );
+        // Arms: no cpuinfo at all, no model name line, empty value.
+        assert_eq!(parse_cpuinfo_model_name(""), None);
+        assert_eq!(parse_cpuinfo_model_name("processor\t: 0\ncpu MHz\t\t: 1200.0\n"), None);
+        assert_eq!(parse_cpuinfo_model_name("model name\t:   \n"), None);
+        // Trailing/leading whitespace is trimmed, not carried into the wire.
+        assert_eq!(
+            parse_cpuinfo_model_name("model name\t:   AMD Ryzen 9 5900X  \n").as_deref(),
+            Some("AMD Ryzen 9 5900X")
+        );
+        // A `model` line is not `model name`: only the full key counts.
+        assert_eq!(parse_cpuinfo_model_name("model\t\t: 158\n"), None);
     }
 
     #[test]
