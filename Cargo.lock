@@ -1235,7 +1235,7 @@ dependencies = [
 
 [[package]]
 name = "ebbtop-core"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "ebbtop-gui"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "chrono",
