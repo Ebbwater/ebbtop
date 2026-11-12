@@ -5,7 +5,7 @@ members = ["crates/ebbtop-core", "crates/ebbtop-gui", "crates/ebbtop-agent"]
 
 [workspace.package]
 edition = "2024"
-version = "0.2.4"
+version = "0.2.5"
 license = "MIT"
 repository = "https://github.com/Ebbwater/ebbtop"
 homepage = "https://github.com/Ebbwater/ebbtop"
