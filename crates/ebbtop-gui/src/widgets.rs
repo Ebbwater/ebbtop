@@ -20,6 +20,28 @@ pub const MEM: Color32 = Color32::from_rgb(0x5c, 0xc8, 0x6e);
 pub const GPU: Color32 = Color32::from_rgb(0xc0, 0x7f, 0xe0);
 pub const DISK: Color32 = Color32::from_rgb(0xe6, 0xb4, 0x50);
 
+/// Fill of the window's top bar: `BOX` lifted 35% toward `LINE`, i.e.
+/// `lerp(BOX, LINE, 0.35)`. The bar reads as its own surface above the page
+/// (distinct from `BG`) without introducing a hue the palette does not
+/// already carry — no new cyan, no gradient, one flat fill
+/// (`bar_colors_derive_from_the_palette`).
+pub const BAR: Color32 = Color32::from_rgb(0x1e, 0x21, 0x28);
+
+/// The bar's bottom edge: one pixel of `ACCENT` pulled back 70% toward
+/// `LINE`, `lerp(LINE, ACCENT, 0.30)`. Visible against both the bar fill and
+/// the page below it, still the app's own blue rather than a new accent.
+pub const BAR_RULE_COLOR: Color32 = Color32::from_rgb(0x3b, 0x58, 0x6e);
+
+/// Height (points) of the bar's bottom rule: one logical pixel, painted
+/// inside the bar's own last row so it costs the layout no height.
+pub const BAR_RULE: f32 = 1.0;
+
+/// Product name on the bar's leading edge. One place in the GUI: the
+/// wordmark is a constant, never a source/hostname from the wire. The
+/// window title (`ViewportCommand::Title`) keeps its own `EBBTOP <source>`
+/// form and is not derived from this.
+pub const BRAND: &str = "EbbTop";
+
 fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
@@ -286,5 +308,18 @@ mod tests {
         assert_eq!(heat(0.5), WARN);
         assert_eq!(heat(1.0), BAD);
         assert_eq!(heat(7.0), BAD);
+    }
+
+    /// The bar's colours are derived from the existing palette, not new hues:
+    /// the fill is `BOX` lifted toward `LINE`, the rule is `ACCENT` pulled back
+    /// toward `LINE`, and neither is the page fill.
+    #[test]
+    fn bar_colors_derive_from_the_palette() {
+        assert_eq!(BAR, lerp(BOX, LINE, 0.35), "bar fill must be BOX lifted toward LINE");
+        assert_eq!(BAR_RULE_COLOR, lerp(LINE, ACCENT, 0.30), "bar rule must be ACCENT pulled toward LINE");
+        assert_ne!(BAR, BG, "the bar must not be the page fill");
+        assert_ne!(BAR, BOX, "the bar must read as its own surface, not a panel");
+        assert_eq!(BAR_RULE, 1.0, "the bottom rule is one pixel");
+        assert!(!BRAND.is_empty() && BRAND.len() <= 8, "wordmark stays short: {BRAND}");
     }
 }

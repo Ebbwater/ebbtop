@@ -378,9 +378,27 @@ impl App {
         let st = shared.lock().unwrap_or_else(|e| e.into_inner());
         ui.ctx().request_repaint_after(Duration::from_millis(250));
 
-        egui::Panel::top("status")
-            .frame(egui::Frame::new().fill(w::BOX).inner_margin(egui::Margin::symmetric(10, 6)))
+        // The window's top bar: its own lifted palette fill, a wordmark at
+        // the leading edge, and a full-width rule on the bottom edge.
+        // `show_separator_line(false)`: the bar supplies its own palette rule
+        // instead of egui's neutral panel line, so the band below is exactly
+        // the bar's height (36 px; the old strip plus its line was 33 px).
+        let bar = egui::Panel::top("status")
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(w::BAR).inner_margin(egui::Margin::symmetric(10, 8)))
             .show(ui, |ui| self.status_bar(ui, &st, now));
+        // One flat pixel of the palette's blue along the bar's whole bottom
+        // edge. Painted on the bar's last row, so it costs the layout nothing
+        // and spans the window width, not just the content area.
+        let bar_rect = bar.response.rect;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(
+                egui::pos2(0.0, bar_rect.bottom() - w::BAR_RULE),
+                egui::vec2(ui.ctx().content_rect().width(), w::BAR_RULE),
+            ),
+            0.0,
+            w::BAR_RULE_COLOR,
+        );
 
         egui::CentralPanel::default_margins()
             .frame(egui::Frame::new().fill(w::BG).inner_margin(8.0))
@@ -631,7 +649,33 @@ impl App {
         ui.horizontal(|ui| {
             // Half-screen (640px) has no room for every status chip.
             // Age + hover summary stay; sample/tick move to the tooltip.
+            // Keyed off the bar's full width, exactly as before the brand:
+            // the wordmark below must not move the 720 px boundary.
             let narrow = ui.available_width() < 720.0;
+            // Wordmark: the product name at the leading edge, before any
+            // connection state, from the single `w::BRAND` constant — never a
+            // source name from the wire (that is the host label below). Set in
+            // the panel-title font (one step over body, tracked, ACCENT) so the
+            // bar reads as this app's header; it costs no row height because
+            // the buttons in the row are already taller.
+            let mut wordmark = egui::text::LayoutJob::default();
+            wordmark.append(
+                w::BRAND,
+                0.0,
+                egui::text::TextFormat {
+                    font_id: w::title_font(ui.style()),
+                    color: w::ACCENT,
+                    extra_letter_spacing: w::TITLE_TRACKING,
+                    ..Default::default()
+                },
+            );
+            ui.label(wordmark);
+            // Hairline between the wordmark and the status cluster: a LINE
+            // pixel, so the brand reads as the bar's mark rather than as the
+            // first chip of the status line.
+            let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 14.0), egui::Sense::hover());
+            ui.painter().rect_filled(sep, 0.0, w::LINE);
+            ui.add_space(1.0);
             let age = st.since_new_sample_ms(now);
             let (label, color) = match (&st.conn, age) {
                 (Conn::Connected, Some(a)) if a < STALE_MS => ("LIVE", w::OK),
@@ -2476,6 +2520,215 @@ mod tests {
             repeat: false,
             modifiers: Default::default(),
         }
+    }
+
+    /// Invariant 1 + 2: the top region reads as the app's bar — its own flat
+    /// fill lifted from the palette (distinct from the page), a 1 px rule on
+    /// its bottom edge spanning the whole window, and the product name at the
+    /// leading edge ahead of the connection status.
+    ///
+    /// Literal colours and literal text only: no symbol from this card's
+    /// implementation appears here, so the same body compiles and runs against
+    /// the parent commit, where it fails (no wordmark, no bar fill, no rule).
+    #[test]
+    fn top_bar_has_brand_and_full_width_rule() {
+        const BAR_FILL: Color32 = Color32::from_rgb(0x1e, 0x21, 0x28);
+        const BAR_RULE: Color32 = Color32::from_rgb(0x3b, 0x58, 0x6e);
+        const PAGE_BG: Color32 = Color32::from_rgb(0x10, 0x12, 0x16);
+        const BRAND: &str = "EbbTop";
+        for (w, h) in [(960.0f32, 1040.0f32), (1920.0, 1080.0), (640.0, 520.0)] {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, client::now_ms());
+            let ctx = egui::Context::default();
+            style(&ctx);
+            let shapes = frame(&ctx, &mut app, w, h, vec![]);
+            let fills = fill_rects(&shapes);
+            let labels = text_rects(&shapes);
+
+            // Top-region wide fills, for assertions that fail to find one.
+            let wide: Vec<(String, f32, f32, f32)> = fills
+                .iter()
+                .filter(|(r, _)| r.top() < 40.0 && r.width() > w * 0.5)
+                .map(|(r, c)| (format!("{c:?}"), r.top(), r.bottom(), r.width()))
+                .collect();
+
+            // (1a) Own fill: full width, flat, at the top, distinct from BG.
+            let bar = fills
+                .iter()
+                .find(|(r, c)| *c == BAR_FILL && r.top() <= 0.5 && (r.width() - w).abs() < 1.0)
+                .unwrap_or_else(|| panic!("{w}x{h}: no bar fill in the palette colour; wide top fills: {wide:?}"))
+                .0;
+            assert_ne!(BAR_FILL, PAGE_BG, "{w}x{h}: the bar must not be the page fill");
+            assert!(bar.height() >= 24.0, "{w}x{h}: bar reads as a strip, not a bar: {bar:?}");
+            assert!(
+                bar.height() <= 38.0,
+                "{w}x{h}: the bar grew past the 6 px budget (32 -> {}): {bar:?}",
+                bar.height()
+            );
+            assert!(
+                fills.iter().any(|(r, c)| *c == PAGE_BG && r.width() > w * 0.9 && r.top() >= bar.bottom()),
+                "{w}x{h}: page fill must begin below the bar: {fills:?}"
+            );
+
+            // (1b) 1 px rule on the bar's bottom edge, full window width.
+            let rule = fills
+                .iter()
+                .find(|(r, c)| *c == BAR_RULE && (r.height() - 1.0).abs() < 0.01 && (r.width() - w).abs() < 1.0)
+                .unwrap_or_else(|| panic!("{w}x{h}: no full-width bottom rule; wide top fills: {wide:?}"))
+                .0;
+            assert!(
+                (rule.bottom() - bar.bottom()).abs() < 0.01,
+                "{w}x{h}: the rule must sit on the bar's bottom edge: {rule:?} {bar:?}"
+            );
+
+            // (2) Branded: the product name at the leading edge, before the
+            // connection status.
+            let brand = labels
+                .iter()
+                .find(|(s, _)| s == BRAND)
+                .unwrap_or_else(|| panic!("{w}x{h}: no wordmark on the bar: {:?}", texts(&shapes)))
+                .1;
+            assert!(brand.left() < 20.0, "{w}x{h}: wordmark must lead the bar: {brand:?}");
+            let live = labels
+                .iter()
+                .find(|(s, _)| s.contains(" LIVE "))
+                .unwrap_or_else(|| panic!("{w}x{h}: no status label"))
+                .1;
+            assert!(
+                brand.right() <= live.left(),
+                "{w}x{h}: wordmark must precede the status: {brand:?} {live:?}"
+            );
+        }
+    }
+
+    /// Invariant 3: every control the bar carried still renders, in the state
+    /// it reports, and the buttons it owns still flip the state they flipped
+    /// before. A parity guard: nothing here comes from the bar's new code, so
+    /// it also runs green on the parent commit.
+    #[test]
+    fn top_bar_keeps_every_control() {
+        let now = client::now_ms();
+        let has = |t: &[String], s: &str| t.iter().any(|x| x.contains(s));
+
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, now);
+        // Connection dot + chip, host name, age chip with its diagnostics.
+        let t = render_age(&mut app, 960.0, 1040.0, vec![], Some(0));
+        assert!(has(&t, " LIVE "), "live chip: {t:?}");
+        assert!(has(&t, "k-server"), "host name: {t:?}");
+        assert!(has(&t, "age "), "age chip: {t:?}");
+        let t = render_age(&mut app, 960.0, 1040.0, vec![], Some(5_000));
+        assert!(has(&t, " STALE "), "stale chip: {t:?}");
+        // Connection reason note.
+        app.shared().lock().unwrap().apply(
+            Event::Disconnected { reason: "refused".into(), retry_in: std::time::Duration::from_secs(3) },
+            now,
+        );
+        let t = render(&mut app, 960.0, 1040.0);
+        assert!(has(&t, " DOWN "), "down chip: {t:?}");
+        assert!(has(&t, "refused; retry"), "connection reason note: {t:?}");
+        // CONNECTING, with the attempt note past the first try.
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        app.shared().lock().unwrap().apply(Event::Connecting { attempt: 2 }, now);
+        let t = render(&mut app, 960.0, 1040.0);
+        assert!(has(&t, " CONNECTING "), "connecting chip: {t:?}");
+        assert!(has(&t, "attempt 2"), "attempt note: {t:?}");
+
+        // Kill refusal survives in the bar, wide and narrow.
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, now);
+        app.shared().lock().unwrap().apply(
+            Event::KillResult {
+                r: ebbtop_core::wire::KillResult {
+                    ok: false,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: Some("pid 1".into()),
+                },
+                recv_ms: now,
+            },
+            now,
+        );
+        for (w, h) in [(960.0f32, 1040.0f32), (640.0, 520.0)] {
+            let t = render(&mut app, w, h);
+            assert!(has(&t, "kill 4242 refused: pid 1"), "{w}: kill refusal: {t:?}");
+        }
+
+        // Release prompt and its Update button.
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, now);
+        app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+        settle_update(&mut app);
+        let t = render(&mut app, 960.0, 1040.0);
+        assert!(has(&t, "update v99.7.0 ready"), "update prompt: {t:?}");
+        assert!(t.iter().any(|x| x == "Update"), "Update button: {t:?}");
+
+        // Source picker only when there is a choice, and its labels.
+        let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, now);
+        let t = render(&mut app, 960.0, 1040.0);
+        assert!(has(&t, "source"), "source picker: {t:?}");
+
+        // The buttons still act: each click flips what it flipped before.
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, now);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (960.0f32, 1040.0f32);
+        let click = |ctx: &egui::Context, app: &mut App, label: &str| {
+            let shapes = frame(ctx, app, w, h, vec![]);
+            let target = text_rects(&shapes)
+                .into_iter()
+                .find(|(s, _)| s == label)
+                .unwrap_or_else(|| panic!("no {label:?} control in the bar: {:?}", texts(&shapes)))
+                .1
+                .center();
+            let btn = |pressed: bool| egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(ctx, app, w, h, vec![egui::Event::PointerMoved(target)]);
+            frame(ctx, app, w, h, vec![btn(true)]);
+            frame(ctx, app, w, h, vec![btn(false)]);
+            frame(ctx, app, w, h, vec![])
+        };
+        assert!(!app.cfg.compact, "setup: density starts off");
+        click(&ctx, &mut app, "Dense");
+        assert!(app.cfg.compact, "the Dense toggle must still flip density");
+        assert_eq!(app.cfg.window_s, 60, "setup: the 60 s window is active");
+        click(&ctx, &mut app, "5m");
+        assert_eq!(app.cfg.window_s, 300, "the 5m toggle must still switch the window");
+        click(&ctx, &mut app, "60s");
+        assert_eq!(app.cfg.window_s, 60, "the 60s toggle must still switch the window");
+        assert!(!app.settings_open, "setup: settings closed");
+        click(&ctx, &mut app, "Settings");
+        assert!(app.settings_open, "the Settings button must still open settings");
+
+        // The bar's Update button still opens the update dialog. draw() pops
+        // that dialog on its own for a fresh version, so close it first and
+        // click the bar's own prompt.
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, now);
+        app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+        settle_update(&mut app);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        frame(&ctx, &mut app, w, h, vec![]);
+        app.update_open = false;
+        let t = texts(&frame(&ctx, &mut app, w, h, vec![]));
+        assert!(has(&t, "update v99.7.0 ready"), "update prompt in the bar: {t:?}");
+        click(&ctx, &mut app, "Update");
+        assert!(app.update_open, "the bar's Update button must still open the dialog");
     }
 
     #[test]
