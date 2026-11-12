@@ -603,18 +603,26 @@ pub fn windows_apply_argv(
 }
 
 /// Detached child spawn: the installer outlives this process (it kills the
-/// running exe and swaps in the verified download). On Windows the child
-/// gets no console (`DETACHED_PROCESS | CREATE_NO_WINDOW`); elsewhere a
-/// plain spawn (the apply step only runs on Windows in practice).
+/// running exe and swaps in the verified download). On Windows the child gets
+/// no console window, its own process group, and breaks away from any job so it
+/// survives this GUI app exiting; its stdio is nulled because a GUI parent has
+/// no console to inherit. Elsewhere a plain spawn (the apply step only runs on
+/// Windows in practice).
 fn spawn_detached(program: &str, args: &[String]) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
         std::process::Command::new(program)
             .args(args)
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(
+                CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+            )
             .spawn()
             .map(|_| ())
     }

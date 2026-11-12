@@ -13,7 +13,6 @@ $ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:LOCALAPPDATA 'ebbtop'
 $dst = Join-Path $dir 'ebbtop.exe'
 $log = Join-Path $dir 'update.log'
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 function Log([string]$msg) {
     Add-Content -Path $log -Value ('{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $msg)
@@ -40,7 +39,10 @@ function New-Shortcut([string]$path) {
 }
 
 try {
-    Log ('install start rollback={0} exe={1}' -f [bool]$Rollback, $Exe)
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    # First executable step: if update.log has no 'started' line, the script never
+    # began executing and the spawn (not this script) is at fault.
+    Log ('started pid={0} rollback={1} exe={2}' -f $PID, [bool]$Rollback, $Exe)
 
     # Stop the running app, then WAIT for it to exit. Stop-Process returns before
     # the process releases its lock on the running exe, so copying right away hits
@@ -81,7 +83,7 @@ try {
     Write-Host "shortcut: Desktop\EbbTop.lnk$(if ($Autostart) { ' + Startup' })"
     Write-Host "log: $dir\ebbtop.log (updater: $log)"
 } catch {
-    Log ('ERROR {0}' -f $_)
+    try { Log ('ERROR {0}' -f $_) } catch {}
     Write-Host "install failed: $_ (see $log)"
     throw
 }
