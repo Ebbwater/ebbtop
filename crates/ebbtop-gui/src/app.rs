@@ -2685,6 +2685,213 @@ mod tests {
             "expanded after the click, model still visible: {h_text:?}");
     }
 
+    /// Height of the text line box each rendered `Shape::Text` occupies, in
+    /// the same frame: the rect the renderer fills for that string. Reads
+    /// only shapes already painted, so it measures the canvas, not a style.
+    fn line_boxes(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, f32)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(String, f32)>) {
+            match s {
+                egui::Shape::Text(t) => {
+                    out.push((t.galley.text().to_string(), t.galley.size().y));
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let mut out = vec![];
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// Invariant 1: the panel title paints in a taller text rect than body
+    /// text in the SAME frame. Pure measurement of painted galleys plus
+    /// literal strings — no symbol from the title styling, so this same
+    /// body runs on the base commit, where every line box is 15 px and
+    /// the comparison fails.
+    #[test]
+    fn panel_titles_render_larger_than_body_text() {
+        const TITLES: [&str; 5] = ["v cpu", "v gpu", "v mem", "v net", "v disk"];
+        // Body lines painted by the meters/tables: monospace, unchanged.
+        const BODY: [&str; 3] = ["C0", "Used", "nvme0n1"];
+        for (w, h) in [(960.0, 1040.0), (1920.0, 1080.0)] {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, client::now_ms());
+            let ctx = egui::Context::default();
+            style(&ctx);
+            let boxes = line_boxes(&frame(&ctx, &mut app, w, h, vec![]));
+            let height = |prefix: &str| -> f32 {
+                boxes.iter()
+                    .find(|(t, _)| t.starts_with(prefix))
+                    .unwrap_or_else(|| panic!("{w}x{h}: no rendered text starting {prefix:?}"))
+                    .1
+            };
+            for body in BODY {
+                let body_h = height(body);
+                for title in TITLES {
+                    let title_h = height(title);
+                    assert!(
+                        title_h >= body_h + 1.0,
+                        "{w}x{h}: title {title:?} line box {title_h} must be taller than body {body:?} line box {body_h}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Invariant 4: the title is still the click target for collapse, in
+    /// both directions, and the collapsed header still shows the `> `
+    /// glyph plus the model the parent card put there.
+    #[test]
+    fn title_click_still_toggles_panel() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, client::now_ms());
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (1920.0, 1080.0);
+        let s0 = frame(&ctx, &mut app, w, h, vec![]);
+        // Aim inside the title word itself (not the model tail), so the
+        // assertion is about the title being clickable.
+        let (text, rect) = text_rects(&s0)
+            .into_iter()
+            .find(|(s, _)| s.starts_with("v cpu"))
+            .expect("cpu title");
+        assert!(text.contains("i7-9750H"), "title carries the model: {text:?}");
+        let target = egui::pos2(rect.left() + 12.0, rect.center().y);
+
+        let click = |ctx: &egui::Context, app: &mut App| {
+            let btn = |pressed: bool| egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(ctx, app, w, h, vec![egui::Event::PointerMoved(target)]);
+            frame(ctx, app, w, h, vec![btn(true)]);
+            frame(ctx, app, w, h, vec![btn(false)]);
+            frame(ctx, app, w, h, vec![])
+        };
+        let s = click(&ctx, &mut app);
+        assert!(app.cfg.collapsed_cpu, "clicking the title must collapse the cpu panel");
+        let t = texts(&s);
+        let h_text = header_text(&t, "cpu").expect("collapsed cpu title");
+        assert!(
+            h_text.starts_with("> cpu") && h_text.contains("i7-9750H"),
+            "collapsed title keeps the > glyph and the model: {h_text:?}"
+        );
+        let s = click(&ctx, &mut app);
+        assert!(!app.cfg.collapsed_cpu, "a second title click must expand it again");
+        let t = texts(&s);
+        let h_text = header_text(&t, "cpu").expect("expanded cpu title");
+        assert!(
+            h_text.starts_with("v cpu") && h_text.contains("i7-9750H"),
+            "expanded again, model still visible: {h_text:?}"
+        );
+    }
+
+    /// Invariant 4: the title still shows the pointing-hand cursor on hover,
+    /// so the header reads as clickable. Reads the frame's platform output.
+    #[test]
+    fn title_hover_still_shows_the_pointer_cursor() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, client::now_ms());
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (960.0, 1040.0);
+        let shapes = frame(&ctx, &mut app, w, h, vec![]);
+        let (_, title) = text_rects(&shapes)
+            .into_iter()
+            .find(|(s, _)| s.starts_with("v cpu"))
+            .expect("cpu title");
+        let target = egui::pos2(title.left() + 10.0, title.center().y);
+        let mut icon = egui::CursorIcon::Default;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+                focused: true,
+                events: vec![egui::Event::PointerMoved(target)],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+            out.textures_delta.clear();
+            icon = out.platform_output.cursor_icon;
+        }
+        assert_eq!(
+            icon,
+            egui::CursorIcon::PointingHand,
+            "hovering a panel title must show the pointing hand"
+        );
+    }
+
+    /// Invariant 2: the title row carries a rule that reads as a section
+    /// boundary without colour — an ACCENT hairline over a LINE hairline,
+    /// both from the existing palette.
+    #[test]
+    fn title_row_draws_a_palette_rule() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, client::now_ms());
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let shapes = frame(&ctx, &mut app, 960.0, 1040.0, vec![]);
+        let (_, title) = text_rects(&shapes)
+            .into_iter()
+            .find(|(s, _)| s.starts_with("v cpu"))
+            .expect("cpu title");
+        let fills = fill_rects(&shapes);
+        let under = |color: Color32, want_h: f32| -> bool {
+            fills.iter().any(|(r, c)| {
+                *c == color
+                    && (r.height() - want_h).abs() < 0.01
+                    && r.top() >= title.bottom() - 0.5
+                    && r.top() <= title.bottom() + 3.0
+                    && r.left() <= title.left() + 0.5
+                    && r.width() > 20.0
+            })
+        };
+        assert!(under(w::LINE, w::TITLE_RULE), "missing LINE rule under the title: {fills:?}");
+        assert!(under(w::ACCENT, 1.0), "missing ACCENT hairline under the title");
+    }
+
+    /// Invariant 3: the header row grew by at most 4 pt. Measured where it
+    /// costs the layout something — the distance from the top of the title to
+    /// the first line of the panel body below it, which is exactly what pushes
+    /// siblings down in the scroll view. `HEADER_BEFORE` is that distance on
+    /// the parent commit (f0125ed), taken by the base control run.
+    #[test]
+    fn title_row_grows_by_at_most_four_points() {
+        // The card's budget.
+        const HEADER_GROWTH_BUDGET: f32 = 4.0;
+        // Parent commit (f0125ed) at 960x1040: title top 52.0, first body
+        // line top 75.5 -> 23.5 pt from title top to body top.
+        const HEADER_BEFORE: f32 = 23.5;
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        app.onboard = None;
+        fake_state(&app, client::now_ms());
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let shapes = frame(&ctx, &mut app, 960.0, 1040.0, vec![]);
+        let (title_text, title) = text_rects(&shapes)
+            .into_iter()
+            .find(|(s, _)| s.starts_with("v cpu"))
+            .expect("cpu title");
+        assert!(title_text.contains("i7-9750H"), "title carries the model: {title_text:?}");
+        // The first line of the cpu body: the total-usage readout.
+        let body_top = text_rects(&shapes)
+            .iter()
+            .find(|(s, r)| s.trim_start().starts_with("69.0%") && r.top() > title.bottom() - 1.0)
+            .map(|(_, r)| r.top())
+            .expect("the first cpu body line");
+        let after = body_top - title.top();
+        assert!(
+            after - HEADER_BEFORE <= HEADER_GROWTH_BUDGET,
+            "header row grew {} pt (was {HEADER_BEFORE}, now {after}); budget {HEADER_GROWTH_BUDGET}",
+            after - HEADER_BEFORE
+        );
+    }
+
     /// An over-long model elides with `…` on one row at the minimum width and
     /// does not grow the header row.
     #[test]

@@ -152,7 +152,32 @@ pub fn short_gpu_name(name: &str) -> &str {
     name.strip_prefix("NVIDIA ").unwrap_or(name)
 }
 
-/// Titled box with btop-like border. Title is proportional (phase 1);
+/// Point size added to [`egui::TextStyle::Body`] for a panel title. Body
+/// text is 13 pt, so a title renders at 15 pt: the heading line box is
+/// taller than any body line in the same frame, which is what makes a
+/// section boundary visible at a glance
+/// (`panel_titles_render_larger_than_body_text`).
+pub const TITLE_STEP: f32 = 2.0;
+
+/// Extra letter tracking (points) on the title run. Tracking widens the
+/// wordmark without touching glyph height, so it reads as a heading without
+/// growing the header row any further.
+pub const TITLE_TRACKING: f32 = 0.5;
+
+/// Height (points) of the rule drawn under the title row: a `LINE` hairline
+/// with an `ACCENT` hairline on top. Painted into the 2 px gap the header
+/// already left, so the section rule costs the layout nothing.
+pub const TITLE_RULE: f32 = 2.0;
+
+/// The title font: body family, one step larger. Kept a function of the
+/// body style so a theme change moves both together.
+pub fn title_font(style: &egui::Style) -> egui::FontId {
+    let body = egui::TextStyle::Body.resolve(style);
+    egui::FontId::new(body.size + TITLE_STEP, body.family)
+}
+
+/// Titled box with btop-like border. Title is proportional and one step
+/// larger than body text, with an accent rule under it (phase 1);
 /// numbers inside stay monospace. Clicking the title collapses/expands
 /// (`open` false = collapsed, content is skipped so frame cost drops
 /// and siblings reflow). Arrow is ASCII (proportional lacks ▼/▶).
@@ -182,17 +207,21 @@ pub fn panel_with_model(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let arrow = if *open { "v " } else { "> " };
-            let font = egui::TextStyle::Body.resolve(ui.style());
-            let fmt = |color: Color32| egui::text::TextFormat { font_id: font.clone(), color, ..Default::default() };
+            let font = title_font(ui.style());
+            let fmt = |color: Color32| egui::text::TextFormat {
+                font_id: font.clone(),
+                color,
+                extra_letter_spacing: TITLE_TRACKING,
+                ..Default::default()
+            };
             let mut job = egui::text::LayoutJob::default();
             job.append(&format!("{arrow}{title}"), 0.0, fmt(ACCENT));
             if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
                 job.append(" · ", 0.0, fmt(LINE));
                 job.append(m, 0.0, fmt(DIM));
             }
-            // Clickable label (not selectable_label): same height as the
-            // old plain label, so headers don't push content out of the
-            // scroll view at half-screen (see `renders_...` test).
+            // Clickable label (not selectable_label): the whole header line is
+            // one hit target, and `sense(click)` still gives the pointer cursor.
             let resp = ui.add(
                 egui::Label::new(job)
                     .truncate()
@@ -202,8 +231,22 @@ pub fn panel_with_model(
             if resp.clicked() {
                 *open = !*open;
             }
+            // Accent rule under the title: a section boundary that survives
+            // colour blindness and a monochrome screenshot (weight cannot —
+            // the bundled family ships one weight). It spans the panel, not
+            // the label, so a short title rules off the whole section. Painted
+            // into the 2 px gap the header already left, so it costs no height.
+            let line_rect = egui::Rect::from_min_size(
+                egui::pos2(resp.rect.left(), resp.rect.bottom()),
+                egui::vec2(ui.available_width(), TITLE_RULE),
+            );
+            ui.painter().rect_filled(line_rect, 0.0, LINE);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(line_rect.min, egui::vec2(line_rect.width(), 1.0)),
+                0.0,
+                ACCENT,
+            );
             if *open {
-                ui.add_space(2.0);
                 add(ui);
             }
         });
