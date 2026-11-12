@@ -101,17 +101,16 @@ struct Onboard {
     probe_for: Option<(String, String, String)>,
 }
 
-/// Scroll + hover outcome of one linked table, consumed by the pair's
-/// proportional scroll-sync and shared hover mirror.
+/// Hover + sizing outcome of one linked table. The two bodies scroll
+/// independently; only the group frame and the shared hover mirror link them.
+/// `viewport` sizes the proc body cap; `hover` drives the mirror.
 struct LinkedTable {
-    offset: f32,
-    max: f32,
     viewport: f32,
     hover: Option<String>,
 }
 
 impl LinkedTable {
-    const NONE: Self = Self { offset: 0.0, max: 0.0, viewport: 0.0, hover: None };
+    const NONE: Self = Self { viewport: 0.0, hover: None };
 }
 
 pub struct App {
@@ -129,21 +128,12 @@ pub struct App {
     /// Workload whose row is hovered in either table. Mirrors the hover
     /// highlight across the workloads/proc pair. Transient, not persisted.
     hover_workload: Option<String>,
-    /// Proportional scroll-sync for the workloads/proc pair: last rendered
-    /// offset of each body, plus a pending offset to apply to the *other*
-    /// table next frame when the user scrolls one.
-    wl_scroll_prev: f32,
-    proc_scroll_prev: f32,
-    wl_scroll_max: f32,
-    proc_scroll_max: f32,
     /// Proc panel chrome (title + filter + table header + margins), measured
     /// each frame so the proc body cap leaves room for it and the group does
     /// not overflow in a normal window.
     proc_chrome: f32,
     /// Scroll range of the workloads+proc group frame (0 when it all fits).
     group_scroll_max: f32,
-    wl_scroll_pending: Option<f32>,
-    proc_scroll_pending: Option<f32>,
     sort: SortKey,
     desc: bool,
     selected: Option<u32>,
@@ -252,14 +242,8 @@ impl App {
             filter: String::new(),
             workload_filter: None,
             hover_workload: None,
-            wl_scroll_prev: 0.0,
-            proc_scroll_prev: 0.0,
-            wl_scroll_max: 0.0,
-            proc_scroll_max: 0.0,
             proc_chrome: 0.0,
             group_scroll_max: 0.0,
-            wl_scroll_pending: None,
-            proc_scroll_pending: None,
             sort: SortKey::Cpu,
             desc: true,
             selected: None,
@@ -456,8 +440,6 @@ impl App {
                 // and the proc cap are sized from what is actually visible.
                 let group_h = ui.available_height();
                 let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
-                let wl_synced = self.wl_scroll_pending.is_some();
-                let proc_synced = self.proc_scroll_pending.is_some();
                 let group_out = egui::ScrollArea::vertical()
                     .id_salt("tables")
                     .max_height(group_h)
@@ -481,23 +463,8 @@ impl App {
                 // Hover mirror: whichever table saw a hover owns the key this
                 // frame; both tables highlight it on the next one.
                 self.hover_workload = wl.hover.or(proc.hover);
-                // Proportional scroll-sync: a user scroll on one table moves the
-                // other to the same fraction of its range. Skip a table that was
-                // just synced so the mirror never re-triggers itself.
-                if !wl_synced && wl.max > 0.0 && proc.max > 0.0
-                    && (wl.offset - self.wl_scroll_prev).abs() > 0.5
-                {
-                    self.proc_scroll_pending = Some(wl.offset / wl.max * proc.max);
-                }
-                if !proc_synced && proc.max > 0.0 && wl.max > 0.0
-                    && (proc.offset - self.proc_scroll_prev).abs() > 0.5
-                {
-                    self.wl_scroll_pending = Some(proc.offset / proc.max * wl.max);
-                }
-                self.wl_scroll_prev = wl.offset;
-                self.proc_scroll_prev = proc.offset;
-                self.wl_scroll_max = wl.max;
-                self.proc_scroll_max = proc.max;
+                // The two bodies scroll independently: egui keeps each one's
+                // offset by id_salt, so no cross-table sync is applied here.
             });
         drop(st);
         // Apply a status-bar picker choice now that the lock is released.
@@ -1262,7 +1229,6 @@ impl App {
         let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
         let mut scroll = LinkedTable::NONE;
         let mut hover: Option<String> = None;
-        let pending = self.wl_scroll_pending.take();
         panel(ui, "workloads", &mut open, |ui| {
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
             let narrow = ui.available_width() < 640.0;
@@ -1279,9 +1245,6 @@ impl App {
                 .column(Column::exact(64.0));
             if !narrow {
                 tb = tb.column(Column::exact(76.0));
-            }
-            if let Some(off) = pending {
-                tb = tb.vertical_scroll_offset(off);
             }
             let out = tb.header(row_h + 2.0, |mut h| {
                 for name in ["Workload", "PIDs", "CPU%", "MEM%"] {
@@ -1321,8 +1284,6 @@ impl App {
                     }
                 });
             });
-            scroll.offset = out.state.clamped_offset().y;
-            scroll.max = (out.content_size.y - out.inner_rect.height()).max(0.0);
             scroll.viewport = out.inner_rect.height();
             if let Some(key) = pick {
                 self.workload_filter = if self.workload_filter.as_deref() == Some(key.as_str()) {
@@ -1344,7 +1305,6 @@ impl App {
         let mut open = !self.cfg.collapsed_proc;
         let mut scroll = LinkedTable::NONE;
         let mut hover: Option<String> = None;
-        let pending = self.proc_scroll_pending.take();
         panel(ui, "proc", &mut open, |ui| {
             let Some(p) = &st.procs else {
                 ui.label(RichText::new("waiting for data").color(w::DIM));
@@ -1428,9 +1388,6 @@ impl App {
             if !narrow {
                 cols.push(("MEM", SortKey::Mem));
             }
-            if let Some(off) = pending {
-                tb = tb.vertical_scroll_offset(off);
-            }
             let out = tb.header(row_h + 2.0, |mut h| {
                 for (name, key) in &cols {
                     let resp = h.col(|ui| {
@@ -1489,8 +1446,6 @@ impl App {
                     }
                 });
             });
-            scroll.offset = out.state.clamped_offset().y;
-            scroll.max = (out.content_size.y - out.inner_rect.height()).max(0.0);
             scroll.viewport = out.inner_rect.height();
             (self.sort, self.desc) = sort;
             self.selected = selected;
@@ -3579,7 +3534,7 @@ mod tests {
         assert!(!t2.iter().any(|x| x.contains("hindsight-api")), "unrelated row still listed: {t2:?}");
     }
 
-    // ---- Linked tables: group scroll, proportional sync, hover mirror ----
+    // ---- Linked tables: group scroll, independent inner scrolls, hover mirror ----
 
     fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
         fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
@@ -3639,7 +3594,7 @@ mod tests {
     }
 
     /// 30 workloads x 8 processes: both tables overflow their caps, so both
-    /// inner scroll areas have a non-zero range to sync.
+    /// inner scroll areas have a non-zero range to scroll independently.
     fn many_workloads(app: &App, now: u64) {
         let mut rows = vec![];
         let mut pid = 1000u32;
@@ -3700,7 +3655,7 @@ mod tests {
     }
 
     #[test]
-    fn tables_scroll_proportionally_together() {
+    fn table_inner_scrolls_are_independent() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         let now = client::now_ms();
         many_workloads(&app, now);
@@ -3708,25 +3663,33 @@ mod tests {
         style(&ctx);
         let (w, h) = (1600.0, 1000.0);
         let s1 = frame(&ctx, &mut app, w, h, vec![]);
-        assert!(app.wl_scroll_max > 0.0, "workloads table not scrollable");
-        assert!(app.proc_scroll_max > 0.0, "proc table not scrollable");
-        assert_eq!(app.proc_scroll_prev, 0.0);
-        // Point at a visible proc row, then wheel the proc table down.
-        let tr = text_rects(&s1);
-        let proc_pos = tr.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center())
+        let tr1 = text_rects(&s1);
+        // Topmost "wl-29" is the workloads pane's first row (biggest memory);
+        // the same label also appears lower down in the proc Workload column.
+        let wl_y = tr1.iter().filter(|(s, _)| s == "wl-29")
+            .map(|(_, r)| r.center().y)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .expect("wl-29 workload row visible");
+        let proc_pos = tr1.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center())
             .expect("a proc row visible");
+        let proc_y_before = tr1.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center().y).unwrap();
+        // Wheel down over the proc table only.
         for _ in 0..3 {
             frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos), wheel(-400.0)]);
         }
-        // Settle: stop wheeling so the sync pending lands and both rest.
-        for _ in 0..3 {
-            frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos)]);
-        }
-        assert!(app.proc_scroll_prev > 0.0, "proc table did not scroll");
-        assert!(app.wl_scroll_prev > 0.0, "workloads did not follow the proc scroll");
-        let pf = app.proc_scroll_prev / app.proc_scroll_max;
-        let wf = app.wl_scroll_prev / app.wl_scroll_max;
-        assert!((pf - wf).abs() < 0.02, "scroll not proportional: proc {pf:.3} vs wl {wf:.3}");
+        let s2 = frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos)]);
+        let tr2 = text_rects(&s2);
+        // The proc body scrolled: the aimed row moved up or off the top.
+        let proc_y_after = tr2.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center().y);
+        assert!(proc_y_after.map_or(true, |y| y < proc_y_before - 1.0),
+            "proc table should have scrolled under the wheel");
+        // The workloads body did NOT follow: its first row stays put.
+        let wl_y_after = tr2.iter().filter(|(s, _)| s == "wl-29")
+            .map(|(_, r)| r.center().y)
+            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .expect("wl-29 still visible");
+        assert!((wl_y_after - wl_y).abs() < 0.5,
+            "workloads must not follow the proc scroll: {wl_y:.1} -> {wl_y_after:.1}");
     }
 
     #[test]
