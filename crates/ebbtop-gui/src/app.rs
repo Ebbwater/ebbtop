@@ -101,6 +101,19 @@ struct Onboard {
     probe_for: Option<(String, String, String)>,
 }
 
+/// Scroll + hover outcome of one linked table, consumed by the pair's
+/// proportional scroll-sync and shared hover mirror.
+struct LinkedTable {
+    offset: f32,
+    max: f32,
+    viewport: f32,
+    hover: Option<String>,
+}
+
+impl LinkedTable {
+    const NONE: Self = Self { offset: 0.0, max: 0.0, viewport: 0.0, hover: None };
+}
+
 pub struct App {
     cfg: Config,
     shared: Arc<Mutex<State>>,
@@ -113,6 +126,24 @@ pub struct App {
     /// None shows every workload. Set by clicking a workload row, cleared by
     /// clicking it again or the chip in the proc header.
     workload_filter: Option<String>,
+    /// Workload whose row is hovered in either table. Mirrors the hover
+    /// highlight across the workloads/proc pair. Transient, not persisted.
+    hover_workload: Option<String>,
+    /// Proportional scroll-sync for the workloads/proc pair: last rendered
+    /// offset of each body, plus a pending offset to apply to the *other*
+    /// table next frame when the user scrolls one.
+    wl_scroll_prev: f32,
+    proc_scroll_prev: f32,
+    wl_scroll_max: f32,
+    proc_scroll_max: f32,
+    /// Proc panel chrome (title + filter + table header + margins), measured
+    /// each frame so the proc body cap leaves room for it and the group does
+    /// not overflow in a normal window.
+    proc_chrome: f32,
+    /// Scroll range of the workloads+proc group frame (0 when it all fits).
+    group_scroll_max: f32,
+    wl_scroll_pending: Option<f32>,
+    proc_scroll_pending: Option<f32>,
     sort: SortKey,
     desc: bool,
     selected: Option<u32>,
@@ -220,6 +251,15 @@ impl App {
             token_src,
             filter: String::new(),
             workload_filter: None,
+            hover_workload: None,
+            wl_scroll_prev: 0.0,
+            proc_scroll_prev: 0.0,
+            wl_scroll_max: 0.0,
+            proc_scroll_max: 0.0,
+            proc_chrome: 0.0,
+            group_scroll_max: 0.0,
+            wl_scroll_pending: None,
+            proc_scroll_pending: None,
             sort: SortKey::Cpu,
             desc: true,
             selected: None,
@@ -410,8 +450,54 @@ impl App {
                 // Detail pane sits between the top boxes and the process
                 // table; it is hidden unless a row is selected.
                 self.proc_detail_box(ui, &st, slots);
-                self.workloads_box(ui, &st);
-                self.proc_box(ui, &st);
+                // Workloads + proc scroll as a group (like the top resource
+                // boxes) while each keeps its own inner scroll. Capture the
+                // viewport height before the group so the short-window rule
+                // and the proc cap are sized from what is actually visible.
+                let group_h = ui.available_height();
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
+                let wl_synced = self.wl_scroll_pending.is_some();
+                let proc_synced = self.proc_scroll_pending.is_some();
+                let group_out = egui::ScrollArea::vertical()
+                    .id_salt("tables")
+                    .max_height(group_h)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let y0 = ui.cursor().min.y;
+                        let wl = self.workloads_box(ui, &st, group_h);
+                        let wl_h = ui.cursor().min.y - y0;
+                        // Proc fills what the roll-up leaves (minus its own
+                        // chrome), with a floor so a short window scrolls the
+                        // group instead of squeezing.
+                        let proc_cap = (group_h - wl_h - self.proc_chrome).max(row_h * 8.0);
+                        let y1 = ui.cursor().min.y;
+                        let proc = self.proc_box(ui, &st, proc_cap);
+                        self.proc_chrome = (ui.cursor().min.y - y1) - proc.viewport;
+                        (wl, proc)
+                    });
+                let (wl, proc) = group_out.inner;
+                self.group_scroll_max =
+                    (group_out.content_size.y - group_out.inner_rect.height()).max(0.0);
+                // Hover mirror: whichever table saw a hover owns the key this
+                // frame; both tables highlight it on the next one.
+                self.hover_workload = wl.hover.or(proc.hover);
+                // Proportional scroll-sync: a user scroll on one table moves the
+                // other to the same fraction of its range. Skip a table that was
+                // just synced so the mirror never re-triggers itself.
+                if !wl_synced && wl.max > 0.0 && proc.max > 0.0
+                    && (wl.offset - self.wl_scroll_prev).abs() > 0.5
+                {
+                    self.proc_scroll_pending = Some(wl.offset / wl.max * proc.max);
+                }
+                if !proc_synced && proc.max > 0.0 && wl.max > 0.0
+                    && (proc.offset - self.proc_scroll_prev).abs() > 0.5
+                {
+                    self.wl_scroll_pending = Some(proc.offset / proc.max * wl.max);
+                }
+                self.wl_scroll_prev = wl.offset;
+                self.proc_scroll_prev = proc.offset;
+                self.wl_scroll_max = wl.max;
+                self.proc_scroll_max = proc.max;
             });
         drop(st);
         // Apply a status-bar picker choice now that the lock is released.
@@ -1162,25 +1248,29 @@ impl App {
     /// Workload roll-up: one row per cgroup boundary (container, unit, host),
     /// summed from the current process sample. Clicking a row filters the
     /// process table to that workload; clicking the active row clears it.
-    fn workloads_box(&mut self, ui: &mut Ui, st: &State) {
+    fn workloads_box(&mut self, ui: &mut Ui, st: &State, viewport_h: f32) -> LinkedTable {
         if st.procs.is_none() || st.workloads.is_empty() {
-            return;
+            return LinkedTable::NONE;
         }
         // Short window: the process table matters more than the roll-up, and
         // the pane would push its first rows offscreen (seen at 480x420).
-        if ui.available_height() < 240.0 {
-            return;
+        // Measured on the viewport, not the (unbounded) group scroll height.
+        if viewport_h < 240.0 {
+            return LinkedTable::NONE;
         }
         let mut open = !self.cfg.collapsed_workloads;
         let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
+        let mut scroll = LinkedTable::NONE;
+        let mut hover: Option<String> = None;
+        let pending = self.wl_scroll_pending.take();
         panel(ui, "workloads", &mut open, |ui| {
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
             let narrow = ui.available_width() < 640.0;
             let mut pick: Option<String> = None;
             let mut tb = TableBuilder::new(ui)
+                .id_salt("workloads-table")
                 .striped(true)
                 .sense(egui::Sense::click())
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .auto_shrink([false, true])
                 .max_scroll_height(row_h * 7.0)
                 .column(Column::remainder().at_least(120.0).clip(true))
@@ -1190,7 +1280,10 @@ impl App {
             if !narrow {
                 tb = tb.column(Column::exact(76.0));
             }
-            tb.header(row_h + 2.0, |mut h| {
+            if let Some(off) = pending {
+                tb = tb.vertical_scroll_offset(off);
+            }
+            let out = tb.header(row_h + 2.0, |mut h| {
                 for name in ["Workload", "PIDs", "CPU%", "MEM%"] {
                     h.col(|ui| {
                         ui.label(RichText::new(name).monospace().strong().color(w::TEXT));
@@ -1207,6 +1300,10 @@ impl App {
                     let g = &st.workloads[row.index()];
                     let active = self.workload_filter.as_deref() == Some(g.key.as_str());
                     row.set_selected(active);
+                    // Hover mirror: highlight the row matching the shared key.
+                    if self.hover_workload.as_deref() == Some(g.key.as_str()) {
+                        row.set_hovered(true);
+                    }
                     let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
                     let memf = g.mem_bytes as f32 * 100.0 / mem_total as f32;
                     row.col(|ui| { ui.label(mono(view::workload_label(&g.key), if active { w::ACCENT } else { w::TEXT })); });
@@ -1216,11 +1313,17 @@ impl App {
                     if !narrow {
                         row.col(|ui| { ui.label(mono(view::bytes(g.mem_bytes), w::DIM)); });
                     }
+                    if row.response().hovered() {
+                        hover = Some(g.key.clone());
+                    }
                     if row.response().clicked() {
                         pick = Some(g.key.clone());
                     }
                 });
             });
+            scroll.offset = out.state.clamped_offset().y;
+            scroll.max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+            scroll.viewport = out.inner_rect.height();
             if let Some(key) = pick {
                 self.workload_filter = if self.workload_filter.as_deref() == Some(key.as_str()) {
                     None
@@ -1233,10 +1336,15 @@ impl App {
             self.cfg.collapsed_workloads = !open;
             let _ = store::save_config(&self.cfg);
         }
+        scroll.hover = hover;
+        scroll
     }
 
-    fn proc_box(&mut self, ui: &mut Ui, st: &State) {
+    fn proc_box(&mut self, ui: &mut Ui, st: &State, max_h: f32) -> LinkedTable {
         let mut open = !self.cfg.collapsed_proc;
+        let mut scroll = LinkedTable::NONE;
+        let mut hover: Option<String> = None;
+        let pending = self.proc_scroll_pending.take();
         panel(ui, "proc", &mut open, |ui| {
             let Some(p) = &st.procs else {
                 ui.label(RichText::new("waiting for data").color(w::DIM));
@@ -1296,10 +1404,11 @@ impl App {
             }
             let narrow = ui.available_width() < 640.0;
             let mut tb = TableBuilder::new(ui)
+                .id_salt("proc-table")
                 .striped(true)
                 .sense(egui::Sense::click())
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                 .auto_shrink([false, false])
+                .max_scroll_height(max_h)
                 .column(Column::exact(64.0))
                 .column(Column::remainder().at_least(110.0).clip(true));
             if !narrow {
@@ -1319,7 +1428,10 @@ impl App {
             if !narrow {
                 cols.push(("MEM", SortKey::Mem));
             }
-            tb.header(row_h + 2.0, |mut h| {
+            if let Some(off) = pending {
+                tb = tb.vertical_scroll_offset(off);
+            }
+            let out = tb.header(row_h + 2.0, |mut h| {
                 for (name, key) in &cols {
                     let resp = h.col(|ui| {
                         let on = sort.0 == *key;
@@ -1349,7 +1461,12 @@ impl App {
             .body(|body| {
                 body.rows(row_h, idx.len(), |mut row| {
                     let r = &p.rows[idx[row.index()]];
+                    let row_wk = st.row_workload.get(idx[row.index()]).map(String::as_str);
                     row.set_selected(selected == Some(r.pid));
+                    // Hover mirror: highlight rows owned by the shared key.
+                    if self.hover_workload.as_deref().is_some() && row_wk == self.hover_workload.as_deref() {
+                        row.set_hovered(true);
+                    }
                     let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
                     let memf = r.mem_bytes as f32 * 100.0 / mem_total as f32;
                     row.col(|ui| { ui.label(mono(r.pid.to_string(), w::DIM)); });
@@ -1362,14 +1479,19 @@ impl App {
                     row.col(|ui| { ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0))); });
                     if !narrow {
                         row.col(|ui| { ui.label(mono(view::bytes(r.mem_bytes), w::DIM)); });
-                        let wk = st.row_workload.get(idx[row.index()]).map(String::as_str).unwrap_or("");
-                        row.col(|ui| { ui.label(mono(view::workload_label(wk), w::DIM)); });
+                        row.col(|ui| { ui.label(mono(view::workload_label(row_wk.unwrap_or("")), w::DIM)); });
+                    }
+                    if row.response().hovered() {
+                        hover = row_wk.map(|s| s.to_string());
                     }
                     if row.response().clicked() {
                         selected = if selected == Some(r.pid) { None } else { Some(r.pid) };
                     }
                 });
             });
+            scroll.offset = out.state.clamped_offset().y;
+            scroll.max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+            scroll.viewport = out.inner_rect.height();
             (self.sort, self.desc) = sort;
             self.selected = selected;
         });
@@ -1378,6 +1500,8 @@ impl App {
             self.cfg.collapsed_proc = collapsed;
             let _ = store::save_config(&self.cfg);
         }
+        scroll.hover = hover;
+        scroll
     }
 
     /// Name/URL checks shared by Settings add and the onboarding test.
@@ -3454,4 +3578,195 @@ mod tests {
         assert!(t2.iter().any(|x| x.contains("workload: davy-pg")), "active chip missing: {t2:?}");
         assert!(!t2.iter().any(|x| x.contains("hindsight-api")), "unrelated row still listed: {t2:?}");
     }
+
+    // ---- Linked tables: group scroll, proportional sync, hover mirror ----
+
+    fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match s {
+                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.visual_bounding_rect())),
+                egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let mut out = vec![];
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    fn fill_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, egui::Color32)> {
+        fn walk(s: &egui::Shape, out: &mut Vec<(egui::Rect, egui::Color32)>) {
+            match s {
+                egui::Shape::Rect(r) => out.push((r.rect, r.fill)),
+                egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let mut out = vec![];
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// One frame on a caller-owned context, so scroll offsets and hover state
+    /// accumulate across frames (unlike `render`, which resets the context).
+    fn frame(ctx: &egui::Context, app: &mut App, w: f32, h: f32, events: Vec<egui::Event>) -> Vec<egui::epaint::ClippedShape> {
+        {
+            let shared = app.shared();
+            let mut s = shared.lock().unwrap();
+            if s.last_new_sample_recv_ms != 0 {
+                s.last_new_sample_recv_ms = client::now_ms();
+            }
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.textures_delta.clear();
+        out.shapes
+    }
+
+    fn wheel(dy: f32) -> egui::Event {
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::default(),
+        }
+    }
+
+    /// 30 workloads x 8 processes: both tables overflow their caps, so both
+    /// inner scroll areas have a non-zero range to sync.
+    fn many_workloads(app: &App, now: u64) {
+        let mut rows = vec![];
+        let mut pid = 1000u32;
+        for w in 0..30u32 {
+            let cg = format!("/user.slice/user-1000.slice/user@1000.service/app.slice/wl-{w:02}.service");
+            for k in 0..8u32 {
+                rows.push(Process {
+                    pid,
+                    name: format!("p{w:02}-{k}"),
+                    cpu_usage: k as f32,
+                    mem_bytes: (w as u64 + 1) * (10 << 20),
+                    user: "kyler".into(),
+                    state: "Sleeping".into(),
+                    start_time_ms: pid as u64,
+                    cgroup: cg.clone(),
+                });
+                pid += 1;
+            }
+        }
+        let shared = app.shared();
+        let mut s = shared.lock().unwrap();
+        s.apply(Event::Connected, now);
+        s.apply(Event::Processes {
+            p: Processes { process_count: rows.len() as u64, rows, sampled_at_ms: now },
+            recv_ms: now,
+        }, now);
+    }
+
+
+
+
+
+
+
+    #[test]
+    fn tables_group_scrolls_when_panes_overflow() {
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        // Drop the resource boxes so the group gets a predictable viewport.
+        app.cfg.show_cpu = false;
+        app.cfg.show_gpu = false;
+        app.cfg.show_mem = false;
+        app.cfg.show_net = false;
+        app.cfg.show_disk = false;
+        let now = client::now_ms();
+        many_workloads(&app, now);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        // Short window: workloads still shows (>=240px) but workloads+proc
+        // overflow, so the GROUP scrolls instead of squeezing the proc table.
+        // A couple of frames let the proc-chrome calibration settle.
+        let mut s = vec![];
+        for _ in 0..3 {
+            s = frame(&ctx, &mut app, 1600.0, 350.0, vec![]);
+        }
+        let t = texts(&s);
+        assert!(t.iter().any(|x| x.contains("workloads")), "workloads pane should show: {t:?}");
+        assert!(t.iter().any(|x| x.contains("proc")), "proc pane should show: {t:?}");
+        assert!(app.group_scroll_max > 0.0, "group should scroll when panes overflow");
+        // Tall window: everything fits, no group scroll (looks like before).
+        for _ in 0..3 {
+            frame(&ctx, &mut app, 1600.0, 1200.0, vec![]);
+        }
+        assert_eq!(app.group_scroll_max, 0.0, "group should not scroll when content fits");
+    }
+
+    #[test]
+    fn tables_scroll_proportionally_together() {
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        let now = client::now_ms();
+        many_workloads(&app, now);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (1600.0, 1000.0);
+        let s1 = frame(&ctx, &mut app, w, h, vec![]);
+        assert!(app.wl_scroll_max > 0.0, "workloads table not scrollable");
+        assert!(app.proc_scroll_max > 0.0, "proc table not scrollable");
+        assert_eq!(app.proc_scroll_prev, 0.0);
+        // Point at a visible proc row, then wheel the proc table down.
+        let tr = text_rects(&s1);
+        let proc_pos = tr.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center())
+            .expect("a proc row visible");
+        for _ in 0..3 {
+            frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos), wheel(-400.0)]);
+        }
+        // Settle: stop wheeling so the sync pending lands and both rest.
+        for _ in 0..3 {
+            frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos)]);
+        }
+        assert!(app.proc_scroll_prev > 0.0, "proc table did not scroll");
+        assert!(app.wl_scroll_prev > 0.0, "workloads did not follow the proc scroll");
+        let pf = app.proc_scroll_prev / app.proc_scroll_max;
+        let wf = app.wl_scroll_prev / app.wl_scroll_max;
+        assert!((pf - wf).abs() < 0.02, "scroll not proportional: proc {pf:.3} vs wl {wf:.3}");
+    }
+
+    #[test]
+    fn hover_mirrors_between_workloads_and_proc() {
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        let now = client::now_ms();
+        workload_rows(&app, now);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (1600.0, 1000.0);
+        let s1 = frame(&ctx, &mut app, w, h, vec![]);
+        let tr = text_rects(&s1);
+        let hover_fill = egui::Color32::from_gray(70);
+        // A row is mirror-highlighted when a hovered-fill rect covers its label.
+        let highlighted = |shapes: &[egui::epaint::ClippedShape], label: &str| -> bool {
+            let Some(r) = tr.iter().find(|(s, _)| s == label).map(|(_, r)| *r) else { return false };
+            fill_rects(shapes).iter().any(|(fr, c)| *c == hover_fill && fr.contains(r.center()))
+        };
+        // Workload -> proc: the davy-pg key lights its member process rows…
+        app.hover_workload = Some("davy-pg.service".into());
+        let s2 = frame(&ctx, &mut app, w, h, vec![]);
+        assert!(highlighted(&s2, "2730"), "davy-pg proc row not mirrored");
+        assert!(highlighted(&s2, "2862"), "second davy-pg proc row not mirrored");
+        // …and not rows of another workload.
+        assert!(!highlighted(&s2, "hindsight-api"), "unrelated proc row wrongly mirrored");
+        // Proc -> workload: the davy-hindsight key lights its workload row and procs.
+        app.hover_workload = Some("davy-hindsight.service".into());
+        let s3 = frame(&ctx, &mut app, w, h, vec![]);
+        assert!(highlighted(&s3, "hindsight-api"), "hindsight proc row not mirrored");
+        assert!(highlighted(&s3, "davy-hindsight"), "hindsight workload row not mirrored");
+        // Clearing the hover removes the mirror.
+        app.hover_workload = None;
+        let s4 = frame(&ctx, &mut app, w, h, vec![]);
+        assert!(!highlighted(&s4, "2730"), "mirror not cleared");
+    }
+
 }
