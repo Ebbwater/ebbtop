@@ -1313,7 +1313,7 @@ impl App {
                     if !narrow {
                         row.col(|ui| { ui.label(mono(view::bytes(g.mem_bytes), w::DIM)); });
                     }
-                    if row.response().hovered() {
+                    if row.response().container_hovered() {
                         hover = Some(g.key.clone());
                     }
                     if row.response().clicked() {
@@ -1481,7 +1481,7 @@ impl App {
                         row.col(|ui| { ui.label(mono(view::bytes(r.mem_bytes), w::DIM)); });
                         row.col(|ui| { ui.label(mono(view::workload_label(row_wk.unwrap_or("")), w::DIM)); });
                     }
-                    if row.response().hovered() {
+                    if row.response().container_hovered() {
                         hover = row_wk.map(|s| s.to_string());
                     }
                     if row.response().clicked() {
@@ -3668,12 +3668,6 @@ mod tests {
         }, now);
     }
 
-
-
-
-
-
-
     #[test]
     fn tables_group_scrolls_when_panes_overflow() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
@@ -3733,6 +3727,43 @@ mod tests {
         let pf = app.proc_scroll_prev / app.proc_scroll_max;
         let wf = app.wl_scroll_prev / app.wl_scroll_max;
         assert!((pf - wf).abs() < 0.02, "scroll not proportional: proc {pf:.3} vs wl {wf:.3}");
+    }
+
+    #[test]
+    fn hover_detection_sets_shared_key() {
+        let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+        let now = client::now_ms();
+        workload_rows(&app, now);
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (1600.0, 1000.0);
+        // Settle, then aim at the davy-pg workload row's NAME (topmost occurrence;
+        // the same label also appears lower down in the proc Workload column).
+        let s0 = frame(&ctx, &mut app, w, h, vec![]);
+        let target = text_rects(&s0).iter()
+            .filter(|(s, _)| s == "davy-pg")
+            .map(|(_, r)| r.center())
+            .min_by(|a, b| a.y.partial_cmp(&b.y).unwrap())
+            .expect("davy-pg workload row");
+        let mut shapes = s0;
+        for _ in 0..3 {
+            shapes = frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(target)]);
+        }
+        // Hovering the label text itself must set the key: a child label covering
+        // the pointer defeats Response::hovered(), so detection uses container_hovered().
+        assert_eq!(app.hover_workload.as_deref(), Some("davy-pg.service"),
+            "hovering the workload name must set the shared key");
+        // End-to-end: the detected key mirrors onto the member proc rows.
+        let hover_fill = egui::Color32::from_gray(70);
+        let tr = text_rects(&shapes);
+        let pid_rect = tr.iter().find(|(s, _)| s == "2730").map(|(_, r)| *r).expect("proc row 2730");
+        assert!(fill_rects(&shapes).iter().any(|(fr, c)| *c == hover_fill && fr.contains(pid_rect.center())),
+            "detected hover must mirror onto the proc row");
+        // Moving the pointer off the tables clears the key.
+        for _ in 0..3 {
+            frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(egui::pos2(5.0, 5.0))]);
+        }
+        assert_eq!(app.hover_workload, None, "hover must clear when the pointer leaves");
     }
 
     #[test]
