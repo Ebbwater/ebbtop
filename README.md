@@ -15,7 +15,7 @@ The client is multi-host with onboarding, Settings and a source picker
 | `crates/ebbtop-agent` | monitored Linux host | Owned agent. Same WebSocket wire protocol; `SOCKTOP_*` env names still accepted as fallback for `EBBTOP_*`. |
 | `crates/ebbtop-core` | any OS | Wire decode, reconnecting poll loop, history and tick stats, view helpers, `ebbtop-probe`. No GUI types; a Tauri or TUI front end can reuse it. |
 | `crates/ebbtop-gui` | Windows and Mac | `ebbtop` exe, egui 0.37 / eframe (glow). |
-| `deploy/` | | Agent user unit and install script, agent-host acceptance script, Windows/macOS build scripts, log parsers. |
+| `deploy/` | | Agent user unit and install script, install/uninstall wizards (`agent-wizard.sh`, `windows/setup.ps1`, `mac/setup.sh`), agent-host acceptance script, Windows/macOS build scripts, log parsers. |
 
 ### Agent extensions (marked `ebbtop` in source)
 
@@ -41,7 +41,46 @@ New proto fields are additive. The client decodes a legacy agent too, with empty
 
 ## Install
 
-Prebuilt binaries live on the [Releases page](https://github.com/Ebbwater/ebbtop/releases): `ebbtop.exe` + `ebbtop-probe.exe` + `install.ps1` (Windows), `EbbTop.app.zip` (macOS). The agent binary is built on the host itself by `install-agent.sh` (one Rust toolchain, no download).
+Prebuilt binaries live on the [Releases page](https://github.com/Ebbwater/ebbtop/releases): `ebbtop.exe` + `ebbtop-probe.exe` + `install.ps1` + `setup.ps1` (Windows), `EbbTop.app.zip` (macOS). The agent binary is built on the host itself by `install-agent.sh` (one Rust toolchain, no download).
+
+### Wizards (install and uninstall)
+
+Three guided scripts sit on top of the same install paths described below. Each
+one shows the state it found, prints the plan, asks once, acts, then verifies
+the result and says what was kept. With no arguments the script opens a menu;
+with an action it runs one step and exits.
+
+| Surface | Wizard | Install | Uninstall |
+|---|---|---|---|
+| Agent host (Linux, local or over SSH) | `deploy/agent-wizard.sh` | builds or ships the agent, unit, token, probe | stops and disables the unit, removes the binary; `--purge` also deletes the token |
+| Windows client | `deploy/windows/setup.ps1` | verifies `SHA256SUMS`, then runs `install.ps1` | removes exe, backup and shortcuts; `-Purge` also deletes config, logs and the stored credentials |
+| macOS client | `deploy/mac/setup.sh` | installs `EbbTop.app` from `dist/`, `~/Downloads` or `--from` | removes the bundle; `--purge` also deletes config, log and the keychain tokens |
+
+```
+deploy/agent-wizard.sh                                    # menu (this host)
+deploy/agent-wizard.sh install                            # this host, from this tree
+deploy/agent-wizard.sh install --host user@otherhost       # remote host over SSH
+deploy/agent-wizard.sh status
+deploy/agent-wizard.sh uninstall --purge
+
+powershell -ExecutionPolicy Bypass -File deploy\windows\setup.ps1          # menu
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Action install -Exe .\ebbtop.exe -Autostart
+powershell -ExecutionPolicy Bypass -File setup.ps1 -Action uninstall -Purge
+
+bash deploy/mac/setup.sh                                   # menu
+bash deploy/mac/setup.sh install --from ~/Downloads/EbbTop.app.zip
+bash deploy/mac/setup.sh uninstall --purge
+```
+
+`--yes` / `-Yes` takes every default (scripted installs), `--dry-run` /
+`-WhatIf` prints the plan and changes nothing, `--help` lists the flags. The
+agent wizard also accepts `--port` and `--bind`; the Windows wizard `-NoLaunch`;
+the Mac wizard `--app-dir` and `--no-open`.
+
+No wizard reads a token out. Uninstall counts the stored tokens and leaves them
+alone unless `--purge` / `-Purge` is given; the token value is never printed in
+any mode.
+
 
 ### Agent host (Linux)
 
@@ -71,14 +110,21 @@ the client via Settings/source picker, one token per host
 
 ### Windows client
 
-Download `ebbtop.exe`, `ebbtop-probe.exe`, `install.ps1` and `SHA256SUMS` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases) and compare hashes. In PowerShell on the desktop:
+Download `ebbtop.exe`, `ebbtop-probe.exe`, `install.ps1`, `setup.ps1` and `SHA256SUMS` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases) and compare hashes. In PowerShell on the desktop:
 
 ```
 mkdir $env:TEMP\ebbtop; cd $env:TEMP\ebbtop
-# (place the four downloaded files here)
+# (place the five downloaded files here)
 Get-FileHash ebbtop.exe -Algorithm SHA256      # compare with SHA256SUMS
-powershell -ExecutionPolicy Bypass -File install.ps1 -Exe .\ebbtop.exe -Autostart
+powershell -ExecutionPolicy Bypass -File setup.ps1            # wizard: install, uninstall, status
+powershell -ExecutionPolicy Bypass -File install.ps1 -Exe .\ebbtop.exe -Autostart   # or the plain install
 ```
+
+`setup.ps1` checks the exe against `SHA256SUMS` first, then runs the same
+`install.ps1`, so the result is identical; the wizard adds the prompts, the
+uninstall path and `-Purge`. Uninstalling from a folder with only `install.ps1`
+means removing the shortcuts, `%LOCALAPPDATA%\ebbtop` and `%APPDATA%\ebbtop`
+by hand.
 
 Or fetch the same files from the build host with
 `scp "<user>@<agent-host>:ebbtop/dist/*" .` (same hashes as the release).
@@ -97,13 +143,13 @@ cd ebbtop
 powershell -ExecutionPolicy Bypass -File deploy\windows\build.ps1 -Install -Autostart
 ```
 
-`install.ps1` copies the exe to `%LOCALAPPDATA%\ebbtop\ebbtop.exe`, keeps `.bak`, makes `Desktop\EbbTop.lnk` (one click) and, with `-Autostart`, a Startup shortcut. No admin.
+`install.ps1` copies the exe to `%LOCALAPPDATA%\ebbtop\ebbtop.exe`, keeps `.bak`, makes `Desktop\EbbTop.lnk` (one click) and, with `-Autostart`, a Startup shortcut. No admin. `setup.ps1 -Action uninstall` reverses all of it and leaves `%APPDATA%\ebbtop` alone unless `-Purge` is given.
 
 Config: `%APPDATA%\ebbtop\config.json` (sources, graph window, interface, disk pin, panels). Log: `%LOCALAPPDATA%\ebbtop\ebbtop.log`, one stats line a minute plus every disconnect, rotated at 2 MiB.
 
 ### macOS client
 
-Easiest: download `EbbTop.app.zip` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases), unzip, and `open EbbTop.app` (or drag it to /Applications; first launch may need right-click > Open — the bundle is ad-hoc signed). Then onboard with the host URL and token as below.
+Easiest: download `EbbTop.app.zip` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases), then, from the repo, `bash deploy/mac/setup.sh install --from ~/Downloads/EbbTop.app.zip`. That unpacks it, installs to `/Applications` (or `~/Applications` when that is not writable), clears the quarantine flag and verifies the signature; without `--from` it uses `dist/`, and it offers a local build when neither exists. `bash deploy/mac/setup.sh uninstall` reverses it. Manual route: unzip and `open EbbTop.app` (first launch may need right-click > Open — the bundle is ad-hoc signed). Then onboard with the host URL and token as below.
 
 Or build from source. Same workspace, no VM and no exe change: `ebbtop` builds natively on Apple
 Silicon (`aarch64-apple-darwin`). `ebbtop-core` has no

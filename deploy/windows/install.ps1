@@ -7,7 +7,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [switch]$Autostart,
-    [switch]$Rollback
+    [switch]$Rollback,
+    # Do not start the app afterwards (the setup wizard decides about launching).
+    [switch]$NoRelaunch
 )
 $ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:LOCALAPPDATA 'ebbtop'
@@ -69,18 +71,37 @@ try {
         Log 'swapped exe'
     }
 
-    New-Shortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'EbbTop.lnk')
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    if ($desktop) {
+        New-Shortcut (Join-Path $desktop 'EbbTop.lnk')
+    } else {
+        Log 'no Desktop folder resolved: shortcut skipped'
+        Write-Host "note: no Desktop folder resolved for this account, shortcut skipped"
+    }
     if ($Autostart) {
-        New-Shortcut (Join-Path ([Environment]::GetFolderPath('Startup')) 'EbbTop.lnk')
+        $startup = [Environment]::GetFolderPath('Startup')
+        if ($startup) {
+            New-Shortcut (Join-Path $startup 'EbbTop.lnk')
+        } else {
+            Log 'no Startup folder resolved: autostart shortcut skipped'
+            Write-Host "note: no Startup folder resolved for this account, autostart skipped"
+        }
     }
 
     # Relaunch the installed version so "Restart to update" actually restarts.
-    Start-Process -FilePath $dst -WorkingDirectory $dir
-    Log 'relaunched'
+    if ($NoRelaunch) {
+        Log 'relaunch skipped (-NoRelaunch)'
+    } else {
+        Start-Process -FilePath $dst -WorkingDirectory $dir
+        Log 'relaunched'
+    }
 
     $hash = (Get-FileHash $dst -Algorithm SHA256).Hash.Substring(0, 16)
     Write-Host "installed $dst sha256:$hash"
-    Write-Host "shortcut: Desktop\EbbTop.lnk$(if ($Autostart) { ' + Startup' })"
+    $made = @()
+    if ($desktop) { $made += 'Desktop' }
+    if ($Autostart -and $startup) { $made += 'Startup' }
+    if ($made.Count -gt 0) { Write-Host ("shortcut: " + ($made -join ' + ')) } else { Write-Host 'shortcut: none created' }
     Write-Host "log: $dir\ebbtop.log (updater: $log)"
 } catch {
     try { Log ('ERROR {0}' -f $_) } catch {}

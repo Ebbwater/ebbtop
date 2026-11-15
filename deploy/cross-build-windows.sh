@@ -29,6 +29,7 @@ cargo build --release --locked --target "$T" -p ebbtop-gui -p ebbtop-core
 mkdir -p dist
 cp "target/$T/release/ebbtop.exe" "target/$T/release/ebbtop-probe.exe" dist/
 cp deploy/windows/install.ps1 dist/
+cp deploy/windows/setup.ps1 dist/
 # Refuse to ship an exe that needs a non-system DLL. bcrypt.dll is inbox
 # since Vista (like the bcryptprimitives.dll already listed): rustls/ring
 # uses BCryptGenRandom on Windows, so the updater's verified-download stack
@@ -38,7 +39,7 @@ for f in dist/ebbtop.exe dist/ebbtop-probe.exe; do
     grep -viE '^(api-ms-win-|advapi32|bcrypt|bcryptprimitives|combase|dwmapi|gdi32|imm32|kernel32|ntdll|ole32|oleaut32|opengl32|shell32|uiautomationcore|user32|uxtheme|ws2_32)' || true)
   [[ -z "$extra" ]] || { echo "$f imports non-system DLLs: $extra"; exit 1; }
 done
-(cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 > SHA256SUMS)
+(cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 > SHA256SUMS)
 {
   echo "version $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
   echo "commit $(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)"
