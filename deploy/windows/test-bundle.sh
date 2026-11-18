@@ -22,6 +22,22 @@ for name in "${sources[@]}" SHA256SUMS; do cmp "$name" "$TMP/extracted/$name"; d
 cmp "$ROOT/Install EbbTop.cmd" "$TMP/extracted/Install EbbTop.cmd"
 sha256sum "$archive" > "$TMP/previous"
 
+mkdir "$TMP/without launcher"
+cp "$ROOT/bundle.sh" "$TMP/without launcher/"
+if bash "$TMP/without launcher/bundle.sh" "$PWD" > "$TMP/refusal" 2>&1; then
+  printf 'packager accepted a missing launcher\n' >&2
+  exit 1
+fi
+sha256sum -c "$TMP/previous"
+mv BUILD "$TMP/BUILD"
+if bash "$ROOT/bundle.sh" "$PWD" > "$TMP/refusal" 2>&1; then
+  printf 'packager accepted a missing BUILD\n' >&2
+  exit 1
+fi
+sha256sum -c "$TMP/previous"
+mv "$TMP/BUILD" BUILD
+
+printf 'Expecting checksum refusal for the modified executable\n'
 printf 'changed after the checksum was generated\n' >> ebbtop.exe
 if bash "$ROOT/bundle.sh" "$PWD"; then
   printf 'packager accepted a mismatched checksum\n' >&2

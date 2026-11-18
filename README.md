@@ -47,7 +47,7 @@ New proto fields are additive. The client decodes a legacy agent too, with empty
 
 ## Install
 
-Prebuilt binaries live on the [Releases page](https://github.com/Ebbwater/ebbtop/releases): `ebbtop.exe` + `ebbtop-probe.exe` + `install.ps1` + `setup.ps1` (Windows), `EbbTop.app.zip` (macOS). The agent binary is built on the host itself by `install-agent.sh` (one Rust toolchain, no download).
+Get desktop downloads from the [Releases page](https://github.com/Ebbwater/ebbtop/releases). Look for `EbbTop-Windows-x64.zip` or the individual Windows files, and for `EbbTop.app.zip` on macOS. On Linux, `install-agent.sh` builds the agent with Rust/Cargo.
 
 ### Wizards (install and uninstall)
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Cross-build ebbtop.exe and ebbtop-probe.exe for Windows on Linux, into dist/.
+# Cross-build the Windows executables and installer ZIP on Linux, into dist/.
+# The packaging step uses Info-ZIP zip and unzip.
 # Toolchain: llvm-mingw 20261020 ucrt (sha256 55064b60...e8ae335), unpacked in
 # ~/.local/opt/llvm-mingw. Static CRT so the exe needs only system DLLs.
 # The .exe icon (crates/ebbtop-gui/build.rs, winresource) needs the rc step:
