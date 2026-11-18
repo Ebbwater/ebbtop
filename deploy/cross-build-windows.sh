@@ -44,4 +44,5 @@ done
   echo "version $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
   echo "commit $(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)"
 } > dist/BUILD
+bash deploy/windows/bundle.sh dist
 cat dist/SHA256SUMS dist/BUILD

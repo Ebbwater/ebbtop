@@ -8,6 +8,12 @@ VPN, or LAN; the token is the gate.
 The client is multi-host with onboarding, Settings and a source picker
 (token per host, kept in the OS credential store).
 
+## Start Here
+
+1. **Install the Linux agent.** On each host you want to monitor, clone this repo and run `bash deploy/agent-wizard.sh install` from the checkout. It builds with Rust/Cargo and installs a systemd user service. Choose the host's private IP when prompted. See [Agent host](#agent-host-linux) for remote install and starting the service at boot.
+2. **Install the desktop app.** On Windows x64, download `EbbTop-Windows-x64.zip` from [Releases](https://github.com/Ebbwater/ebbtop/releases), extract the entire ZIP, and double-click `Install EbbTop.cmd`. For releases without the ZIP, use the [individual Windows files](#windows-client). On Mac, download `EbbTop.app.zip` from the newest release that includes it, unzip it, and move EbbTop to Applications. See [macOS client](#macos-client) for first-launch help.
+3. **Connect to your first host.** On the same private network or VPN, open EbbTop and enter a source name, `ws://<host>:45976/ws`, and the token from `~/services/ebbtop-agent/ebbtop.token` on that host. Use the port shown by the installer if you changed it. Select **Test**, then **Save and connect**. Wait for **LIVE** and confirm that the process table updates. Add other hosts in **Settings → Sources**, each with its own token.
+
 ## Parts
 
 | Part | Where | What |
@@ -110,7 +116,9 @@ the client via Settings/source picker, one token per host
 
 ### Windows client
 
-Download `ebbtop.exe`, `ebbtop-probe.exe`, `install.ps1`, `setup.ps1` and `SHA256SUMS` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases) and compare hashes. In PowerShell on the desktop:
+For a release that includes `EbbTop-Windows-x64.zip`, download and extract the ZIP, then double-click `Install EbbTop.cmd`. Keep the extracted files together. The launcher opens the install wizard, which asks for confirmation before installing and launching EbbTop.
+
+For releases with individual downloads, get `ebbtop.exe`, `ebbtop-probe.exe`, `install.ps1`, `setup.ps1` and `SHA256SUMS` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases) and compare hashes. In PowerShell on the desktop:
 
 ```
 mkdir $env:TEMP\ebbtop; cd $env:TEMP\ebbtop
