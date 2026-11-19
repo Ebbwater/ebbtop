@@ -4767,14 +4767,21 @@ mod tests {
         deliver_probe(&mut unreachable, Err("get_metrics: IO error: Connection refused (os error 111)".into()));
         let u = joined(&render(&mut unreachable, 960.0, 1000.0));
 
-        assert!(a.contains("Authentication refused"), "no auth headline:\n{a}");
+        assert!(a.contains("Closed right after the handshake"), "no auth headline:\n{a}");
         assert!(a.contains("Re-copy the token"), "auth refusal must name the token:\n{a}");
+        // F1: the wire cannot confirm a refusal, so the wizard must say the
+        // class is an inference and name the non-agent close possibility
+        // plus an endpoint-identity check.
+        assert!(a.contains("infers"), "auth block claims confirmation:\n{a}");
+        assert!(a.contains("another WebSocket service"), "non-agent case unnamed:\n{a}");
+        assert!(a.contains("host and port point at the EbbTop agent"), "no identity check:\n{a}");
+        assert!(!a.contains("private network"), "auth refusal got network advice:\n{a}");
         assert!(!a.contains("No route to the agent"), "auth refusal mislabelled:\n{a}");
         assert!(!a.contains("Nothing is reachable at that address"), "auth refusal got network advice:\n{a}");
 
         assert!(u.contains("No route to the agent"), "no unreachable headline:\n{u}");
         assert!(u.contains("private network or VPN"), "unreachable must name the network:\n{u}");
-        assert!(!u.contains("Authentication refused"), "network failure mislabelled as auth:\n{u}");
+        assert!(!u.contains("Closed right after the handshake"), "network failure mislabelled as close:\n{u}");
         assert!(!u.contains("Re-copy the token"), "network failure got token advice:\n{u}");
 
         // The scrubbed detail is shown, and the token never is.
@@ -4879,7 +4886,7 @@ mod tests {
         let s = app.support_summary_text();
         assert!(!s.contains(SENTINEL), "summary leaked the token:\n{s}");
         assert!(!s.contains("10.9.9.9"), "summary leaked the address:\n{s}");
-        assert!(s.contains("Authentication refused"), "summary lost the classified failure:\n{s}");
+        assert!(s.contains("Closed right after the handshake"), "summary lost the classified failure:\n{s}");
         assert!(s.contains("endpoint: ws, default port, /ws"), "summary lost the endpoint shape:\n{s}");
         assert!(s.contains(&format!("version: {}", update::current_version())), "no version:\n{s}");
     }
@@ -4906,8 +4913,13 @@ mod tests {
         ));
         let t = render(&mut app, 960.0, 1000.0);
         let j = joined(&t);
-        assert!(j.contains("Authentication refused"), "no headline:\n{j}");
+        assert!(j.contains("Closed right after the handshake"), "no headline:\n{j}");
         assert!(j.contains("Re-copy the token"), "no action:\n{j}");
+        // F1 on the Settings surface: same uncertainty text, same endpoint
+        // identity check as the wizard.
+        assert!(j.contains("infers"), "settings block claims confirmation:\n{j}");
+        assert!(j.contains("another WebSocket service"), "settings block hides the non-agent case:\n{j}");
+        assert!(j.contains("host and port point at the EbbTop agent"), "settings block has no identity check:\n{j}");
         assert!(j.contains("Open logs"), "no logs link:\n{j}");
     }
 
@@ -4917,17 +4929,20 @@ mod tests {
         // inside the window instead of widening it past the screen edge —
         // including at the app's minimum window size.
         for (w, h) in [(960.0f32, 1000.0f32), (480.0, 420.0)] {
-            let mut app = wizard_app();
-            fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
-            deliver_probe(&mut app, Err("connect timed out".into()));
-            let ctx = egui::Context::default();
-            style(&ctx);
-            let shapes = frame(&ctx, &mut app, w, h, vec![]);
-            for (s, r) in text_rects(&shapes) {
-                assert!(
-                    r.left() >= -1.0 && r.right() <= w + 1.0,
-                    "{w}x{h}: label overflows the window: {s:?} at {r:?}"
-                );
+            // The close-after-handshake guidance is the longest block.
+            for err in ["connect timed out", "get_metrics: agent closed the connection (wrong token?)"] {
+                let mut app = wizard_app();
+                fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
+                deliver_probe(&mut app, Err(err.into()));
+                let ctx = egui::Context::default();
+                style(&ctx);
+                let shapes = frame(&ctx, &mut app, w, h, vec![]);
+                for (s, r) in text_rects(&shapes) {
+                    assert!(
+                        r.left() >= -1.0 && r.right() <= w + 1.0,
+                        "{w}x{h}: label overflows the window: {s:?} at {r:?}"
+                    );
+                }
             }
         }
     }
@@ -4939,7 +4954,7 @@ mod tests {
     #[ignore]
     fn e4_guidance_evidence() {
         for (label, err) in [
-            ("authentication refusal", "get_metrics: agent closed the connection (wrong token?)"),
+            ("close after the handshake", "get_metrics: agent closed the connection (wrong token?)"),
             ("unreachable endpoint", "get_metrics: IO error: Connection refused (os error 111)"),
             ("timeout", "connect timed out"),
             ("ambiguous", "get_metrics: no answer, cause unknown"),
@@ -4953,6 +4968,12 @@ mod tests {
             assert!(j.contains(d.headline()), "{label}: headline not rendered");
             assert!(j.contains(d.next_action()), "{label}: next action not rendered");
             assert!(!j.contains(SENTINEL), "{label}: token rendered");
+            if label == "close after the handshake" {
+                // The rendered frame, not just the core string, carries the
+                // inference and the non-agent close possibility.
+                assert!(j.contains("another WebSocket service"), "{label}: non-agent case not rendered");
+                assert!(j.contains("host and port point at the EbbTop agent"), "{label}: identity check not rendered");
+            }
         }
         println!("=== support summary (no failure) ===\n{}", wizard_app().support_summary_text());
     }

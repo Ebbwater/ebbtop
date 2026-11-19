@@ -609,7 +609,7 @@ mod tests {
             endpoint: &endpoint,
             token_source: &TokenSource::Keyring,
             connection: "DOWN",
-            failure: Some(("Authentication refused", &detail)),
+            failure: Some(("Closed right after the handshake", &detail)),
             log_bytes: Some(4096),
             config_ok: true,
         };
@@ -623,7 +623,7 @@ mod tests {
         // Still useful: the facts a maintainer needs.
         assert!(s.contains("version: 0.2.7"));
         assert!(s.contains("connection: DOWN"));
-        assert!(s.contains("last failure: Authentication refused"));
+        assert!(s.contains("last failure: Closed right after the handshake"));
         assert!(s.contains("log: ebbtop.log present (4 KiB)"));
     }
 

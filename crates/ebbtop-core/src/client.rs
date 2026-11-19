@@ -213,14 +213,17 @@ pub fn probe_hint(err: &str) -> String {
 /// The agent answers a wrong token by completing the WebSocket upgrade and
 /// closing the socket at once (`crates/ebbtop-agent/src/ws.rs`: the token
 /// gate upgrades, then `socket.close()`), so "the endpoint took the
-/// handshake and closed before replying" is this product's authentication
-/// refusal. Everything else is classified from the transport error: a
-/// refused/DNS/no-route failure never reached the agent, a deadline miss
-/// proves nothing about the agent, and a handshake error means something
-/// other than the agent answered.
+/// handshake and closed before replying" is how this product refuses a
+/// token. That is an inference, not proof: the wire carries no
+/// auth-specific close code or reason, so any other WebSocket service at
+/// the same host and port can close the same way. Everything else is
+/// classified from the transport error: a refused/DNS/no-route failure never
+/// reached the agent, a deadline miss proves nothing about the agent, and a
+/// handshake error means something other than the agent answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeFailure {
     /// The endpoint accepted the handshake and closed before answering.
+    /// Possible token refusal, but the close alone cannot confirm it.
     AuthRefused,
     /// No path to the endpoint: refused, DNS failure, no route, unreachable.
     Unreachable,
@@ -249,7 +252,7 @@ impl ProbeFailure {
     /// Short label for the UI: what happened, in the user's terms.
     pub fn headline(self) -> &'static str {
         match self {
-            Self::AuthRefused => "Authentication refused",
+            Self::AuthRefused => "Closed right after the handshake",
             Self::Unreachable => "No route to the agent",
             Self::Timeout => "No answer in time",
             Self::NotAgent => "Not the EbbTop agent",
@@ -262,11 +265,14 @@ impl ProbeFailure {
     pub fn next_action(self) -> &'static str {
         match self {
             Self::AuthRefused => {
-                "The agent accepted the connection and closed it at once, which is how \
-                 EbbTop refuses a token. Re-copy the token on the agent host \
-                 (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`) and paste it \
-                 again, then Test. If the token is definitely the current one, the agent \
-                 may have been reinstalled with a new token: run \
+                "EbbTop infers this from one observation: the endpoint accepted the WebSocket \
+                 handshake and closed at once. The EbbTop agent closes that way to refuse a \
+                 token. Re-copy the token on the agent host \
+                 (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`), paste it again and \
+                 Test. The close is not proof: another WebSocket service at that host and port \
+                 can close the same way, so also confirm the host and port point at the EbbTop \
+                 agent (default port 45976). If both are right and the token is definitely the \
+                 current one, the agent may have been reinstalled with a new token: run \
                  `systemctl --user status ebbtop-agent` on the agent host."
             }
             Self::Unreachable => {
@@ -707,10 +713,100 @@ mod tests {
             .expect_err("an agent-style close must fail the probe");
         let d = Diagnosis::from_error(&e);
         assert_eq!(d.kind, ProbeFailure::AuthRefused, "detail: {e}");
-        assert!(d.next_action().contains("token"), "not actionable: {}", d.next_action());
+        // F1: the headline describes the observed close, not a confirmed
+        // refusal — this wire carries no auth-specific close code.
+        assert_eq!(d.headline(), "Closed right after the handshake");
+        assert_close_guidance_is_uncertain(d.next_action());
         assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
         assert!(!d.log_line().contains(SENTINEL), "log line leaked the token");
         assert!(!d.message().contains(SENTINEL), "message leaked the token");
+    }
+
+    /// F1 regression control: a non-agent WebSocket peer that closes with an
+    /// explicit benign code and reason produces the byte-identical error and
+    /// the same classification, because the unchanged wire does not carry (or
+    /// keep) an auth-specific close signal. The guidance therefore has to
+    /// name that possibility instead of asserting a refusal.
+    fn assert_close_guidance_is_uncertain(action: &str) {
+        for need in [
+            "infers",
+            "handshake",
+            "Re-copy the token",
+            "another WebSocket service",
+            "host and port point at the EbbTop agent",
+            "systemctl --user status ebbtop-agent",
+        ] {
+            assert!(action.contains(need), "close guidance misses {need:?}: {action}");
+        }
+        assert!(
+            !action.contains("private network"),
+            "a close after the handshake must not be answered with network checks: {action}"
+        );
+    }
+
+    /// Reviewer's non-agent close fixture (CloseCode::Normal, "service
+    /// shutting down"). Run here as a regression case: the candidate must not
+    /// claim to have confirmed a token refusal from it.
+    #[tokio::test]
+    async fn non_agent_normal_close_is_indistinguishable_and_guidance_says_so() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream).await.expect("ws");
+            let _ = ws.next().await;
+            let _ = ws
+                .close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "service shutting down".into(),
+                }))
+                .await;
+        });
+        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
+            .await
+            .expect_err("a benign non-agent close must fail the probe");
+        assert_eq!(
+            e, "get_metrics: agent closed the connection (wrong token?)",
+            "the wire no longer hides the non-agent close; revisit the guidance"
+        );
+        let d = Diagnosis::from_error(&e);
+        assert_eq!(d.kind, ProbeFailure::AuthRefused);
+        assert_close_guidance_is_uncertain(d.next_action());
+        assert!(!d.message().contains(SENTINEL));
+    }
+
+    /// Reviewer's second non-agent close fixture (CloseCode::Policy, "go
+    /// away"): the reason is discarded by the unchanged client, so this is
+    /// the same case as far as a user can tell.
+    #[tokio::test]
+    async fn non_agent_policy_close_is_indistinguishable_and_guidance_says_so() {
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+        use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream).await.expect("ws");
+            let _ = ws.next().await;
+            let _ = ws
+                .close(Some(CloseFrame {
+                    code: CloseCode::Policy,
+                    reason: "go away".into(),
+                }))
+                .await;
+        });
+        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
+            .await
+            .expect_err("a policy close must fail the probe");
+        assert_eq!(e, "get_metrics: agent closed the connection (wrong token?)");
+        let d = Diagnosis::from_error(&e);
+        assert_eq!(d.kind, ProbeFailure::AuthRefused);
+        assert_close_guidance_is_uncertain(d.next_action());
+        assert!(!d.message().contains(SENTINEL));
     }
 
     #[tokio::test]
