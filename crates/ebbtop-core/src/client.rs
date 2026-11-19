@@ -198,7 +198,8 @@ pub async fn probe_once(base: &str, token: Option<&str>, deadline: Duration) -> 
 
 /// User-facing probe failure: separates token rejection from unreachable
 /// agents. Matches the close message `request()` emits for a kicked
-/// connection.
+/// connection. Kept for callers that only have one line to spend; the
+/// structured form is [`Diagnosis`].
 pub fn probe_hint(err: &str) -> String {
     if err.contains("wrong token") {
         "token rejected: check the token and try again".to_string()
@@ -207,7 +208,185 @@ pub fn probe_hint(err: &str) -> String {
     }
 }
 
-fn redact(s: String, token: Option<&str>) -> String {
+/// Why a one-shot probe failed, as far as the client can tell.
+///
+/// The agent answers a wrong token by completing the WebSocket upgrade and
+/// closing the socket at once (`crates/ebbtop-agent/src/ws.rs`: the token
+/// gate upgrades, then `socket.close()`), so "the endpoint took the
+/// handshake and closed before replying" is this product's authentication
+/// refusal. Everything else is classified from the transport error: a
+/// refused/DNS/no-route failure never reached the agent, a deadline miss
+/// proves nothing about the agent, and a handshake error means something
+/// other than the agent answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeFailure {
+    /// The endpoint accepted the handshake and closed before answering.
+    AuthRefused,
+    /// No path to the endpoint: refused, DNS failure, no route, unreachable.
+    Unreachable,
+    /// Nothing came back inside the deadline. A firewall drop, a VPN that is
+    /// down and a hung agent all look like this, so it stays ambiguous.
+    Timeout,
+    /// Something answered, but not the EbbTop agent protocol (wrong port or
+    /// path, a plain HTTP server, a proxy).
+    NotAgent,
+    /// Any other failure: the detail is all the evidence there is.
+    Ambiguous,
+}
+
+impl ProbeFailure {
+    /// Stable tag for log lines and tests.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::AuthRefused => "auth-refused",
+            Self::Unreachable => "unreachable",
+            Self::Timeout => "timeout",
+            Self::NotAgent => "not-agent",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    /// Short label for the UI: what happened, in the user's terms.
+    pub fn headline(self) -> &'static str {
+        match self {
+            Self::AuthRefused => "Authentication refused",
+            Self::Unreachable => "No route to the agent",
+            Self::Timeout => "No answer in time",
+            Self::NotAgent => "Not the EbbTop agent",
+            Self::Ambiguous => "Connection failed",
+        }
+    }
+
+    /// One concrete next action, distinct per class so a user is never told
+    /// to "check everything" for a failure that already has an answer.
+    pub fn next_action(self) -> &'static str {
+        match self {
+            Self::AuthRefused => {
+                "The agent accepted the connection and closed it at once, which is how \
+                 EbbTop refuses a token. Re-copy the token on the agent host \
+                 (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`) and paste it \
+                 again, then Test. If the token is definitely the current one, the agent \
+                 may have been reinstalled with a new token: run \
+                 `systemctl --user status ebbtop-agent` on the agent host."
+            }
+            Self::Unreachable => {
+                "Nothing is reachable at that address. Check the IP or hostname, that this \
+                 computer is on the same private network or VPN as the agent, the port \
+                 (default 45976), and that the agent is running \
+                 (`systemctl --user is-active ebbtop-agent` on the agent host)."
+            }
+            Self::Timeout => {
+                "The address did not answer in time. A firewall rule, a VPN that is down \
+                 and a stopped agent all look like this. Confirm the IP, the private \
+                 network or VPN, and the port; check \
+                 `systemctl --user is-active ebbtop-agent` on the agent host; then Test \
+                 again."
+            }
+            Self::NotAgent => {
+                "Something answered, but it is not the EbbTop agent. Check the port \
+                 (default 45976) and the path (`/ws`), and that nothing else is listening \
+                 there. A bare hostname gets `ws://`, `:45976` and `/ws` added for you."
+            }
+            Self::Ambiguous => {
+                "The connection failed without a clear cause. Check the IP, the private \
+                 network or VPN, the port, and the agent status \
+                 (`systemctl --user is-active ebbtop-agent` on the agent host), then Test \
+                 again."
+            }
+        }
+    }
+
+    /// Classify one probe error string. Order matters: a message can name
+    /// more than one symptom, and the most specific evidence wins.
+    pub fn classify(err: &str) -> Self {
+        let e = err.to_ascii_lowercase();
+        if e.contains("wrong token") {
+            return Self::AuthRefused;
+        }
+        if e.contains("timed out") || e.contains("no reply within") || e.contains("deadline") {
+            return Self::Timeout;
+        }
+        if e.contains("connection refused")
+            || e.contains("failed to lookup address")
+            || e.contains("dns error")
+            || e.contains("no route to host")
+            || e.contains("network is unreachable")
+            || e.contains("host is unreachable")
+        {
+            return Self::Unreachable;
+        }
+        if e.contains("http error")
+            || e.contains("http format")
+            || e.contains("missing, duplicated or incorrect header")
+            || e.contains("protocol error")
+            || e.contains("not a websocket")
+            || e.contains("invalid status")
+            || e.contains("sec-websocket")
+        {
+            return Self::NotAgent;
+        }
+        Self::Ambiguous
+    }
+}
+
+/// A classified failure plus the scrubbed detail it was derived from.
+/// Everything a caller may show, log or copy comes from here, so the token
+/// and any token-bearing URL are removed once, in one place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnosis {
+    pub kind: ProbeFailure,
+    /// Error chain, token-scrubbed. Never contains the token.
+    pub detail: String,
+}
+
+impl Diagnosis {
+    /// Classify and scrub in one step. Callers that still hold the token
+    /// should pass the error through [`redact`] first (as `probe_once` does).
+    pub fn from_error(err: &str) -> Self {
+        let detail = scrub(err);
+        Self { kind: ProbeFailure::classify(&detail), detail }
+    }
+
+    pub fn headline(&self) -> &'static str {
+        self.kind.headline()
+    }
+
+    pub fn next_action(&self) -> &'static str {
+        self.kind.next_action()
+    }
+
+    /// Two-block user text: what happened, then what to do.
+    pub fn message(&self) -> String {
+        format!("{}\n{}", self.headline(), self.next_action())
+    }
+
+    /// One log line. Tag + scrubbed detail only: safe to append verbatim.
+    pub fn log_line(&self) -> String {
+        format!("probe {}: {}", self.kind.tag(), self.detail)
+    }
+}
+
+/// Replace any `token=<value>` pair with `token=<token>`. Belt and braces
+/// for messages built by libraries: it works without knowing the secret.
+pub fn scrub(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("token=") {
+        out.push_str(&rest[..i]);
+        out.push_str("token=<token>");
+        let after = &rest[i + "token=".len()..];
+        let end = after
+            .find(|c: char| c == '&' || c == '#' || c == '"' || c == '\'' || c.is_whitespace())
+            .unwrap_or(after.len());
+        rest = &after[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop the token from an error string. `probe_once` applies this before
+/// returning, so probe errors are already clean.
+pub fn redact(s: String, token: Option<&str>) -> String {
     match token.filter(|t| !t.is_empty()) {
         Some(t) => s.replace(t, "<token>"),
         None => s,
@@ -499,5 +678,151 @@ mod tests {
         });
         let r = probe_once(&format!("ws://{addr}/ws"), Some("s3cr3t"), Duration::from_secs(5)).await;
         assert_eq!(r.expect("probe").hostname, "fakehost");
+    }
+
+    // ---- E4: actionable pairing diagnostics -------------------------------
+    //
+    // Every fixture server below is local (127.0.0.1, ephemeral port): no
+    // test touches a real agent or the network path a user would use.
+
+    /// Dummy secret used as the probe token. It must never come back out of
+    /// a probe, a diagnosis, a log line or a support summary.
+    const SENTINEL: &str = "DUMMYSENTINEL0123456789abcdef0123456789abcdef0123456789abcdef0123";
+
+    #[tokio::test]
+    async fn probe_classifies_agent_style_close_as_auth_refusal() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream).await.expect("ws");
+            // The agent reads the request and then closes on a bad token.
+            let _ = ws.next().await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = ws.close(None).await;
+        });
+        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
+            .await
+            .expect_err("an agent-style close must fail the probe");
+        let d = Diagnosis::from_error(&e);
+        assert_eq!(d.kind, ProbeFailure::AuthRefused, "detail: {e}");
+        assert!(d.next_action().contains("token"), "not actionable: {}", d.next_action());
+        assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
+        assert!(!d.log_line().contains(SENTINEL), "log line leaked the token");
+        assert!(!d.message().contains(SENTINEL), "message leaked the token");
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_silent_listener_as_timeout() {
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            // Accept, then never answer: a firewall drop or a hung agent.
+            let (_stream, _) = listener.accept().await.expect("accept");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_millis(300))
+            .await
+            .expect_err("a silent listener must time out");
+        let d = Diagnosis::from_error(&e);
+        assert_eq!(d.kind, ProbeFailure::Timeout, "detail: {e}");
+        assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
+        // Ambiguous by construction: the action must name the checks that
+        // separate IP, private network, port and a stopped agent.
+        for word in ["IP", "network", "port", "agent"] {
+            assert!(d.next_action().contains(word), "guidance misses {word}: {}", d.next_action());
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_refused_port_as_unreachable() {
+        let e = probe_once("ws://127.0.0.1:1/ws", Some(SENTINEL), Duration::from_secs(2))
+            .await
+            .expect_err("closed port must fail");
+        let d = Diagnosis::from_error(&e);
+        assert_eq!(d.kind, ProbeFailure::Unreachable, "detail: {e}");
+        assert!(d.next_action().contains("private network"), "not actionable: {}", d.next_action());
+        assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
+    }
+
+    #[tokio::test]
+    async fn probe_classifies_plain_http_answer_as_not_agent() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf).await;
+            let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n").await;
+        });
+        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
+            .await
+            .expect_err("a plain HTTP answer must fail the probe");
+        let d = Diagnosis::from_error(&e);
+        assert_eq!(d.kind, ProbeFailure::NotAgent, "detail: {e}");
+        assert!(d.next_action().contains("port"), "not actionable: {}", d.next_action());
+    }
+
+    #[test]
+    fn every_class_has_its_own_headline_and_action() {
+        let all = [
+            ProbeFailure::AuthRefused,
+            ProbeFailure::Unreachable,
+            ProbeFailure::Timeout,
+            ProbeFailure::NotAgent,
+            ProbeFailure::Ambiguous,
+        ];
+        for (i, a) in all.iter().enumerate() {
+            assert!(!a.headline().is_empty() && !a.next_action().is_empty());
+            for b in &all[i + 1..] {
+                assert_ne!(a.headline(), b.headline(), "classes share a headline");
+                assert_ne!(a.next_action(), b.next_action(), "classes share an action");
+                assert_ne!(a.tag(), b.tag(), "classes share a log tag");
+            }
+        }
+        // The one distinction the card names explicitly.
+        assert!(
+            !ProbeFailure::AuthRefused.next_action().contains("private network"),
+            "an auth refusal must not be answered with network checks"
+        );
+        assert!(
+            !ProbeFailure::Unreachable.next_action().contains("Re-copy the token"),
+            "a failed network path must not be answered with the token"
+        );
+    }
+
+    #[test]
+    fn classification_reads_the_most_specific_evidence() {
+        assert_eq!(ProbeFailure::classify("get_metrics: agent closed the connection (wrong token?)"), ProbeFailure::AuthRefused);
+        assert_eq!(ProbeFailure::classify("get_metrics: no reply within 5000 ms"), ProbeFailure::Timeout);
+        assert_eq!(ProbeFailure::classify("connect timed out"), ProbeFailure::Timeout);
+        assert_eq!(ProbeFailure::classify("IO error: Connection refused (os error 111)"), ProbeFailure::Unreachable);
+        assert_eq!(ProbeFailure::classify("failed to lookup address information: Name or service not known"), ProbeFailure::Unreachable);
+        assert_eq!(ProbeFailure::classify("HTTP error: 404 Not Found"), ProbeFailure::NotAgent);
+        assert_eq!(ProbeFailure::classify("Protocol error: Missing, duplicated or incorrect header sec-websocket-accept"), ProbeFailure::NotAgent);
+        assert_eq!(ProbeFailure::classify("something else entirely"), ProbeFailure::Ambiguous);
+    }
+
+    #[test]
+    fn scrub_removes_a_token_bearing_url_without_knowing_the_secret() {
+        assert_eq!(scrub("bad ws://h:1/ws?token=abc"), "bad ws://h:1/ws?token=<token>");
+        assert_eq!(scrub("x?token=abc&b=1"), "x?token=<token>&b=1");
+        assert_eq!(scrub("no query here"), "no query here");
+        let d = Diagnosis::from_error(&format!("bad ws://h:1/ws?token={SENTINEL}"));
+        assert!(!d.detail.contains(SENTINEL), "scrub missed the token: {}", d.detail);
+        assert!(!d.log_line().contains(SENTINEL));
+        assert!(!d.message().contains(SENTINEL));
+    }
+
+    #[test]
+    fn diagnosis_detail_is_scrubbed_even_when_the_upstream_error_is_not() {
+        // Defence in depth: a library that echoes the URL must not leak it.
+        let d = Diagnosis::from_error(&format!("connect failed ws://h:1/ws?token={SENTINEL}"));
+        assert!(!d.detail.contains(SENTINEL), "detail: {}", d.detail);
+        assert!(d.detail.contains("<token>"), "detail lost the marker: {}", d.detail);
     }
 }

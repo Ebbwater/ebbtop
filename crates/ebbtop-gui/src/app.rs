@@ -99,6 +99,9 @@ struct Onboard {
     tested: Option<(String, String, String)>,
     /// Triple the in-flight probe is testing (set at spawn, checked at poll).
     probe_for: Option<(String, String, String)>,
+    /// Last failed Test, classified: what happened and the next action.
+    /// Never unlocks Save (that is `tested`); cleared at the next Test.
+    failure: Option<client::Diagnosis>,
 }
 
 /// Sizing outcome of one linked table. The two bodies scroll independently
@@ -146,6 +149,8 @@ pub struct App {
     source_name_edit: String,
     source_url_edit: String,
     source_msg: Option<String>,
+    /// Last failed Test for a saved source (Sources tab), classified.
+    source_failure: Option<client::Diagnosis>,
     /// In-flight connection test (Settings Sources tab).
     test_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     testing: bool,
@@ -251,6 +256,7 @@ impl App {
             source_name_edit: String::new(),
             source_url_edit: String::new(),
             source_msg: None,
+            source_failure: None,
             test_rx: None,
             testing: false,
             onboard: if first_run { Some(Onboard::default()) } else { None },
@@ -1580,6 +1586,7 @@ impl App {
         self.test_rx = Some(rx);
         self.testing = true;
         self.source_msg = None;
+        self.source_failure = None;
         rt.spawn(async move {
             let r = client::probe_once(&url, token.as_deref(), Duration::from_secs(5)).await;
             let _ = tx.send(r.map(|ok| ok.hostname));
@@ -1623,6 +1630,7 @@ impl App {
             ob.rx = Some(rx);
             ob.testing = true;
             ob.msg = None;
+            ob.failure = None;
             ob.probe_for = Some((name.trim().to_string(), normalized.clone(), tok.clone()));
         }
         rt.spawn(async move {
@@ -1631,18 +1639,29 @@ impl App {
         });
     }
 
+    /// The Save gate, one definition for the button and for Save itself:
+    /// a green Test of exactly these values, all of them present.
+    fn onboard_save_gate(&self) -> bool {
+        let current = self.onboard_current();
+        let tested = self.onboard.as_ref().and_then(|ob| ob.tested.clone());
+        tested.is_some()
+            && tested == Some(current.clone())
+            && !current.0.is_empty()
+            && !current.1.is_empty()
+            && !current.2.is_empty()
+    }
+
     /// Wizard save: requires a green Test of the exact current values, then
     /// stores the source + token and connects. A keyring failure keeps the
     /// token for this session (as in Settings) rather than blocking first run.
     fn onboard_save(&mut self, ctx: &egui::Context) {
-        let current = self.onboard_current();
-        let tested_ok = self.onboard.as_ref().and_then(|ob| ob.tested.clone()) == Some(current.clone());
-        if !tested_ok {
+        if !self.onboard_save_gate() {
             if let Some(ob) = self.onboard.as_mut() {
                 ob.msg = Some("Test the connection first — Save unlocks after a green Test for these exact values".to_string());
             }
             return;
         }
+        let current = self.onboard_current();
         let (name, _, tok) = current;
         if tok.is_empty() {
             if let Some(ob) = self.onboard.as_mut() {
@@ -1675,6 +1694,71 @@ impl App {
         self.update_title(ctx);
     }
 
+    /// Most recent classified Test failure: what a support summary reports
+    /// as "last failure". Wizard first, then the Sources tab.
+    fn active_failure(&self) -> Option<&client::Diagnosis> {
+        self.onboard
+            .as_ref()
+            .and_then(|ob| ob.failure.as_ref())
+            .or(self.source_failure.as_ref())
+    }
+
+    /// Connection state in one word, the same words the status bar uses.
+    fn connection_word(&self) -> String {
+        let st = self.shared.lock().unwrap_or_else(|e| e.into_inner());
+        let now = client::now_ms();
+        match &st.conn {
+            Conn::Connected => {
+                if st.since_new_sample_ms(now).is_some_and(|a| a < STALE_MS) {
+                    "LIVE"
+                } else {
+                    "STALE"
+                }
+            }
+            Conn::Connecting { .. } => "CONNECTING",
+            Conn::Down { .. } => "DOWN",
+        }
+        .to_string()
+    }
+
+    /// Narrow support summary: version, platform, endpoint shape, credential
+    /// source, connection state, the last classified failure and whether the
+    /// log exists. No host, address, path, token or token-bearing URL.
+    fn support_summary_text(&self) -> String {
+        let endpoint = self
+            .cfg
+            .active_source()
+            .map(|s| store::endpoint_shape(&s.url))
+            .unwrap_or_else(|| "none configured".to_string());
+        let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
+        let connection = self.connection_word();
+        let facts = store::SupportFacts {
+            version: update::current_version(),
+            platform: &platform,
+            sources: self.cfg.sources.len(),
+            endpoint: &endpoint,
+            token_source: &self.token_src,
+            connection: &connection,
+            failure: self.active_failure().map(|d| (d.headline(), d.detail.as_str())),
+            log_bytes: store::log_bytes(),
+            config_ok: store::config_path().is_some_and(|p| p.exists()),
+        };
+        store::support_summary(&facts, self.token.as_deref())
+    }
+
+    /// Copy the support summary to the clipboard and save it beside the log.
+    /// Returns the note the caller shows.
+    fn support_summary_action(&self, ctx: &egui::Context) -> String {
+        let text = self.support_summary_text();
+        ctx.copy_text(text.clone());
+        match store::support_copy_path() {
+            Some(p) if store::write_support(&p, &text).is_ok() => {
+                format!("support summary copied (saved to {})", p.display())
+            }
+            _ => "support summary copied to the clipboard".to_string(),
+        }
+    }
+
     fn onboarding(&mut self, ctx: &egui::Context) {
         // Poll the in-flight probe, if any.
         if let Some(ob) = self.onboard.as_mut()
@@ -1687,11 +1771,19 @@ impl App {
                     match r {
                         Ok(host) => {
                             ob.tested = ob.probe_for.clone();
+                            ob.failure = None;
                             ob.msg = Some(format!("connected: {host}"));
+                            store::append_log("onboarding test ok");
                         }
                         Err(e) => {
+                            // `probe_once` already drops the token; scrub the
+                            // query form too, then classify. The log line is
+                            // the scrubbed class + detail, never the token.
+                            let d = client::Diagnosis::from_error(&client::redact(e, self.token.as_deref()));
+                            store::append_log(&format!("onboarding {}", d.log_line()));
                             ob.tested = None;
-                            ob.msg = Some(client::probe_hint(&e));
+                            ob.msg = None;
+                            ob.failure = Some(d);
                         }
                     }
                     ob.probe_for = None;
@@ -1715,14 +1807,16 @@ impl App {
                 ui.add_space(6.0);
                 let mut test = false;
                 let mut save = false;
+                let mut open_logs = false;
+                let mut copy_summary = false;
                 // Snapshot for the gated Save button; computed before the
                 // mutable borrow of the wizard fields below.
                 let current = self.onboard_current();
                 let tested = self.onboard.as_ref().and_then(|ob| ob.tested.clone());
-                let can_save = tested.is_some() && tested == Some(current.clone())
-                    && !current.0.is_empty()
-                    && !current.1.is_empty()
-                    && !current.2.is_empty();
+                let can_save = self.onboard_save_gate();
+                // A green Test for values the user has since edited: Save is
+                // still locked, and the note says exactly why.
+                let stale_test = tested.is_some() && !can_save;
                 let assumed = if current.1.is_empty() { None } else { Some(current.1.clone()) };
                 let tok_warn = client::token_warning(&current.2);
                 {
@@ -1760,11 +1854,42 @@ impl App {
                     if !can_save {
                         ui.label(RichText::new("Save unlocks after a green Test for these exact values.").small().color(w::DIM));
                     }
+                    if stale_test {
+                        ui.add(egui::Label::new(
+                            RichText::new("fields changed since the last green Test — Test again to unlock Save")
+                                .small()
+                                .color(w::WARN),
+                        ).wrap());
+                    }
                     if ob.testing {
                         ui.label(RichText::new("testing…").color(w::DIM));
                     }
                     if let Some(m) = &ob.msg {
                         ui.label(RichText::new(m).color(w::WARN));
+                    }
+                    // Failed Test: the class, one concrete next action, the
+                    // scrubbed detail, and the way to the logs. Same window,
+                    // same style, one extra block.
+                    if let Some(d) = &ob.failure {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(d.headline()).strong().color(w::BAD));
+                        ui.add(egui::Label::new(RichText::new(d.next_action()).small().color(w::TEXT)).wrap());
+                        ui.add(egui::Label::new(
+                            RichText::new(format!("detail: {}", d.detail)).small().monospace().color(w::DIM),
+                        ).wrap());
+                        if let Some(p) = store::log_path() {
+                            ui.add(egui::Label::new(
+                                RichText::new(format!("log: {}", p.display())).small().monospace().color(w::DIM),
+                            ).wrap());
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Open logs").clicked() {
+                                open_logs = true;
+                            }
+                            if ui.button("Copy support summary").clicked() {
+                                copy_summary = true;
+                            }
+                        });
                     }
                 }
                 if test {
@@ -1772,6 +1897,18 @@ impl App {
                 }
                 if save {
                     self.onboard_save(ctx);
+                }
+                if open_logs
+                    && let Err(e) = store::open_logs()
+                    && let Some(ob) = self.onboard.as_mut()
+                {
+                    ob.msg = Some(e);
+                }
+                if copy_summary {
+                    let m = self.support_summary_action(ctx);
+                    if let Some(ob) = self.onboard.as_mut() {
+                        ob.msg = Some(m);
+                    }
                 }
                 if skip {
                     self.onboard = None;
@@ -1791,10 +1928,18 @@ impl App {
                 Some(r) => {
                     self.testing = false;
                     self.test_rx = None;
-                    self.source_msg = Some(match r {
-                        Ok(host) => format!("connected: {host}"),
-                        Err(e) => client::probe_hint(&e),
-                    });
+                    match r {
+                        Ok(host) => {
+                            self.source_failure = None;
+                            self.source_msg = Some(format!("connected: {host}"));
+                        }
+                        Err(e) => {
+                            let d = client::Diagnosis::from_error(&client::redact(e, self.token.as_deref()));
+                            store::append_log(&format!("source test {}", d.log_line()));
+                            self.source_msg = None;
+                            self.source_failure = Some(d);
+                        }
+                    }
                 }
                 None if self.test_rx.is_none() => self.testing = false,
                 None => {}
@@ -1882,6 +2027,22 @@ impl App {
         if let Some(m) = &self.source_msg {
             ui.label(RichText::new(m).color(w::WARN));
         }
+        let mut open_logs = false;
+        if let Some(d) = &self.source_failure {
+            ui.label(RichText::new(d.headline()).strong().color(w::BAD));
+            ui.add(egui::Label::new(RichText::new(d.next_action()).small().color(w::TEXT)).wrap());
+            ui.add(egui::Label::new(
+                RichText::new(format!("detail: {}", d.detail)).small().monospace().color(w::DIM),
+            ).wrap());
+            if ui.button("Open logs").clicked() {
+                open_logs = true;
+            }
+        }
+        if open_logs
+            && let Err(e) = store::open_logs()
+        {
+            self.source_msg = Some(e);
+        }
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Name");
@@ -1968,6 +2129,20 @@ impl App {
         if let Some(p) = store::config_path() {
             ui.label(RichText::new(format!("config: {}", p.display())).small().color(w::DIM));
         }
+        if let Some(p) = store::log_path() {
+            ui.label(RichText::new(format!("log: {}", p.display())).small().color(w::DIM));
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Open logs").clicked()
+                && let Err(e) = store::open_logs()
+            {
+                self.settings_msg = Some(e);
+            }
+            if ui.button("Copy support summary").clicked() {
+                let m = self.support_summary_action(ui.ctx());
+                self.settings_msg = Some(m);
+            }
+        });
         if let Some(m) = &self.settings_msg {
             ui.label(RichText::new(m).color(w::WARN));
         }
@@ -4516,4 +4691,269 @@ mod tests {
         }
     }
 
+    // ---- E4: pairing diagnostics and support summary ---------------------
+    //
+    // The wizard probe is driven through a pre-filled channel here (no
+    // socket at all); the classifier's real fixtures live in ebbtop-core.
+
+    /// Dummy secret. It must never reach a rendered frame, the log or the
+    /// support summary.
+    const SENTINEL: &str = "DUMMYSENTINEL0123456789abcdef0123456789abcdef0123456789abcdef0123";
+
+    fn wizard_app() -> App {
+        App::with(Config::default(), None, TokenSource::Missing, None)
+    }
+
+    fn fill_wizard(app: &mut App, name: &str, url: &str, token: &str) {
+        let ob = app.onboard.as_mut().expect("wizard open");
+        ob.name = name.into();
+        ob.url = url.into();
+        ob.token = token.into();
+    }
+
+    /// Simulate the runtime task answering the in-flight Test with `r`. The
+    /// app polls it on the next frame, exactly as it polls a real probe.
+    fn deliver_probe(app: &mut App, r: Result<String, String>) {
+        let probe_for = app.onboard_current();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(r).expect("queue the probe result");
+        let ob = app.onboard.as_mut().expect("wizard open");
+        ob.rx = Some(rx);
+        ob.testing = true;
+        ob.probe_for = Some(probe_for);
+    }
+
+    /// The wizard's probe channel, kept open so a completion can be made to
+    /// land after the user has edited the fields.
+    fn start_stale_probe(app: &mut App) -> std::sync::mpsc::Sender<Result<String, String>> {
+        let probe_for = app.onboard_current();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ob = app.onboard.as_mut().expect("wizard open");
+        ob.rx = Some(rx);
+        ob.testing = true;
+        ob.probe_for = Some(probe_for);
+        tx
+    }
+
+    fn joined(t: &[String]) -> String {
+        t.join("\n")
+    }
+
+    #[test]
+    fn wizard_success_unlocks_save_for_the_exact_values() {
+        let mut app = wizard_app();
+        fill_wizard(&mut app, "h", "ws://127.0.0.1:1/ws", SENTINEL);
+        deliver_probe(&mut app, Ok("fakehost".into()));
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("connected: fakehost")), "no success line: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("Save unlocks after a green Test")),
+            "green Test must drop the locked note: {t:?}"
+        );
+        // The gate itself (same function the Save button and Save use): a
+        // green Test of exactly these values opens it.
+        assert!(app.onboard_save_gate(), "green Test of the exact values must unlock Save");
+    }
+
+    #[test]
+    fn wizard_distinguishes_auth_refusal_from_an_unreachable_endpoint() {
+        let mut auth = wizard_app();
+        fill_wizard(&mut auth, "h", "ws://10.0.0.5/ws", SENTINEL);
+        deliver_probe(&mut auth, Err("get_metrics: agent closed the connection (wrong token?)".into()));
+        let a = joined(&render(&mut auth, 960.0, 1000.0));
+
+        let mut unreachable = wizard_app();
+        fill_wizard(&mut unreachable, "h", "ws://10.0.0.5/ws", SENTINEL);
+        deliver_probe(&mut unreachable, Err("get_metrics: IO error: Connection refused (os error 111)".into()));
+        let u = joined(&render(&mut unreachable, 960.0, 1000.0));
+
+        assert!(a.contains("Authentication refused"), "no auth headline:\n{a}");
+        assert!(a.contains("Re-copy the token"), "auth refusal must name the token:\n{a}");
+        assert!(!a.contains("No route to the agent"), "auth refusal mislabelled:\n{a}");
+        assert!(!a.contains("Nothing is reachable at that address"), "auth refusal got network advice:\n{a}");
+
+        assert!(u.contains("No route to the agent"), "no unreachable headline:\n{u}");
+        assert!(u.contains("private network or VPN"), "unreachable must name the network:\n{u}");
+        assert!(!u.contains("Authentication refused"), "network failure mislabelled as auth:\n{u}");
+        assert!(!u.contains("Re-copy the token"), "network failure got token advice:\n{u}");
+
+        // The scrubbed detail is shown, and the token never is.
+        assert!(a.contains("detail: get_metrics: agent closed the connection"), "detail missing:\n{a}");
+        assert!(!a.contains(SENTINEL), "wizard leaked the token:\n{a}");
+        // Save stays locked after a failed Test.
+        assert!(!auth.onboard_save_gate(), "a failed Test must not unlock Save");
+        assert!(!unreachable.onboard_save_gate(), "a failed Test must not unlock Save");
+    }
+
+    #[test]
+    fn wizard_timeout_and_ambiguous_failures_name_the_checks_to_make() {
+        for (err, headline) in [
+            ("connect timed out", "No answer in time"),
+            ("get_metrics: no reply within 5000 ms", "No answer in time"),
+            ("something the classifier has not seen", "Connection failed"),
+        ] {
+            let mut app = wizard_app();
+            fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
+            deliver_probe(&mut app, Err(err.into()));
+            let j = joined(&render(&mut app, 960.0, 1000.0));
+            assert!(j.contains(headline), "{err}: missing {headline}:\n{j}");
+            for word in ["IP", "network", "port", "agent"] {
+                assert!(j.contains(word), "{err}: guidance misses {word}:\n{j}");
+            }
+            assert!(j.contains("Open logs"), "{err}: no route to the logs:\n{j}");
+            assert!(j.contains("Copy support summary"), "{err}: no support summary:\n{j}");
+        }
+    }
+
+    #[test]
+    fn editing_after_a_green_test_keeps_save_locked() {
+        let mut app = wizard_app();
+        fill_wizard(&mut app, "h", "ws://127.0.0.1:1/ws", SENTINEL);
+        deliver_probe(&mut app, Ok("fakehost".into()));
+        let _ = render(&mut app, 960.0, 1000.0); // green Test lands here
+        assert_eq!(
+            app.onboard.as_ref().and_then(|ob| ob.tested.clone()),
+            Some(app.onboard_current()),
+            "green Test should be recorded for these exact values"
+        );
+        // Edit the token: the Test no longer covers what Save would store.
+        app.onboard.as_mut().unwrap().token = format!("{SENTINEL}-edited");
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(
+            t.iter().any(|x| x.contains("fields changed since the last green Test")),
+            "no stale-Test note after an edit: {t:?}"
+        );
+        assert!(!app.onboard_save_gate(), "edited values must not pass the old Test");
+    }
+
+    #[test]
+    fn stale_probe_completion_does_not_unlock_save() {
+        let mut app = wizard_app();
+        fill_wizard(&mut app, "h", "ws://127.0.0.1:1/ws", SENTINEL);
+        let tx = start_stale_probe(&mut app);
+        // The user edits the token while the probe is in flight.
+        app.onboard.as_mut().unwrap().token = format!("{SENTINEL}-typed-later");
+        // The old probe now completes green.
+        tx.send(Ok("stalehost".into())).expect("deliver stale completion");
+        let t = render(&mut app, 960.0, 1000.0);
+        let j = joined(&t);
+        let tested = app.onboard.as_ref().and_then(|ob| ob.tested.clone()).expect("the green Test is recorded");
+        assert_ne!(Some(tested), Some(app.onboard_current()), "a stale completion must not cover edited values");
+        assert!(j.contains("fields changed since the last green Test"), "no stale note:\n{j}");
+        assert!(j.contains("connected: stalehost"), "the completion is still reported:\n{j}");
+        assert!(!app.onboard_save_gate(), "a stale completion must not unlock Save");
+    }
+
+    #[test]
+    fn failed_test_never_writes_the_token_to_the_log() {
+        let dir = std::env::temp_dir().join(format!("ebbtop-e4-log-{}", std::process::id()));
+        let log = dir.join("ebbtop.log");
+        let _ = std::fs::remove_dir_all(&dir);
+        store::set_test_log(Some(log.clone()));
+        let mut app = wizard_app();
+        fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
+        app.token = Some(SENTINEL.to_string());
+        // An error that a careless library could have built from the URL.
+        deliver_probe(&mut app, Err(format!("get_metrics: connect failed ws://h/ws?token={SENTINEL}")));
+        let _ = render(&mut app, 960.0, 1000.0);
+        store::set_test_log(None);
+        let written = std::fs::read_to_string(&log).expect("a log line for the failed probe");
+        assert!(written.contains("probe"), "no classified line: {written}");
+        assert!(!written.contains(SENTINEL), "log leaked the token:\n{written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn support_summary_from_the_app_carries_no_token_or_address() {
+        let mut cfg = Config::default();
+        cfg.sources = vec![store::Source {
+            name: "k-server".into(),
+            url: format!("ws://10.9.9.9:45976/ws?token={SENTINEL}"),
+        }];
+        let mut app = App::with(cfg, Some(SENTINEL.to_string()), TokenSource::Env, None);
+        // An auth refusal whose detail quotes the connect URL: both the
+        // address and the token must be gone from the summary.
+        app.source_failure = Some(client::Diagnosis::from_error(&format!(
+            "get_metrics: agent closed the connection (wrong token?) ws://10.9.9.9:45976/ws?token={SENTINEL}"
+        )));
+        let s = app.support_summary_text();
+        assert!(!s.contains(SENTINEL), "summary leaked the token:\n{s}");
+        assert!(!s.contains("10.9.9.9"), "summary leaked the address:\n{s}");
+        assert!(s.contains("Authentication refused"), "summary lost the classified failure:\n{s}");
+        assert!(s.contains("endpoint: ws, default port, /ws"), "summary lost the endpoint shape:\n{s}");
+        assert!(s.contains(&format!("version: {}", update::current_version())), "no version:\n{s}");
+    }
+
+    #[test]
+    fn settings_connection_offers_logs_and_the_support_summary() {
+        let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
+        app.settings_open = true;
+        app.settings_tab = SettingsTab::Connection;
+        let t = render(&mut app, 960.0, 1000.0);
+        let j = joined(&t);
+        assert!(j.contains("Open logs"), "no logs link:\n{j}");
+        assert!(j.contains("Copy support summary"), "no support summary:\n{j}");
+        assert!(j.contains("log: "), "no log path shown:\n{j}");
+    }
+
+    #[test]
+    fn sources_tab_shows_the_classified_failure_of_a_saved_source() {
+        let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
+        app.settings_open = true;
+        app.settings_tab = SettingsTab::Sources;
+        app.source_failure = Some(client::Diagnosis::from_error(
+            "get_metrics: agent closed the connection (wrong token?)",
+        ));
+        let t = render(&mut app, 960.0, 1000.0);
+        let j = joined(&t);
+        assert!(j.contains("Authentication refused"), "no headline:\n{j}");
+        assert!(j.contains("Re-copy the token"), "no action:\n{j}");
+        assert!(j.contains("Open logs"), "no logs link:\n{j}");
+    }
+
+    #[test]
+    fn failure_block_fits_the_wizard_window() {
+        // The guidance is long. The wizard is not resizable, so it must wrap
+        // inside the window instead of widening it past the screen edge —
+        // including at the app's minimum window size.
+        for (w, h) in [(960.0f32, 1000.0f32), (480.0, 420.0)] {
+            let mut app = wizard_app();
+            fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
+            deliver_probe(&mut app, Err("connect timed out".into()));
+            let ctx = egui::Context::default();
+            style(&ctx);
+            let shapes = frame(&ctx, &mut app, w, h, vec![]);
+            for (s, r) in text_rects(&shapes) {
+                assert!(
+                    r.left() >= -1.0 && r.right() <= w + 1.0,
+                    "{w}x{h}: label overflows the window: {s:?} at {r:?}"
+                );
+            }
+        }
+    }
+
+    /// Read-back evidence: the actual rendered wizard frame for each failure
+    /// class. Run explicitly:
+    ///   cargo test -p ebbtop-gui e4_guidance_evidence -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn e4_guidance_evidence() {
+        for (label, err) in [
+            ("authentication refusal", "get_metrics: agent closed the connection (wrong token?)"),
+            ("unreachable endpoint", "get_metrics: IO error: Connection refused (os error 111)"),
+            ("timeout", "connect timed out"),
+            ("ambiguous", "get_metrics: no answer, cause unknown"),
+        ] {
+            let mut app = wizard_app();
+            fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
+            deliver_probe(&mut app, Err(err.into()));
+            let j = joined(&render(&mut app, 960.0, 1000.0));
+            println!("=== {label}: rendered wizard frame ===\n{j}\n");
+            let d = app.onboard.as_ref().and_then(|ob| ob.failure.clone()).expect("failure is shown");
+            assert!(j.contains(d.headline()), "{label}: headline not rendered");
+            assert!(j.contains(d.next_action()), "{label}: next action not rendered");
+            assert!(!j.contains(SENTINEL), "{label}: token rendered");
+        }
+        println!("=== support summary (no failure) ===\n{}", wizard_app().support_summary_text());
+    }
 }
