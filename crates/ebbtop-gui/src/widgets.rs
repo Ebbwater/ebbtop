@@ -1,6 +1,6 @@
 //! btop-style painted widgets: line/area graphs and meters.
 
-use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+use egui::{Color32, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2, pos2, vec2};
 
 pub const BG: Color32 = Color32::from_rgb(0x10, 0x12, 0x16);
 pub const BOX: Color32 = Color32::from_rgb(0x16, 0x19, 0x1f);
@@ -296,6 +296,23 @@ pub fn cpu_bar_cell(ui: &mut Ui, frac: f32, text: &str) {
     let galley = p.layout_no_wrap(text.to_string(), font, TEXT);
     let pos = pos2(rect.right() - galley.size().x, rect.center().y - galley.size().y / 2.0);
     p.galley(pos, galley, TEXT);
+}
+
+/// One classified failure, drawn the same way on every surface (E4): the
+/// class as a red headline, one concrete next action, then the scrubbed
+/// detail in monospace. Callers pass an already-classified, already-scrubbed
+/// triple (`client::Diagnosis`, `pairing::PairError`); this only draws, so a
+/// new failure source cannot invent its own styling or forget the action.
+pub fn error_block(ui: &mut Ui, headline: &str, next_action: &str, detail: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(headline).strong().color(BAD));
+    ui.add(egui::Label::new(RichText::new(next_action).small().color(TEXT)).wrap());
+    ui.add(
+        egui::Label::new(
+            RichText::new(format!("detail: {detail}")).small().monospace().color(DIM),
+        )
+        .wrap(),
+    );
 }
 
 #[cfg(test)]

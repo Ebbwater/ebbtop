@@ -15,6 +15,7 @@ use ebbtop_core::view::{self, SortKey};
 use ebbtop_core::wire::{KillJob, KillSignal};
 use tokio::sync::mpsc;
 
+use crate::discovery::{self, PairAction, PairOutcome, Pairing};
 use crate::store::{self, Config, TokenSource};
 use crate::update::{self, UpdateCheck, UpdateStatus};
 use crate::widgets as w;
@@ -102,6 +103,28 @@ struct Onboard {
     /// Last failed Test, classified: what happened and the next action.
     /// Never unlocks Save (that is `tested`); cleared at the next Test.
     failure: Option<client::Diagnosis>,
+    /// Discovery step: the scan controls and the agents it found.
+    discovery: discovery::Discovery,
+    /// Pairing-code step: present while the user is pairing one host.
+    pair: Option<discovery::Pairing>,
+    /// Token issued by a successful `/pair`, already written to the per-host
+    /// credential store. It stands in for the token field, so the secret is
+    /// never rendered; editing the token field releases it.
+    issued: Option<String>,
+    /// Source name the issued token was stored under (so a later rename can
+    /// drop the stale entry).
+    issued_name: Option<String>,
+}
+
+impl Onboard {
+    /// The credential Test/Save will use: what the user typed if they typed
+    /// anything, else the token a pairing exchange issued. Keeping the paired
+    /// token out of the field means it is never rendered, and typing a token
+    /// still overrides it (the field is the user's latest instruction).
+    fn effective_token(&self) -> String {
+        let typed = client::clean_token(&self.token);
+        if typed.is_empty() { self.issued.clone().unwrap_or_default() } else { typed }
+    }
 }
 
 /// Sizing outcome of one linked table. The two bodies scroll independently
@@ -174,6 +197,12 @@ pub struct App {
     /// harness-built apps so tests (which drive `start()` explicitly)
     /// never spawn the real GitHub fetch from `draw`.
     update_auto: bool,
+    /// Settings > Sources: discovery for a new host, the code prompt it opens
+    /// and a typed address for the manual path. Same flow as the wizard.
+    pair_discovery: discovery::Discovery,
+    pair_new: Option<discovery::Pairing>,
+    pair_addr_edit: String,
+    pair_msg: Option<String>,
 }
 
 fn local_time(ms: u64) -> String {
@@ -267,6 +296,10 @@ impl App {
             update,
             update_open: false,
             update_auto: false,
+            pair_discovery: discovery::Discovery::default(),
+            pair_new: None,
+            pair_addr_edit: String::new(),
+            pair_msg: None,
         }
     }
 
@@ -1514,14 +1547,16 @@ impl App {
         Ok(())
     }
 
-    /// Current wizard triple: (trimmed name, normalized URL or "", cleaned
-    /// token). Used to gate Save on a green Test of these exact values.
+    /// Current wizard triple: (trimmed name, normalized URL or "", effective
+    /// token). Used to gate Save on a green Test of these exact values. A
+    /// token issued by `/pair` stands in for the token field, so a paired
+    /// host never needs its secret retyped or rendered.
     fn onboard_current(&self) -> (String, String, String) {
         match self.onboard.as_ref() {
             Some(ob) => (
                 ob.name.trim().to_string(),
                 client::normalize_base_url(&ob.url).unwrap_or_default(),
-                client::clean_token(&ob.token),
+                ob.effective_token(),
             ),
             None => (String::new(), String::new(), String::new()),
         }
@@ -1597,7 +1632,7 @@ impl App {
     /// The result arrives on the wizard's channel, polled in `onboarding()`.
     fn onboard_test(&mut self) {
         let (name, url, tok) = match self.onboard.as_ref() {
-            Some(ob) => (ob.name.clone(), ob.url.clone(), ob.token.clone()),
+            Some(ob) => (ob.name.clone(), ob.url.clone(), ob.effective_token()),
             None => return,
         };
         let normalized = match self.validate_source(&name, &url) {
@@ -1609,11 +1644,10 @@ impl App {
                 return;
             }
         };
-        let tok = client::clean_token(&tok);
         if tok.is_empty() {
             if let Some(ob) = self.onboard.as_mut() {
                 ob.msg = Some(
-                    "paste the agent token: on the agent host run `ssh user@host cat services/ebbtop-agent/ebbtop.token`".to_string(),
+                    "no credential yet: pair with a 6-digit code from `ebbtop-agent --pair` on the host, or paste the agent token (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`)".to_string(),
                 );
             }
             return;
@@ -1666,7 +1700,7 @@ impl App {
         if tok.is_empty() {
             if let Some(ob) = self.onboard.as_mut() {
                 ob.msg = Some(
-                    "paste the agent token: on the agent host run `ssh user@host cat services/ebbtop-agent/ebbtop.token`".to_string(),
+                    "no credential yet: pair with a 6-digit code from `ebbtop-agent --pair` on the host, or paste the agent token (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`)".to_string(),
                 );
             }
             return;
@@ -1686,12 +1720,146 @@ impl App {
                 store::append_log("onboarding: token kept for this session only");
             }
         }
+        // A paired host whose name the user changed keeps one entry: the one
+        // under the name actually saved. Drop the pairing-time entry.
+        if let Some(old) = self.onboard.as_ref().and_then(|ob| ob.issued_name.clone())
+            && old != user
+        {
+            store::delete_token_for(&old);
+        }
         self.token = Some(tok);
         self.url_edit = self.cfg.active_source().map(|s| s.url.clone()).unwrap_or_default();
         let _ = store::save_config(&self.cfg);
         self.onboard = None;
         self.start_client(ctx);
         self.update_title(ctx);
+    }
+
+    /// Write an issued token to the existing per-host credential store under
+    /// the source name. This is the only place the token goes: never a text
+    /// field, a log line or a support summary. Returns whether the store took
+    /// it (a headless session can lack one; the session keeps working).
+    fn store_issued_token(name: &str, token: &str) -> bool {
+        match store::save_token_for(name, token) {
+            Ok(()) => true,
+            Err(_) => {
+                store::append_log(
+                    "pairing: credential store unavailable; token kept for this session only",
+                );
+                false
+            }
+        }
+    }
+
+    /// Drain the wizard's discovery scan and pairing exchange. Run before the
+    /// window draws so a finished exchange is applied in the same frame.
+    fn onboarding_poll(&mut self) {
+        let mut outcome = None;
+        if let Some(ob) = self.onboard.as_mut() {
+            ob.discovery.poll();
+            if let Some(p) = ob.pair.as_mut()
+                && let Some(o) = p.poll()
+            {
+                outcome = Some((p.name.clone(), p.url.clone(), o));
+            }
+        }
+        if let Some((name, url, out)) = outcome {
+            self.onboard_paired(&name, &url, out);
+        }
+    }
+
+    /// A wizard pairing exchange succeeded. The host prefills the fields and
+    /// the issued token becomes the effective credential, but Save stays
+    /// locked until the existing Test passes for these exact values.
+    fn onboard_paired(&mut self, name: &str, url: &str, out: PairOutcome) {
+        let taken: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
+        let base = if out.host.trim().is_empty() { name } else { out.host.as_str() };
+        let name = ebbtop_core::pairing::unique_source_name(base, &taken);
+        let stored = Self::store_issued_token(&name, &out.token);
+        store::append_log(&format!("pairing ok host={name} scope={}", out.scope));
+        if let Some(ob) = self.onboard.as_mut() {
+            ob.pair = None;
+            ob.name = name.clone();
+            ob.url = url.to_string();
+            // The secret lives in the credential store and in `issued`; the
+            // rendered field stays empty.
+            ob.token.clear();
+            ob.issued = Some(out.token);
+            ob.issued_name = Some(name.clone());
+            // A different host cannot inherit an earlier green Test.
+            ob.tested = None;
+            ob.probe_for = None;
+            ob.failure = None;
+            ob.msg = Some(if stored {
+                format!(
+                    "paired with {name}: token saved in the OS credential store. Test to unlock Save."
+                )
+            } else {
+                format!(
+                    "paired with {name}: the OS credential store is unavailable, so the token is kept \
+                     for this session only. Test to unlock Save."
+                )
+            });
+        }
+    }
+
+    /// Open the wizard's code prompt for the fields as typed, validating the
+    /// name and address first so a typo never becomes a network call.
+    fn onboard_begin_pair(&mut self) {
+        let (name, url) = match self.onboard.as_ref() {
+            Some(ob) => (ob.name.trim().to_string(), ob.url.trim().to_string()),
+            None => return,
+        };
+        if let Err(e) = self.validate_source(&name, &url) {
+            if let Some(ob) = self.onboard.as_mut() {
+                ob.msg = Some(e);
+            }
+            return;
+        }
+        if let Some(ob) = self.onboard.as_mut() {
+            ob.pair = Some(Pairing::for_address(&name, &url));
+            ob.msg = None;
+            ob.failure = None;
+        }
+    }
+
+    /// Settings > Sources: a pairing exchange succeeded. Adds the source
+    /// under a free name and stores the token beside it; a first source then
+    /// becomes active, exactly like the wizard's save.
+    fn settings_paired(&mut self, ctx: &egui::Context, url: &str, out: PairOutcome) {
+        let taken: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
+        let name = ebbtop_core::pairing::unique_source_name(&out.host, &taken);
+        let normalized = match self.validate_source(&name, url) {
+            Ok(u) => u,
+            Err(e) => {
+                self.pair_new = None;
+                self.pair_msg = Some(format!("paired, but the source was not added: {e}"));
+                return;
+            }
+        };
+        let first = self.cfg.sources.is_empty();
+        self.cfg.sources.push(store::Source { name: name.clone(), url: normalized });
+        if first {
+            self.cfg.active = 0;
+        }
+        let stored = Self::store_issued_token(&name, &out.token);
+        let _ = store::save_config(&self.cfg);
+        store::append_log(&format!("pairing ok host={name} scope={}", out.scope));
+        self.pair_new = None;
+        self.pair_msg = Some(if stored {
+            format!(
+                "paired {name}: token saved in the OS credential store — Test it in the list above, \
+                 then set it active."
+            )
+        } else {
+            format!(
+                "paired {name}: the OS credential store is unavailable, so the token is kept for \
+                 this session only."
+            )
+        });
+        if first {
+            self.use_active_source(ctx);
+        }
     }
 
     /// Most recent classified Test failure: what a support summary reports
@@ -1792,23 +1960,68 @@ impl App {
                 None => {}
             }
         }
+        // Discovery results and a finished pairing exchange land here.
+        self.onboarding_poll();
         let mut open = self.onboard.is_some();
         let mut skip = false;
+        let mut begin_pair = false;
+        let mut pair_start = false;
+        let mut pair_cancel = false;
+        let mut test = false;
+        let mut save = false;
+        let mut open_logs = false;
+        let mut copy_summary = false;
         egui::Window::new("Welcome to EbbTop")
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                // Everything below assumes a wizard to draw. egui can call the
+                // body of a closed window in debug-visibility mode, and `Skip`
+                // clears the state mid-frame, so guard once here.
+                if self.onboard.is_none() {
+                    return;
+                }
+                ui.set_max_width(560.0);
                 ui.label("Add your first host. The token is stored in the OS credential store.");
+                ui.add_space(4.0);
+
+                // (1) Discovery: find an agent on this segment, or skip it.
+                let picked = self.onboard.as_mut().expect("wizard open").discovery.draw(ui);
+                if let Some(i) = picked {
+                    let agent =
+                        self.onboard.as_ref().and_then(|ob| ob.discovery.agents.get(i).cloned());
+                    if let Some(a) = agent {
+                        if let Some(ob) = self.onboard.as_mut() {
+                            ob.pair = Some(Pairing::for_agent(&a));
+                            ob.name = a.name.clone();
+                            ob.url = a.url();
+                            ob.msg = None;
+                            ob.failure = None;
+                            ob.tested = None;
+                        }
+                        store::append_log("discovery: agent picked");
+                    }
+                }
+
+                // (2) Pairing-code step for the picked (or typed) host.
+                if let Some(p) = self.onboard.as_mut().and_then(|ob| ob.pair.as_mut()) {
+                    match p.draw(ui) {
+                        PairAction::Start => pair_start = true,
+                        PairAction::Cancel => pair_cancel = true,
+                        PairAction::None => {}
+                    }
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(RichText::new("Or enter the address yourself").strong().color(w::TEXT));
                 ui.label(RichText::new("Agent port 45976; token file ~/services/ebbtop-agent/ebbtop.token on the agent host.").small().color(w::DIM));
                 ui.label(RichText::new("Fetch it with: ssh user@host cat services/ebbtop-agent/ebbtop.token (| pbcopy / | Set-Clipboard)").small().color(w::DIM));
                 ui.label(RichText::new("Tip: a bare hostname works — ws://, :45976 and /ws are added.").small().color(w::DIM));
                 ui.add_space(6.0);
-                let mut test = false;
-                let mut save = false;
-                let mut open_logs = false;
-                let mut copy_summary = false;
+
                 // Snapshot for the gated Save button; computed before the
                 // mutable borrow of the wizard fields below.
                 let current = self.onboard_current();
@@ -1821,6 +2034,7 @@ impl App {
                 let tok_warn = client::token_warning(&current.2);
                 {
                     let ob = self.onboard.as_mut().expect("wizard open");
+                    let mut token_edited = false;
                     egui::Grid::new("onboard").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                         ui.label("Name");
                         ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver"));
@@ -1829,9 +2043,24 @@ impl App {
                         ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text("myserver or ws://host:45976/ws"));
                         ui.end_row();
                         ui.label("Token");
-                        ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text("paste the agent token"));
+                        let tok = ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text("paste the agent token"));
+                        token_edited = tok.changed();
                         ui.end_row();
                     });
+                    // Typing a token releases a paired one: the field is the
+                    // user's latest instruction, not a stale pairing.
+                    if token_edited && ob.issued.is_some() {
+                        ob.issued = None;
+                        ob.issued_name = None;
+                        ob.msg = Some("using the token you typed instead of the paired credential".to_string());
+                    }
+                    if ob.issued.is_some() {
+                        ui.add(egui::Label::new(
+                            RichText::new("credential: issued by pairing and stored in the OS credential store (not shown)")
+                                .small()
+                                .color(w::OK),
+                        ).wrap());
+                    }
                     if let Some(u) = assumed {
                         ui.label(RichText::new(format!("will connect to {u}")).small().color(w::DIM));
                     }
@@ -1846,6 +2075,13 @@ impl App {
                         let save_btn = ui.add_enabled(can_save, egui::Button::new("Save and connect"));
                         if save_btn.clicked() {
                             save = true;
+                        }
+                        if ui
+                            .button("Use a pairing code")
+                            .on_hover_text("probe the address above and exchange a 6-digit code for a token")
+                            .clicked()
+                        {
+                            begin_pair = true;
                         }
                         if ui.button("Skip").clicked() {
                             skip = true;
@@ -1865,18 +2101,13 @@ impl App {
                         ui.label(RichText::new("testing…").color(w::DIM));
                     }
                     if let Some(m) = &ob.msg {
-                        ui.label(RichText::new(m).color(w::WARN));
+                        ui.add(egui::Label::new(RichText::new(m).color(w::WARN)).wrap());
                     }
                     // Failed Test: the class, one concrete next action, the
                     // scrubbed detail, and the way to the logs. Same window,
-                    // same style, one extra block.
+                    // same style, one extra block (E4 surfaces, shared).
                     if let Some(d) = &ob.failure {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(d.headline()).strong().color(w::BAD));
-                        ui.add(egui::Label::new(RichText::new(d.next_action()).small().color(w::TEXT)).wrap());
-                        ui.add(egui::Label::new(
-                            RichText::new(format!("detail: {}", d.detail)).small().monospace().color(w::DIM),
-                        ).wrap());
+                        w::error_block(ui, d.headline(), d.next_action(), &d.detail);
                         if let Some(p) = store::log_path() {
                             ui.add(egui::Label::new(
                                 RichText::new(format!("log: {}", p.display())).small().monospace().color(w::DIM),
@@ -1897,6 +2128,19 @@ impl App {
                 }
                 if save {
                     self.onboard_save(ctx);
+                }
+                if begin_pair {
+                    self.onboard_begin_pair();
+                }
+                if pair_start
+                    && let Some(p) = self.onboard.as_mut().and_then(|ob| ob.pair.as_mut())
+                {
+                    p.start();
+                }
+                if pair_cancel {
+                    if let Some(ob) = self.onboard.as_mut() {
+                        ob.pair = None;
+                    }
                 }
                 if open_logs
                     && let Err(e) = store::open_logs()
@@ -1922,6 +2166,18 @@ impl App {
     fn settings(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         let mut save = false;
+        // Discovery results and a finished pairing exchange land here, the
+        // same way the wizard handles them.
+        self.pair_discovery.poll();
+        let mut paired = None;
+        if let Some(p) = self.pair_new.as_mut()
+            && let Some(o) = p.poll()
+        {
+            paired = Some((p.url.clone(), o));
+        }
+        if let Some((url, out)) = paired {
+            self.settings_paired(ctx, &url, out);
+        }
         // Poll the in-flight connection test, if any.
         if self.testing {
             match self.test_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
@@ -1964,6 +2220,7 @@ impl App {
                     }
                 });
                 ui.separator();
+                ui.set_max_width(620.0);
                 match self.settings_tab {
                     SettingsTab::Sources => self.settings_sources(ctx, ui),
                     SettingsTab::Display => self.settings_display(ui),
@@ -2029,11 +2286,7 @@ impl App {
         }
         let mut open_logs = false;
         if let Some(d) = &self.source_failure {
-            ui.label(RichText::new(d.headline()).strong().color(w::BAD));
-            ui.add(egui::Label::new(RichText::new(d.next_action()).small().color(w::TEXT)).wrap());
-            ui.add(egui::Label::new(
-                RichText::new(format!("detail: {}", d.detail)).small().monospace().color(w::DIM),
-            ).wrap());
+            w::error_block(ui, d.headline(), d.next_action(), &d.detail);
             if ui.button("Open logs").clicked() {
                 open_logs = true;
             }
@@ -2063,6 +2316,78 @@ impl App {
                 }
             }
         });
+
+        // ---- Pair a new host (the wizard's flow, from Settings) ----------
+        ui.add_space(6.0);
+        ui.separator();
+        ui.label(RichText::new("Pair a new host").strong().color(w::TEXT));
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Run `ebbtop-agent --pair` on the host for a 6-digit code (about 5 minutes, one \
+                     use), then pick it below or type its address. No token copying needed.",
+                )
+                .small()
+                .color(w::DIM),
+            )
+            .wrap(),
+        );
+        let picked = self.pair_discovery.draw(ui);
+        if let Some(i) = picked {
+            let agent = self.pair_discovery.agents.get(i).cloned();
+            if let Some(a) = agent {
+                self.pair_new = Some(Pairing::for_agent(&a));
+                self.pair_msg = None;
+            }
+        }
+        let mut manual_pair = false;
+        ui.horizontal(|ui| {
+            ui.label("Address");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.pair_addr_edit)
+                    .desired_width(220.0)
+                    .hint_text("host or ws://host:45976/ws"),
+            );
+            if ui
+                .button("Pair with code")
+                .on_hover_text("pair with the address you typed, using a 6-digit code")
+                .clicked()
+            {
+                manual_pair = true;
+            }
+        });
+        let mut pair_start = false;
+        let mut pair_cancel = false;
+        if let Some(p) = self.pair_new.as_mut() {
+            match p.draw(ui) {
+                PairAction::Start => pair_start = true,
+                PairAction::Cancel => pair_cancel = true,
+                PairAction::None => {}
+            }
+        }
+        if let Some(m) = &self.pair_msg {
+            ui.add(egui::Label::new(RichText::new(m).color(w::WARN)).wrap());
+        }
+        if manual_pair {
+            let name = self.source_name_edit.trim().to_string();
+            let url = self.pair_addr_edit.trim().to_string();
+            match client::normalize_base_url(&url) {
+                Ok(_) => {
+                    self.pair_new =
+                        Some(Pairing::for_address(if name.is_empty() { "host" } else { &name }, &url));
+                    self.pair_msg = None;
+                }
+                Err(e) => self.pair_msg = Some(format!("bad URL: {e}")),
+            }
+        }
+        if pair_start
+            && let Some(p) = self.pair_new.as_mut()
+        {
+            p.start();
+        }
+        if pair_cancel {
+            self.pair_new = None;
+        }
     }
 
     fn settings_display(&mut self, ui: &mut Ui) {
@@ -4164,6 +4489,26 @@ mod tests {
     #[test]
     #[ignore]
     fn screenshot() {
+        // P3b scenes reuse this: one 960x1040 frame of whatever the app draws.
+        fn shot(dir: &std::path::Path, name: &str, mut app: App) {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(960.0, 1040.0))
+                .wgpu()
+                .build_ui(move |ui| {
+                    style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
+                    app.draw(ui)
+                });
+            for _ in 0..4 {
+                harness.step();
+            }
+            let img = harness.render().expect("render");
+            let path = dir.join(name);
+            img.save(&path).expect("save");
+            eprintln!("wrote {}", path.display());
+        }
         let dir = std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
         for (w, h) in [(960.0f32, 1040.0f32), (1920.0, 1080.0), (640.0, 520.0)] {
             let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
@@ -4312,6 +4657,49 @@ mod tests {
             let path = dir.join(format!("ebbtop-{w}x{h}-workloads.png"));
             img.save(&path).expect("save");
             eprintln!("wrote {}", path.display());
+        }
+
+        // ---- P3b: discovery list, pairing-code entry, Settings flow ------
+
+        // An agent row, a version and an address: the discovered list.
+        {
+            let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+            {
+                let ob = app.onboard.as_mut().expect("wizard open");
+                ob.discovery.agents = vec![
+                    agent("k-server", "0.2.8", "10.0.0.164", 45976),
+                    agent("pi", "0.2.8", "10.0.0.22", 45976),
+                ];
+                ob.discovery.finished = true;
+            }
+            shot(&dir, "ebbtop-960x1040-onboard-discovered.png", app);
+        }
+        // The pairing-code step with a refusal: the code a host would reject,
+        // and the E4 block that says what to do next.
+        {
+            let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+            {
+                let ob = app.onboard.as_mut().expect("wizard open");
+                ob.name = "k-server".into();
+                ob.url = "ws://10.0.0.164:45976/ws".into();
+                let mut p = Pairing::for_address("k-server", "ws://10.0.0.164:45976/ws");
+                // A fixture value, not a real code: no host minted it.
+                p.code = "123456".into();
+                p.error = Some(PairError::from_status(403, "invalid pairing code"));
+                ob.pair = Some(p);
+            }
+            shot(&dir, "ebbtop-960x1040-onboard-pair.png", app);
+        }
+        // Settings > Sources: the same discovery and code flow for a new host.
+        {
+            let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
+            fake_state(&app, client::now_ms());
+            app.settings_open = true;
+            app.settings_tab = SettingsTab::Sources;
+            app.pair_discovery.agents = vec![agent("k-server", "0.2.8", "10.0.0.164", 45976)];
+            app.pair_discovery.finished = true;
+            app.pair_new = Some(Pairing::for_address("k-server", "ws://10.0.0.164:45976/ws"));
+            shot(&dir, "ebbtop-960x1040-settings-pair.png", app);
         }
     }
 
@@ -4980,5 +5368,428 @@ mod tests {
             }
         }
         println!("=== support summary (no failure) ===\n{}", wizard_app().support_summary_text());
+    }
+
+    // ---- P3b: discovery list and pairing-code entry ----------------------
+
+    use ebbtop_core::pairing::{DiscoveredAgent, PairError, PairFailure};
+
+    fn agent(name: &str, version: &str, addr: &str, port: u16) -> DiscoveredAgent {
+        DiscoveredAgent {
+            addr: addr.to_string(),
+            port,
+            name: name.to_string(),
+            agent_version: version.to_string(),
+            nonce: format!("nonce-{name}"),
+        }
+    }
+
+    /// A 64-hex credential shape built at run time: no compile-time literal
+    /// in this file looks like a secret.
+    fn issued_token() -> String {
+        let digit = ['0', 'f', '1', 'e', '2', 'd', '3', 'c', '4', 'b', '5', 'a', '6', '9', '7', '8'];
+        (0..64).map(|i| digit[i % digit.len()]).collect()
+    }
+
+    /// Point config + credential writes at temp files for this thread, so a
+    /// test that saves a source never edits the operator's own state.
+    fn isolated_state(tag: &str) -> (store::TestCredentials, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ebbtop-p3b-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        store::set_test_config(Some(dir.join("config.json")));
+        let creds: store::TestCredentials = Default::default();
+        store::set_test_credentials(Some(creds.clone()));
+        (creds, dir)
+    }
+
+    fn clear_isolated_state(dir: &std::path::Path) {
+        store::set_test_config(None);
+        store::set_test_credentials(None);
+        store::set_test_log(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wizard_lists_discovered_agents_with_name_version_and_address() {
+        let mut app = wizard_app();
+        {
+            let ob = app.onboard.as_mut().expect("wizard open");
+            ob.discovery.agents = vec![
+                agent("k-server", "0.2.8", "10.0.0.5", 45976),
+                agent("pi", "0.2.7", "10.0.0.22", 45977),
+            ];
+            ob.discovery.finished = true;
+        }
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        // Name, version and address for every discovered agent.
+        for s in [
+            "k-server", "v0.2.8", "10.0.0.5:45976",
+            "pi", "v0.2.7", "10.0.0.22:45977",
+            "Use this host",
+        ] {
+            assert!(t.contains(s), "{s} missing from the discovered list:\n{t}");
+        }
+        // The scan's real limit is stated, and the manual path is still on
+        // screen next to the list (discovery is a convenience, not a gate).
+        assert!(t.contains("broadcast does not cross"), "scan limit not stated:\n{t}");
+        assert!(t.contains("Or enter the address yourself"), "manual path missing:\n{t}");
+        // No scan has been run, so the "nothing answered" result is not shown.
+        assert!(!t.contains("No agent answered"), "empty state before any scan:\n{t}");
+    }
+
+    #[test]
+    fn wizard_keeps_the_manual_path_first_class() {
+        let (creds, dir) = isolated_state("manual");
+        let mut app = wizard_app();
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        for s in [
+            "Find agents on this network",
+            "Or enter the address yourself",
+            "Name", "URL", "Token",
+            "Test", "Save and connect", "Use a pairing code", "Skip",
+        ] {
+            assert!(t.contains(s), "{s} missing from the wizard:\n{t}");
+        }
+        // The manual token path still reaches a green Test and Save, with no
+        // discovery and no pairing involved.
+        fill_wizard(&mut app, "h", "ws://127.0.0.1:1/ws", SENTINEL);
+        deliver_probe(&mut app, Ok("manualhost".into()));
+        let _ = render(&mut app, 960.0, 1000.0);
+        assert!(app.onboard_save_gate(), "a manual green Test must unlock Save");
+        let ctx = egui::Context::default();
+        app.onboard_save(&ctx);
+        assert_eq!(app.cfg.sources.len(), 1);
+        assert_eq!(app.cfg.sources[0].name, "h");
+        assert_eq!(store::load_token_for("h").0.as_deref(), Some(SENTINEL));
+        assert!(creds.borrow().iter().any(|(u, t)| u == "h" && t == SENTINEL));
+        clear_isolated_state(&dir);
+    }
+
+    #[test]
+    fn wizard_pick_opens_the_pairing_prompt_for_the_discovered_host() {
+        let mut app = wizard_app();
+        {
+            let ob = app.onboard.as_mut().expect("wizard open");
+            ob.discovery.agents = vec![
+                agent("k-server", "0.2.8", "10.0.0.5", 45976),
+                agent("pi", "0.2.7", "10.0.0.22", 45976),
+            ];
+            ob.discovery.finished = true;
+        }
+        let ctx = egui::Context::default();
+        style(&ctx);
+        let (w, h) = (960.0f32, 1000.0f32);
+        // A window lays out on its first frame, so measure it on the second.
+        frame(&ctx, &mut app, w, h, vec![]);
+        // Click the first "Use this host": the control must act, not just draw.
+        let shapes = frame(&ctx, &mut app, w, h, vec![]);
+        let target = text_rects(&shapes)
+            .into_iter()
+            .find(|(s, _)| s == "Use this host")
+            .unwrap_or_else(|| panic!("no Use this host control: {:?}", texts(&shapes)))
+            .1
+            .center();
+        let btn = |pressed: bool| egui::Event::PointerButton {
+            pos: target,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(target)]);
+        frame(&ctx, &mut app, w, h, vec![btn(true)]);
+        let t = joined(&texts(&frame(&ctx, &mut app, w, h, vec![btn(false)])));
+
+        let ob = app.onboard.as_ref().expect("wizard open");
+        let p = ob.pair.as_ref().expect("picking a host must open the code prompt");
+        assert_eq!(p.name, "k-server");
+        assert_eq!(p.url, "ws://10.0.0.5:45976/ws");
+        // The fields were prefilled from the reply, and the prompt asks for
+        // the six-digit code: name/version/address were already chosen.
+        assert_eq!(ob.name, "k-server");
+        assert_eq!(ob.url, "ws://10.0.0.5:45976/ws");
+        for s in ["Pair with k-server", "Pairing code", "Pair", "ebbtop-agent --pair"] {
+            assert!(t.contains(s), "{s} missing from the pair step:\n{t}");
+        }
+    }
+
+    #[test]
+    fn wizard_pair_step_renders_the_code_entry() {
+        let mut app = wizard_app();
+        app.onboard.as_mut().unwrap().pair = Some(Pairing::for_address("k-server", "ws://10.0.0.5/ws"));
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        for s in ["Pair with k-server", "Pairing code", "Pair"] {
+            assert!(t.contains(s), "{s} missing:\n{t}");
+        }
+        assert!(t.contains("ws://10.0.0.5:45976/ws"), "prompt address missing:\n{t}");
+        assert!(t.contains("6-digit code"), "no code instruction:\n{t}");
+    }
+
+    #[test]
+    fn wizard_pair_refusals_render_each_e4_action() {
+        // Every refusal class the accepted contract defines, plus the
+        // transport classes, rendered with its own headline and next action.
+        let cases = [
+            (Some((404, "no pending pairing code")), PairFailure::NoPendingCode),
+            (Some((403, "invalid pairing code")), PairFailure::InvalidCode),
+            (Some((403, "pairing code expired")), PairFailure::ExpiredCode),
+            (Some((429, "too many attempts")), PairFailure::LockedOut),
+            (Some((400, "bad pair request")), PairFailure::BadRequest),
+            (None, PairFailure::Unreachable),
+            (None, PairFailure::Timeout),
+            (None, PairFailure::NotAgent),
+            (None, PairFailure::Ambiguous),
+        ];
+        let transport = |k: PairFailure| match k {
+            PairFailure::Unreachable => "error sending request: Connection refused (os error 111)",
+            PairFailure::Timeout => "error sending request: operation timed out",
+            PairFailure::NotAgent => "HTTP format error: invalid status",
+            _ => "something the classifier has not seen",
+        };
+        for (status, want) in cases {
+            let mut app = wizard_app();
+            let mut p = Pairing::for_address("k-server", "ws://10.0.0.5/ws");
+            let err = match status {
+                Some((s, body)) => PairError::from_status(s, body),
+                None => PairError::from_transport(transport(want)),
+            };
+            assert_eq!(err.kind, want, "setup: {status:?}");
+            p.error = Some(err.clone());
+            app.onboard.as_mut().unwrap().pair = Some(p);
+            let t = joined(&render(&mut app, 960.0, 1000.0));
+            assert!(t.contains(err.headline()), "{:?}: headline missing:\n{t}", want.tag());
+            assert!(t.contains(err.next_action()), "{:?}: next action missing:\n{t}", want.tag());
+            assert!(t.contains(&format!("detail: {}", err.detail)), "{:?}: detail missing:\n{t}", want.tag());
+            // The prompt's own code field is empty here, so a rendered code
+            // would be an echo from the failure text: there must not be one.
+            assert!(!t.contains("123456"), "{:?}: code echoed in the UI:\n{t}", want.tag());
+        }
+    }
+
+    #[test]
+    fn pairing_stores_the_token_then_test_and_save_run_unchanged() {
+        let (creds, dir) = isolated_state("paired");
+        let log = dir.join("ebbtop.log");
+        store::set_test_log(Some(log.clone()));
+        let token = issued_token();
+
+        let mut app = wizard_app();
+        app.onboard_paired(
+            "k-server",
+            "ws://10.0.0.5:45976/ws",
+            PairOutcome {
+                token: token.clone(),
+                host: "k-server".into(),
+                agent_version: "0.2.8".into(),
+                scope: "read_only".into(),
+            },
+        );
+        {
+            let ob = app.onboard.as_ref().expect("wizard open");
+            assert_eq!(ob.name, "k-server");
+            assert_eq!(ob.url, "ws://10.0.0.5:45976/ws");
+            assert!(ob.token.is_empty(), "the issued token must stay out of the field");
+            assert_eq!(ob.issued.as_deref(), Some(token.as_str()));
+            assert!(ob.pair.is_none(), "the prompt closes on success");
+        }
+        // It was written to the existing per-host credential store under the
+        // source name, and nowhere else.
+        assert_eq!(store::load_token_for("k-server").0.as_deref(), Some(token.as_str()));
+
+        // The Save gate is unchanged: a paired credential is not a green Test.
+        assert!(!app.onboard_save_gate(), "pairing must not unlock Save by itself");
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        assert!(!t.contains(&token), "the token rendered:\n{t}");
+        assert!(t.contains("credential: issued by pairing"), "no credential note:\n{t}");
+        assert!(t.contains("Save unlocks after a green Test"), "gate note missing:\n{t}");
+        assert!(t.contains("Test to unlock Save"), "next action missing:\n{t}");
+
+        // Test -> Save is the existing flow: a green Test of these exact
+        // values unlocks Save, and Save stores the source with the same token.
+        deliver_probe(&mut app, Ok("k-server".into()));
+        let _ = render(&mut app, 960.0, 1000.0);
+        assert!(app.onboard_save_gate(), "a green Test of the paired values unlocks Save");
+        let ctx = egui::Context::default();
+        app.onboard_save(&ctx);
+        assert!(app.onboard.is_none(), "save completes the wizard");
+        assert_eq!(app.cfg.sources.len(), 1);
+        assert_eq!(app.cfg.sources[0].url, "ws://10.0.0.5:45976/ws");
+        assert_eq!(store::load_token_for("k-server").0.as_deref(), Some(token.as_str()));
+        assert_eq!(creds.borrow().len(), 2, "pairing + save both wrote the one entry");
+
+        // The log records the class and host, never the secret or the code.
+        let logged = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(logged.contains("pairing ok host=k-server"), "no pairing log line:\n{logged}");
+        assert!(!logged.contains(&token), "token logged:\n{logged}");
+        assert!(!logged.contains("read_only") || !logged.contains(&token));
+        clear_isolated_state(&dir);
+    }
+
+    #[test]
+    fn typing_a_token_overrides_the_paired_credential() {
+        let (creds, dir) = isolated_state("override");
+        let mut app = wizard_app();
+        app.onboard_paired(
+            "k-server",
+            "ws://10.0.0.5:45976/ws",
+            PairOutcome {
+                token: issued_token(),
+                host: "k-server".into(),
+                agent_version: "0.2.8".into(),
+                scope: "read_only".into(),
+            },
+        );
+        // The user pastes a token instead: the typed value is what Test/Save
+        // will use, and the paired credential stops standing in.
+        app.onboard.as_mut().unwrap().token = "typed-token".into();
+        assert_eq!(app.onboard_current().2, "typed-token");
+        assert!(!app.onboard_save_gate(), "an edit after pairing cannot inherit a Test");
+        let _ = creds;
+        clear_isolated_state(&dir);
+    }
+
+    #[test]
+    fn settings_sources_pairs_a_new_host_through_the_same_flow() {
+        let (creds, dir) = isolated_state("settings");
+        let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
+        app.settings_open = true;
+        app.settings_tab = SettingsTab::Sources;
+        {
+            app.pair_discovery.agents = vec![agent("k-server", "0.2.8", "10.0.0.5", 45976)];
+            app.pair_discovery.finished = true;
+        }
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        for s in [
+            "Pair a new host",
+            "Find agents on this network",
+            "k-server", "v0.2.8", "10.0.0.5:45976",
+            "Use this host",
+            "Pair with code",
+            "Address",
+        ] {
+            assert!(t.contains(s), "{s} missing from Settings > Sources:\n{t}");
+        }
+
+        // Picking a discovered host opens the same code prompt as the wizard.
+        app.pair_new = Some(Pairing::for_agent(&app.pair_discovery.agents[0].clone()));
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        assert!(t.contains("Pair with k-server"), "no code prompt in Settings:\n{t}");
+        assert!(t.contains("Pairing code"), "no code field in Settings:\n{t}");
+
+        // A refusal renders the same E4 block here, not a generic failure.
+        app.pair_new.as_mut().unwrap().error =
+            Some(PairError::from_status(403, "invalid pairing code"));
+        let t = joined(&render(&mut app, 960.0, 1000.0));
+        assert!(t.contains("Pairing code not accepted"), "refusal headline missing:\n{t}");
+        assert!(t.contains("Re-type the six digits"), "refusal action missing:\n{t}");
+
+        // A success adds the source under a free name and stores its token;
+        // "k-server" is taken by the existing fixture, so it suffixes.
+        let token = issued_token();
+        let ctx = egui::Context::default();
+        app.settings_paired(
+            &ctx,
+            "ws://10.0.0.5:45976/ws",
+            PairOutcome {
+                token: token.clone(),
+                host: "k-server".into(),
+                agent_version: "0.2.8".into(),
+                scope: "read_only".into(),
+            },
+        );
+        assert!(app.pair_new.is_none(), "the prompt closes on success");
+        assert_eq!(app.cfg.sources.len(), 3, "the paired host was added");
+        let added = app.cfg.sources.iter().find(|s| s.url == "ws://10.0.0.5:45976/ws");
+        let added = added.expect("paired source present");
+        assert_eq!(added.name, "k-server-2", "a taken name must not be reused");
+        assert_eq!(store::load_token_for("k-server-2").0.as_deref(), Some(token.as_str()));
+        assert!(!app.pair_msg.clone().unwrap_or_default().contains(&token));
+        assert!(app.pair_msg.clone().unwrap_or_default().contains("paired k-server-2"));
+        // The existing sources keep their names and tokens.
+        assert_eq!(app.cfg.sources[0].name, "k-server");
+        assert!(creds.borrow().iter().any(|(u, _)| u == "k-server-2"));
+        clear_isolated_state(&dir);
+    }
+
+    /// Rendered-text evidence for the P3b handoff: every surface this card
+    /// adds, printed as the text the frame actually draws. Run explicitly:
+    /// cargo test -p ebbtop-gui p3b_render_evidence -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn p3b_render_evidence() {
+        let scene = |label: &str, mut app: App| {
+            let t = joined(&render(&mut app, 960.0, 1000.0));
+            println!("=== {label} ===\n{t}\n");
+        };
+        let mut discovered = wizard_app();
+        {
+            let ob = discovered.onboard.as_mut().expect("wizard open");
+            ob.discovery.agents = vec![
+                agent("k-server", "0.2.8", "10.0.0.164", 45976),
+                agent("pi", "0.2.8", "10.0.0.22", 45976),
+            ];
+            ob.discovery.finished = true;
+        }
+        scene("wizard: discovered agents", discovered);
+
+        let mut empty = wizard_app();
+        empty.onboard.as_mut().unwrap().discovery.finished = true;
+        scene("wizard: scan finished, nothing answered", empty);
+
+        let mut manual = wizard_app();
+        manual.onboard.as_mut().unwrap().name = "myserver".into();
+        manual.onboard.as_mut().unwrap().url = "myserver".into();
+        scene("wizard: manual path (no discovery)", manual);
+
+        let mut code = wizard_app();
+        code.onboard.as_mut().unwrap().pair = Some(Pairing::for_address("k-server", "ws://10.0.0.164/ws"));
+        scene("wizard: pairing-code step", code);
+
+        for (label, err) in [
+            ("refusal: no pending code", PairError::from_status(404, "no pending pairing code")),
+            ("refusal: invalid code", PairError::from_status(403, "invalid pairing code")),
+            ("refusal: expired code", PairError::from_status(403, "pairing code expired")),
+            ("refusal: locked out", PairError::from_status(429, "too many attempts; run ebbtop-agent --pair again")),
+            ("refusal: bad request", PairError::from_status(400, "bad pair request")),
+            ("refusal: unreachable", PairError::from_transport("error sending request: Connection refused (os error 111)")),
+            ("refusal: timeout", PairError::from_transport("error sending request: operation timed out")),
+            ("refusal: not the agent", PairError::from_transport("HTTP format error: invalid status")),
+        ] {
+            let mut app = wizard_app();
+            let mut p = Pairing::for_address("k-server", "ws://10.0.0.164/ws");
+            p.error = Some(err);
+            app.onboard.as_mut().unwrap().pair = Some(p);
+            scene(label, app);
+        }
+
+        let (creds, dir) = isolated_state("evidence");
+        let mut paired = wizard_app();
+        paired.onboard_paired(
+            "k-server",
+            "ws://10.0.0.164:45976/ws",
+            PairOutcome {
+                token: issued_token(),
+                host: "k-server".into(),
+                agent_version: "0.2.8".into(),
+                scope: "read_only".into(),
+            },
+        );
+        scene("wizard: paired, Save still locked until Test", paired);
+        let stored = store::load_token_for("k-server").0;
+        println!(
+            "=== credential store ===\nentry present for k-server: {}\nentry shape: {} chars\n\n",
+            stored.is_some(),
+            stored.map(|s| s.chars().count()).unwrap_or(0)
+        );
+        let _ = creds;
+
+        let mut settings = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
+        settings.settings_open = true;
+        settings.settings_tab = SettingsTab::Sources;
+        settings.pair_discovery.agents = vec![agent("k-server", "0.2.8", "10.0.0.164", 45976)];
+        settings.pair_discovery.finished = true;
+        settings.pair_new = Some(Pairing::for_address("k-server", "ws://10.0.0.164/ws"));
+        scene("settings: pair a new host", settings);
+        clear_isolated_state(&dir);
     }
 }

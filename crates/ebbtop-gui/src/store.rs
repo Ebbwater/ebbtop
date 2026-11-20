@@ -189,11 +189,22 @@ pub fn name_from_url(u: &str) -> String {
 }
 
 pub fn load_config() -> Config {
-    load_config_from(config_path())
+    load_config_from(active_config_path())
+}
+
+/// Path the app reads and writes. Tests point this at a temp file
+/// (`set_test_config`) so a frame that persists a toggle never edits the
+/// operator's own `config.json`.
+fn active_config_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(p) = TEST_CONFIG.with(|c| c.borrow().clone()) {
+        return Some(p);
+    }
+    config_path()
 }
 
 pub fn save_config(c: &Config) -> anyhow::Result<()> {
-    let p = config_path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
+    let p = active_config_path().ok_or_else(|| anyhow::anyhow!("no config dir"))?;
     if let Some(d) = p.parent() {
         std::fs::create_dir_all(d)?;
     }
@@ -219,6 +230,16 @@ pub fn load_token_for(user: &str) -> (Option<String>, TokenSource) {
     {
         return (Some(t.trim().to_string()), TokenSource::Env);
     }
+    #[cfg(test)]
+    if let Some(sink) = test_credentials() {
+        // The suite never talks to a real credential store (that needs a
+        // desktop session); it uses the in-memory sink the test installed.
+        let found = sink.borrow().iter().rev().find(|(u, _)| u == user).map(|(_, t)| t.clone());
+        return match found {
+            Some(t) => (Some(t), TokenSource::Keyring),
+            None => (None, TokenSource::Missing),
+        };
+    }
     match keyring::Entry::new(KEYRING_SERVICE, user).and_then(|e| e.get_password()) {
         Ok(t) if !t.is_empty() => (Some(t), TokenSource::Keyring),
         Ok(_) | Err(keyring::Error::NoEntry) => (None, TokenSource::Missing),
@@ -227,6 +248,11 @@ pub fn load_token_for(user: &str) -> (Option<String>, TokenSource) {
 }
 
 pub fn save_token_for(user: &str, token: &str) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if let Some(sink) = test_credentials() {
+        sink.borrow_mut().push((user.to_string(), token.to_string()));
+        return Ok(());
+    }
     keyring::Entry::new(KEYRING_SERVICE, user)?.set_password(token)?;
     Ok(())
 }
@@ -234,7 +260,48 @@ pub fn save_token_for(user: &str, token: &str) -> anyhow::Result<()> {
 /// Drop a source's token. Best effort: a missing entry is not an error.
 /// Called when a source is removed so its secret does not linger.
 pub fn delete_token_for(user: &str) {
+    #[cfg(test)]
+    if let Some(sink) = test_credentials() {
+        sink.borrow_mut().retain(|(u, _)| u != user);
+        return;
+    }
     let _ = keyring::Entry::new(KEYRING_SERVICE, user).and_then(|e| e.delete_credential());
+}
+
+/// In-memory credential sink for tests: `(user, token)` pairs, newest last.
+/// Mirrors the real store's one-entry-per-user shape closely enough to prove
+/// the pairing path writes the issued token under the source name.
+#[cfg(test)]
+pub type TestCredentials = std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CREDS: std::cell::RefCell<Option<TestCredentials>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Test-only: read and write config here instead of the real config dir.
+#[cfg(test)]
+pub fn set_test_config(p: Option<PathBuf>) {
+    TEST_CONFIG.with(|c| *c.borrow_mut() = p);
+}
+
+/// Test-only: replace the credential store for this test thread. Callers
+/// remove the sink (pass `None`) when the test is done.
+#[cfg(test)]
+pub fn set_test_credentials(sink: Option<TestCredentials>) {
+    TEST_CREDS.with(|c| *c.borrow_mut() = sink);
+}
+
+#[cfg(test)]
+fn test_credentials() -> Option<TestCredentials> {
+    TEST_CREDS.with(|c| c.borrow().clone())
 }
 
 pub fn log_path() -> Option<PathBuf> {
