@@ -394,6 +394,8 @@ pub async fn collect_fast_metrics(state: &AppState) -> Metrics {
         uptime_s: crate::proc_util::uptime_s(),
         disk_io: crate::proc_util::disk_io(),
         cpu_model: cpu_model(),
+        agent_version: state.agent_version.clone(),
+        boot_nonce: state.boot_nonce.clone(),
     };
     {
         let mut cache = state.cache_metrics.lock().await;

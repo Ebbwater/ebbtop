@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::metrics::{collect_disks, collect_fast_metrics, collect_processes_all};
 use crate::proto::pb;
-use crate::state::AppState;
+use crate::state::{AppState, AuthScope};
 
 // Payloads at or below this many bytes are sent as-is; larger ones are gzipped.
 const COMPRESSION_THRESHOLD: usize = 768;
@@ -39,15 +39,15 @@ pub async fn ws_handler(
     State(state): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
-    // optional auth
-    if let Some(expected) = state.auth_token.as_ref()
-        && q.get("token") != Some(expected)
-    {
+    // The operator's manual token keeps its original compare (see
+    // `AppState::authenticate`); a token issued by `/pair` is accepted from
+    // the same query parameter but only as read-only.
+    let Some(scope) = state.authenticate(q.get("token").map(String::as_str)) else {
         return ws.on_upgrade(|socket| async move {
             let _ = socket.close().await;
         });
-    }
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    };
+    ws.on_upgrade(move |socket| handle_socket(socket, state, scope))
 }
 
 /// Per-PID cache limits: entries older than MAX_AGE are swept on every
@@ -110,7 +110,7 @@ async fn respond_per_pid_cached<T, Fut>(
     }
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+async fn handle_socket(mut socket: WebSocket, state: AppState, scope: AuthScope) {
     state
         .client_count
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -217,8 +217,19 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             }
             // ebbtop: Phase 2 kill. Exact grammar `kill:<pid>:<start_time_ms>:<TERM|INT>`;
             // near-misses are refused (with a journal line), not silently ignored.
+            // ebbtop P3a: a token issued by `/pair` is read-only and never
+            // reaches the kill path.
             Message::Text(ref text) if text == "kill" || text.starts_with("kill:") => {
-                let out = crate::kill::handle_kill_request(text);
+                let out = if scope.allows_kill() {
+                    crate::kill::handle_kill_request(text)
+                } else {
+                    crate::types::KillOutcome {
+                        ok: false,
+                        pid: 0,
+                        signal: String::new(),
+                        error: Some(crate::kill::ERR_READ_ONLY_SCOPE.to_string()),
+                    }
+                };
                 let _ = send_json(&mut socket, &out).await;
             }
             Message::Close(_) => break,

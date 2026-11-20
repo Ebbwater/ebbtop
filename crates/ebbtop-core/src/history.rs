@@ -431,6 +431,8 @@ mod tests {
             uptime_s: None,
             disk_io: vec![crate::wire::DiskIo { name: "nvme0n1".into(), read_bytes: rx * 2, written_bytes: rx }],
             cpu_model: None,
+            agent_version: None,
+            boot_nonce: None,
         }
     }
 

@@ -2509,6 +2509,8 @@ mod tests {
                     uptime_s: Some(453_201),
                     disk_io: vec![ebbtop_core::wire::DiskIo { name: "nvme0n1".into(), read_bytes: k * 4_000_000, written_bytes: k * 1_000_000 }],
                     cpu_model: Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz".into()),
+                    agent_version: Some("0.2.8".into()),
+                    boot_nonce: Some("00112233445566778899aabbccddeeff".into()),
                 },
                 recv_ms: t + 3,
             }, t);
@@ -3759,6 +3761,8 @@ mod tests {
                         DiskIo { name: "sda".into(), read_bytes: k * 100, written_bytes: k * 10 },
                     ],
                     cpu_model: None,
+                    agent_version: Some("0.2.8".into()),
+                    boot_nonce: Some("00112233445566778899aabbccddeeff".into()),
                 },
                 recv_ms: t + 20,
             }, now);
