@@ -23,7 +23,7 @@ The client is multi-host with onboarding, Settings and a source picker
    less ebbtop-install.sh && bash ebbtop-install.sh
    ```
 
-   Pin an exact release with `--version v0.2.9`, or install from a tarball with no network with `--archive ebbtop-agent-linux-x86_64.tar.gz`. `ebbtop-install.sh` is attached to releases from the next release cut onward: on an older release that URL is a 404, so use the [archive steps](#agent-host-linux) or the checkout wizard (`bash deploy/agent-wizard.sh install`, which builds with Rust/Cargo).
+   Pin an exact release with `--version v0.2.9`, or install from a tarball with no network with `--archive ebbtop-agent-linux-x86_64.tar.gz`. `ebbtop-install.sh` is attached to releases from v0.2.9 onward: on an older release that URL is a 404, so use the [archive steps](#agent-host-linux) or the checkout wizard (`bash deploy/agent-wizard.sh install`, which builds with Rust/Cargo).
 2. **Install the desktop app.** On Windows x64, download `EbbTop-Windows-x64.zip` from [Releases](https://github.com/Ebbwater/ebbtop/releases), extract the entire ZIP, and double-click `Install EbbTop.cmd`. For releases without the ZIP, use the [individual Windows files](#windows-client). On Mac, download `EbbTop.app.zip` from the newest release that includes it, unzip it, and move EbbTop to Applications. See [macOS client](#macos-client) for first-launch help.
 3. **Connect to your first host.** On the same private network or VPN, open EbbTop. Click **Find agents on this network** to list the agents this segment can see (name, version, address), pick one, and type the 6-digit code `ebbtop-agent --pair` prints on that host — the client stores the issued read-only token for you. If the host is on a tailnet, another subnet, or has no pairing support, enter the address yourself and paste the token from `~/services/ebbtop-agent/ebbtop.token` instead. Either way the last two steps are the same: select **Test**, then **Save and connect**, and wait for **LIVE**. Add other hosts in **Settings → Sources** through the same discovery-and-code flow.
 
@@ -160,7 +160,7 @@ less ebbtop-install.sh && bash ebbtop-install.sh
 
 Before anything on this host changes it refuses: a non-x86_64 host, a glibc older than 2.39, no systemd user manager, an archive whose sha256 does not match the digest the release reports, an archive whose inner `SHA256SUMS` does not verify, or an archive carrying a member that is not one of the five packaged files. After that it hands the extracted directory to the packaged `install-agent.sh --prebuilt` and installs nothing itself, so the source-build and prebuilt paths cannot drift. `EBBTOP_ADDR` pre-answers the bind prompt with this host's tailnet/LAN IP; `EBBTOP_PORT` is ignored deliberately, because the packaged unit fixes the port and the script reports the port it actually starts.
 
-`ebbtop-install.sh` becomes a release asset at the **next** release cut. On the current release that URL is a 404, so until then install the archive from a checkout as before:
+`ebbtop-install.sh` is attached to releases from v0.2.9 on. On an older release that URL is a 404, so install the archive from a checkout as before:
 
 ```
 EBBTOP_ADDR=<this host's tailnet/LAN IP> ~/ebbtop/deploy/install-agent.sh          # build, install, enable, start; keeps an existing token

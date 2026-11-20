@@ -31,9 +31,9 @@ confirmation, act, verify, report) but is inline: this file has to run
 standalone from a pipe, where there is no checkout to source it from. Every
 prompt reads `/dev/tty`, because a piped install has the script itself on stdin.
 
-The script becomes a release asset at the **next** release cut. This slice lands
-the script and the documentation only, so on the current release that URL is a
-404 and the archive steps below are the way in.
+The script ships as a release asset from v0.2.9 on, alongside the archive it
+installs. On an older release that URL is a 404 and the archive steps below are
+the way in.
 
 ## Install from the archive (no toolchain)
 
