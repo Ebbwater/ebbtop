@@ -10,7 +10,20 @@ The client is multi-host with onboarding, Settings and a source picker
 
 ## Start Here
 
-1. **Install the Linux agent.** On each host you want to monitor, clone this repo and run `bash deploy/agent-wizard.sh install` from the checkout. It builds with Rust/Cargo and installs a systemd user service. Choose the host's private IP when prompted. See [Agent host](#agent-host-linux) for remote install and starting the service at boot.
+1. **Install the Linux agent.** One command on each host you want to monitor (x86-64, glibc 2.39 or newer, systemd user session):
+
+   ```sh
+   curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
+   ```
+
+   It resolves the release, verifies the agent archive's sha256 against the digest the release reports, runs the packaged installer (systemd user service, token, linger guidance) and prints what the desktop app needs: `ws://<this host>:45976/ws` and the token file path. To read it before running it instead:
+
+   ```sh
+   curl -fsSL -o ebbtop-install.sh https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh
+   less ebbtop-install.sh && bash ebbtop-install.sh
+   ```
+
+   Pin an exact release with `--version v0.2.9`, or install from a tarball with no network with `--archive ebbtop-agent-linux-x86_64.tar.gz`. `ebbtop-install.sh` is attached to releases from the next release cut onward: on an older release that URL is a 404, so use the [archive steps](#agent-host-linux) or the checkout wizard (`bash deploy/agent-wizard.sh install`, which builds with Rust/Cargo).
 2. **Install the desktop app.** On Windows x64, download `EbbTop-Windows-x64.zip` from [Releases](https://github.com/Ebbwater/ebbtop/releases), extract the entire ZIP, and double-click `Install EbbTop.cmd`. For releases without the ZIP, use the [individual Windows files](#windows-client). On Mac, download `EbbTop.app.zip` from the newest release that includes it, unzip it, and move EbbTop to Applications. See [macOS client](#macos-client) for first-launch help.
 3. **Connect to your first host.** On the same private network or VPN, open EbbTop and enter a source name, `ws://<host>:45976/ws`, and the token from `~/services/ebbtop-agent/ebbtop.token` on that host. Use the port shown by the installer if you changed it. Select **Test**, then **Save and connect**. Wait for **LIVE** and confirm that the process table updates. Add other hosts in **Settings → Sources**, each with its own token.
 
@@ -21,7 +34,7 @@ The client is multi-host with onboarding, Settings and a source picker
 | `crates/ebbtop-agent` | monitored Linux host | Owned agent. Same WebSocket wire protocol; `SOCKTOP_*` env names still accepted as fallback for `EBBTOP_*`. |
 | `crates/ebbtop-core` | any OS | Wire decode, reconnecting poll loop, history and tick stats, view helpers, `ebbtop-probe`. No GUI types; a Tauri or TUI front end can reuse it. |
 | `crates/ebbtop-gui` | Windows and Mac | `ebbtop` exe, egui 0.37 / eframe (glow). |
-| `deploy/` | | Agent user unit and install script, install/uninstall wizards (`agent-wizard.sh`, `windows/setup.ps1`, `mac/setup.sh`), agent-host acceptance script, Windows/macOS build scripts, log parsers. |
+| `deploy/` | | Agent user unit and install script, the one-line `linux/ebbtop-install.sh` installer for prebuilt agents, install/uninstall wizards (`agent-wizard.sh`, `windows/setup.ps1`, `mac/setup.sh`), agent-host acceptance script, Windows/macOS build scripts, log parsers. |
 
 ### Agent extensions (marked `ebbtop` in source)
 
@@ -47,7 +60,7 @@ New proto fields are additive. The client decodes a legacy agent too, with empty
 
 ## Install
 
-Get desktop downloads from the [Releases page](https://github.com/Ebbwater/ebbtop/releases). Look for `EbbTop-Windows-x64.zip` or the individual Windows files, and for `EbbTop.app.zip` on macOS. On Linux, `install-agent.sh` builds the agent with Rust/Cargo.
+Get desktop downloads from the [Releases page](https://github.com/Ebbwater/ebbtop/releases). Look for `EbbTop-Windows-x64.zip` or the individual Windows files, and for `EbbTop.app.zip` on macOS. On Linux, `ebbtop-install.sh` installs the prebuilt agent with no toolchain; `install-agent.sh` from a checkout still builds it with Rust/Cargo.
 
 ### Wizards (install and uninstall)
 
@@ -89,6 +102,30 @@ any mode.
 
 
 ### Agent host (Linux)
+
+One command installs the prebuilt agent (no Git, no Rust, no checkout) and prints what the client needs:
+
+```sh
+curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
+```
+
+To read it before running it:
+
+```sh
+curl -fsSL -o ebbtop-install.sh https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh
+less ebbtop-install.sh && bash ebbtop-install.sh
+```
+
+| Flag | What it does |
+|---|---|
+| `--version v0.2.9` | pin a release tag: that tag is resolved, not `latest` |
+| `--archive <path>` | install a local `ebbtop-agent-linux-x86_64.tar.gz`: no API, no download |
+| `--yes`, `-y` | take the default answer, no prompt |
+| `--dry-run`, `-n` | print the plan and change nothing |
+
+Before anything on this host changes it refuses: a non-x86_64 host, a glibc older than 2.39, no systemd user manager, an archive whose sha256 does not match the digest the release reports, an archive whose inner `SHA256SUMS` does not verify, or an archive carrying a member that is not one of the five packaged files. After that it hands the extracted directory to the packaged `install-agent.sh --prebuilt` and installs nothing itself, so the source-build and prebuilt paths cannot drift. `EBBTOP_ADDR` pre-answers the bind prompt with this host's tailnet/LAN IP; `EBBTOP_PORT` is ignored deliberately, because the packaged unit fixes the port and the script reports the port it actually starts.
+
+`ebbtop-install.sh` becomes a release asset at the **next** release cut. On the current release that URL is a 404, so until then install the archive from a checkout as before:
 
 ```
 EBBTOP_ADDR=<this host's tailnet/LAN IP> ~/ebbtop/deploy/install-agent.sh          # build, install, enable, start; keeps an existing token
@@ -270,6 +307,7 @@ temp=58C` over the tailnet probe).
 - Only `device_by_index(0)` is queried; a multi-GPU host would show the first GPU only.
 - GPU VRAM "used" comes from NVML v1, which includes the driver-reserved pool (about 379 MiB idle on this 4 GiB card). `nvidia-smi`'s "Used" excludes it; btop uses the same v1 call, so the panel matches btop.
 - Upstream token check is a plain string compare and the token travels in the query string. Acceptable inside the tailnet; noted.
+- `deploy/linux/ebbtop-install.sh` binds the agent archive to the digest the GitHub release reports over HTTPS. That is stronger than the archive's own `SHA256SUMS`, which travels inside the archive it describes, but it is still not a publisher signature: a compromised release entry would serve a matching digest. Signed manifests remain open; see [Linux agent distribution](deploy/linux/README.md#integrity-is-not-authenticity--known-gap).
 
 ## Phase 2 kill: implemented
 
