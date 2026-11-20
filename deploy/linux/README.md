@@ -5,6 +5,36 @@ monitored Linux host **without Git, Cargo or Rust**: extract the archive and run
 its own installer. The source-build path in `deploy/install-agent.sh` is
 unchanged and still works from a checkout.
 
+## Install with one command
+
+`deploy/linux/ebbtop-install.sh` wraps this whole page:
+
+```sh
+curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
+```
+
+It resolves the release (`--version <tag>` pins one, `--archive <file>` uses a
+local tarball with no network), refuses the download unless its sha256 equals
+the digest the release reports for that asset, extracts it under `TMPDIR` and
+re-checks the inner manifest with `sha256sum --strict -c SHA256SUMS`, preflights
+x86-64, glibc 2.39 and a systemd user manager, chooses the bind address (an
+existing `agent.env` wins, then `EBBTOP_ADDR`, then a prompt defaulting to this
+host's tailnet/LAN address) and then runs the packaged
+`install-agent.sh --prebuilt` from the extracted directory. It installs nothing
+itself, so this one-liner and the archive path below cannot drift apart. It ends
+with the pairing facts: `ws://<bind>:<port>/ws` and the token file path, never
+the token value.
+
+Flags: `--version <tag>`, `--archive <path>`, `--yes`/`-y`, `--dry-run`/`-n`,
+`--help`/`-h`. Presentation follows `deploy/wizard/common.sh` (state, plan, one
+confirmation, act, verify, report) but is inline: this file has to run
+standalone from a pipe, where there is no checkout to source it from. Every
+prompt reads `/dev/tty`, because a piped install has the script itself on stdin.
+
+The script becomes a release asset at the **next** release cut. This slice lands
+the script and the documentation only, so on the current release that URL is a
+404 and the archive steps below are the way in.
+
 ## Install from the archive (no toolchain)
 
 ```sh
@@ -176,7 +206,35 @@ line without `=`, a file with no bind, VT/FF-indented or -suffixed keys, NUL
 bytes and non-ASCII bytes — exits non-zero with one error line, an unchanged
 fixture and zero `systemctl`/`ss` calls.
 
-What this harness cannot prove, and what still needs a native host or VM:
+`test-install-latest.sh` is the harness for the one-command installer. It builds
+its fixture archives from this checkout's own `deploy/install-agent.sh` and
+`deploy/ebbtop-agent.service` (and checks that the packaged members are byte-
+identical to them), serves a GitHub-shaped release document from a stub `curl`,
+and runs every case in a fixture `HOME`, fixture `XDG_RUNTIME_DIR` and stub
+`systemctl`/`ss`/`loginctl`/`curl`/`tailscale`/`ip`/`getconf`/`uname` path:
+
+```sh
+bash deploy/linux/test-install-latest.sh
+```
+
+Cases: latest release end to end; digest mismatch with zero writes and zero
+service/listener calls; wrong architecture, old glibc and no systemd user
+manager refused before any network request; `--dry-run` with no download and no
+write; `--version` pinning the tag endpoint (never `latest`) and a pinned tag
+answered by another release; offline `--archive` with zero `curl` calls; a
+tampered member and a traversing member; a release with no Linux asset, an
+asset with no digest, an unreadable release API and a missing `--archive` file
+(all fail closed); a `BUILD` glibc floor above the host;
+`EBBTOP_PORT` proven not to reach the packaged installer; `127.0.0.1` proven to
+reach the packaged installer's own validation; an upgrade that keeps `agent.env`
+and the token byte-identical; the tailnet-to-LAN bind fallback; no terminal
+without `--yes`; the real piped `bash -s` shape; and argument handling. The
+release document deliberately puts the Linux asset second, keeps a
+`.tar.gz.sha256` look-alike first and does not order keys alphabetically, so a
+parser that takes the first digest or prefix-matches the asset name fails the
+harness instead of passing it.
+
+What these harnesses cannot prove, and what still needs a native host or VM:
 
 - install on a clean supported Linux host with no Git and no Cargo installed;
 - `systemctl --user is-active` on a real unit (the harness uses a stub);
@@ -185,4 +243,9 @@ What this harness cannot prove, and what still needs a native host or VM:
 - reboot with linger enabled and the unit coming back by itself;
 - an upgrade on a VM with the token retained;
 - rollback after a real failed service start;
-- download and verify of the archive as a published release asset.
+- download and verify of the archive as a published release asset;
+- the one-liner's live API and download paths against the real release (the stub
+  serves them), and the systemd user manager probe against a live manager socket
+  (the fixture creates a file at the path a live manager publishes a socket at);
+- the one-liner against a host whose `agent.env` predates `EBBTOP_BIND` (the
+  legacy `SOCKTOP_BIND` layout), which the packaged installer refuses by design.
