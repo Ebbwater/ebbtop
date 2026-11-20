@@ -348,6 +348,17 @@ temp=58C` over the tailnet probe).
 - `pairing.json` and `clients.json` are agent state in `~/services/ebbtop-agent`, beside `agent.env`, but they are not in the unit's `EnvironmentFile`. `install-agent.sh --purge` deletes them with the token and the unit; a plain uninstall leaves them in place.
 - Discovery cannot cross a broadcast boundary (see "Why discovery is UDP broadcast"), and it reports the hostname the agent already serves over ws, so it adds reachability, not information.
 
+## Code signing
+
+Windows release artifacts are signed through the
+[SignPath Foundation](https://signpath.org) open source signing program once
+that integration is active; the publisher shown on the signature will be
+SignPath Foundation. What is signed, how a signed binary traces back to its
+source commit, the per-release approval step, and what stays unsigned (the
+Linux agent archive, the macOS bundle) are all stated in
+[docs/SIGNING.md](docs/SIGNING.md). Until then, Windows downloads are
+unsigned and integrity is provided by the release checksums over HTTPS.
+
 ## Phase 2 kill: implemented
 
 - Request, on demand only (never per-tick): `kill:<pid>:<start_time_ms>:<TERM|INT>`, nothing else. The agent refuses any other `kill…` text with an error reply and a journal line.
