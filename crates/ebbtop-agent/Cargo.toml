@@ -46,3 +46,7 @@ protoc-bin-vendored = "3"
 assert_cmd = "2.0"
 tempfile = "3.10"
 tokio-tungstenite = "0.21"
+# Test-only: lets the pairing/discovery tests decode the agent's actual
+# response bytes with the client's own decoder (`ebbtop_core::pairing`). Not a
+# production dependency — the agent binary never links the client's stack.
+ebbtop-core = { path = "../ebbtop-core" }

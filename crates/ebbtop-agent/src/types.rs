@@ -74,6 +74,12 @@ pub struct Metrics {
     /// file/field is missing, the value is empty, or this is not Linux —
     /// never a placeholder, so a client can tell "unknown" from a real name.
     pub cpu_model: Option<String>,
+    /// ebbtop P3a: agent build version (the same value the discovery
+    /// responder returns and `--version` prints).
+    pub agent_version: String,
+    /// ebbtop P3a: random per-boot nonce, minted once per agent process. A
+    /// client that sees it change knows the agent restarted.
+    pub boot_nonce: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

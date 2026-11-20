@@ -25,7 +25,7 @@ The client is multi-host with onboarding, Settings and a source picker
 
    Pin an exact release with `--version v0.2.9`, or install from a tarball with no network with `--archive ebbtop-agent-linux-x86_64.tar.gz`. `ebbtop-install.sh` is attached to releases from the next release cut onward: on an older release that URL is a 404, so use the [archive steps](#agent-host-linux) or the checkout wizard (`bash deploy/agent-wizard.sh install`, which builds with Rust/Cargo).
 2. **Install the desktop app.** On Windows x64, download `EbbTop-Windows-x64.zip` from [Releases](https://github.com/Ebbwater/ebbtop/releases), extract the entire ZIP, and double-click `Install EbbTop.cmd`. For releases without the ZIP, use the [individual Windows files](#windows-client). On Mac, download `EbbTop.app.zip` from the newest release that includes it, unzip it, and move EbbTop to Applications. See [macOS client](#macos-client) for first-launch help.
-3. **Connect to your first host.** On the same private network or VPN, open EbbTop and enter a source name, `ws://<host>:45976/ws`, and the token from `~/services/ebbtop-agent/ebbtop.token` on that host. Use the port shown by the installer if you changed it. Select **Test**, then **Save and connect**. Wait for **LIVE** and confirm that the process table updates. Add other hosts in **Settings → Sources**, each with its own token.
+3. **Connect to your first host.** On the same private network or VPN, open EbbTop. Click **Find agents on this network** to list the agents this segment can see (name, version, address), pick one, and type the 6-digit code `ebbtop-agent --pair` prints on that host — the client stores the issued read-only token for you. If the host is on a tailnet, another subnet, or has no pairing support, enter the address yourself and paste the token from `~/services/ebbtop-agent/ebbtop.token` instead. Either way the last two steps are the same: select **Test**, then **Save and connect**, and wait for **LIVE**. Add other hosts in **Settings → Sources** through the same discovery-and-code flow.
 
 ## Parts
 
@@ -45,6 +45,11 @@ The client is multi-host with onboarding, Settings and a source picker
 5. GPU collection enabled (`--features gpu`) with gfxinfo's AMD/libdrm path off. NVML tries the versioned `libnvidia-ml.so.1` soname, then an optional explicit `EBBTOP_AGENT_NVML_LIB` path. `GpuMetrics` gains an additive `temperature_c` field (null when unavailable).
 6. Phase 2 kill (see below): `Process.start_time_ms` (proto field 7) and a `kill:<pid>:<start_time_ms>:<TERM|INT>` request handler with journal audit.
 7. `Process.cgroup` (proto field 8): the process's cgroup path, unified v2 `0::` path or the v1 `name=systemd` path, with the `0::` prefix stripped so both hierarchies look the same. Read once per pid and cached until the pid exits. `ebbtop-core` turns it into a workload with `view::workload_key`, which prefers the nearest systemd `.service` unit (a container's own unit on a quadlet host), then a `libpod-<id>` scope, then a `.scope`, else the host. `view::container_id` pulls the id out of a podman scope so a client can label it with a name and image; `view::group_by_workload` sums pids, CPU and RSS per workload. The path is data, not policy: grouping stays in the client so one agent serves every view.
+8. **P3a discovery (UDP, unauthenticated, read-only).** The agent answers one exact datagram — `EBBTOP-DISCOVER/1` — on `udp://<agent-host>:45978` (`EBBTOP_DISCOVERY_PORT`) with one JSON object: `{"ebbtop_discovery":1,"name":"<hostname>","agent_version":"<what --version prints>","nonce":"<32 hex per boot>","port":45976}`. `agent_version` is the agent crate's build version, the same string `ebbtop-agent --version` prints; it is not the release tag, so quote it from the binary rather than assuming they match. Nothing else is reachable through it: no token, no request syntax beyond the literal, no process or host inventory, so the only thing a probe can learn is "an ebbtop agent is at this address". Replies are limited to one per source address per second and 20 per second overall, and only private/loopback/link-local/CGNAT sources are answered at all. `EBBTOP_AGENT_DISCOVERY=0` (`false`/`no`/`off` too) disables it and binds no socket. Client decoder: `ebbtop_core::pairing`.
+9. **P3a pairing enrollment (HTTP, code-gated).** `POST /pair` on the agent's existing port takes `{"code":"123456","label":"optional"}` in the body and returns `{"token","host","agent_version","nonce","scope":"read_only"}`. The code is minted on the agent host by `ebbtop-agent --pair` (six digits, 5 min TTL, single use, five wrong guesses invalidate it), written to `<state>/pairing.json` (mode 600) and printed once on stdout — never journalled, never accepted from a query string, never echoed in a response. The issued token goes into the same credential store the manual token lives beside (`<state>/clients.json`, mode 600, newest 64 kept) and authenticates the ws gate the same way, but its scope is **read-only**: `get_metrics`, `get_processes`, `get_disks`, per-process detail and journal work; `kill:` is refused with `read-only token scope`. `<state>` is `EBBTOP_STATE_DIR`, default `~/services/ebbtop-agent`. The operator's manual token path is untouched.
+10. Metrics JSON gains `agent_version` and `boot_nonce` (the same nonce the discovery responder reports). Both are optional: a frame from an older agent decodes with `None`, so a client shows "version unknown" rather than guessing.
+
+P3a consumes **no protobuf tags**: both new channels are JSON control-plane traffic (discovery datagram, `/pair` request/response), which is where this repo puts host-level facts. `Process` field 9 and `Processes` field 4 remain free for the next additive change.
 
 New proto fields are additive. The client decodes a legacy agent too, with empty user/state/cgroup and no process timestamp.
 
@@ -57,6 +62,36 @@ New proto fields are additive. The client decodes a legacy agent too, with empty
 - Agent metrics cache TTL: 100 ms (`SOCKTOP_AGENT_METRICS_TTL_MS`, upstream 250). In a 15 min soak at 250 ms, one delayed poll followed by a fast one got a cached repeat, giving one 2047 ms interval.
 - Agent process cache TTL: 500 ms (`SOCKTOP_AGENT_PROCESSES_TTL_MS`). At 900 ms a 1 s poll sometimes got a cached repeat (process interval p95 2002 ms in the first smoke run), so 500 ms it is.
 - Transport: plain `ws://` on a private network (tailnet, VPN, or LAN). The token travels in the query string, so do not expose the port to the open internet; the agent has no TLS listener.
+- Discovery (P3a): `udp://<agent-host>:45978`, one datagram `EBBTOP-DISCOVER/1`, JSON reply `{ebbtop_discovery,name,agent_version,nonce,port}`. Unauthenticated, private sources only, one reply per source per second and 20/s overall, `EBBTOP_AGENT_DISCOVERY=0` disables it. Contains no token and accepts no command. The socket binds every IPv4 interface on that one port (a socket bound to a single address would never receive a broadcast); the reply rule, not the bind address, is what limits it.
+- Pairing (P3a): `POST http://<agent-host>:45976/pair` with `{"code":"123456"}` in the body. The code comes from `ebbtop-agent --pair` on the agent host: six digits, 5 minutes, single use, five wrong guesses invalidate it. The reply carries one client token, scope `read_only`.
+- Client pairing (P3b): the wizard and **Settings → Sources** send the discovery datagram to `udp://255.255.255.255:45978` and `udp://127.0.0.1:45978` for 1.4 s (three probes, 24 hosts at most, cancellable), list what answered, and exchange the typed 6-digit code with `POST http://<host>:45976/pair` (body `{"code":"…","label":"<source name>"}`, 5 s deadline). The issued token goes straight to the OS credential store under the source name and never into a text field, a log line or a support summary; a wrong/expired/reused/locked-out code and an unreachable or non-agent host each render their own class, next action and scrubbed detail. `Test → Save and connect` is unchanged: pairing fills the credential, not the gate.
+- Credentials: the manual token (`agent.env` / `ebbtop.token`) keeps its original gate and full scope, including `kill:`. Tokens issued by `/pair` live in `~/services/ebbtop-agent/clients.json` (`EBBTOP_STATE_DIR` overrides the directory), are validated by the same `/ws?token=` gate, and are read-only. Both files are mode 600; `pairing.json` holds the pending code and is deleted on use.
+
+### Why discovery is UDP broadcast
+
+A TCP hello on the existing port can only be sent to an address you already
+know, so it confirms a host rather than finding one; "which address do I
+type" is exactly the step onboarding needs to remove. One datagram to the
+broadcast address reaches every agent on the segment without knowing any
+address, and each reply carries the source address and the agent's ws port,
+so a client can prefill a source from it.
+
+The cost is reachability, and it is real:
+
+- Broadcast stays inside one L2 segment: it does not cross routers, VLANs, or
+  a Tailscale/WireGuard overlay (those are routed point-to-point, not
+  broadcast domains). A tailnet-only agent is therefore invisible to
+  discovery — the operator still enters host and token as today. That is a
+  fallback, not a regression.
+- A host firewall that drops inbound UDP 45978 hides the agent the same way.
+- IPv4 broadcast only: no multicast, mDNS or SSDP.
+- A unicast probe to the same port works from anywhere the ws port is
+  reachable (that is the same exposure the agent already has), which is why
+  the responder refuses non-private source addresses and never echoes
+  anything but its own identity.
+- Two agents on one host (a live one and a scratch candidate) would share
+  port 45978; the second reports the bind failure and keeps serving its
+  WebSocket. Set `EBBTOP_DISCOVERY_PORT` for the second instance.
 
 ## Install
 
@@ -308,6 +343,10 @@ temp=58C` over the tailnet probe).
 - GPU VRAM "used" comes from NVML v1, which includes the driver-reserved pool (about 379 MiB idle on this 4 GiB card). `nvidia-smi`'s "Used" excludes it; btop uses the same v1 call, so the panel matches btop.
 - Upstream token check is a plain string compare and the token travels in the query string. Acceptable inside the tailnet; noted.
 - `deploy/linux/ebbtop-install.sh` binds the agent archive to the digest the GitHub release reports over HTTPS. That is stronger than the archive's own `SHA256SUMS`, which travels inside the archive it describes, but it is still not a publisher signature: a compromised release entry would serve a matching digest. Signed manifests remain open; see [Linux agent distribution](deploy/linux/README.md#integrity-is-not-authenticity--known-gap).
+- The client's discovery scan is IPv4 limited broadcast, so it finds only agents on the client's own L2 segment, and it lists an agent once per (source address, per-boot nonce). A tailnet-only or firewalled host needs its address typed; the manual token path stays available for agents older than the pairing endpoint. `/pair` is plain HTTP on the private network, the same transport posture as the ws token, and the six-digit code is the only secret in that exchange.
+- A paired client token is read-only (`kill:` is refused by the agent). Pairing a second client means minting a second code; a code is single use and dies after five wrong guesses, which an attacker on the segment can trigger (enrollment denial of service, not credential theft — the operator re-mints).
+- `pairing.json` and `clients.json` are agent state in `~/services/ebbtop-agent`, beside `agent.env`, but they are not in the unit's `EnvironmentFile`. `install-agent.sh --purge` deletes them with the token and the unit; a plain uninstall leaves them in place.
+- Discovery cannot cross a broadcast boundary (see "Why discovery is UDP broadcast"), and it reports the hostname the agent already serves over ws, so it adds reachability, not information.
 
 ## Phase 2 kill: implemented
 

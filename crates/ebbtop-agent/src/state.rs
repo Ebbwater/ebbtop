@@ -51,6 +51,12 @@ pub struct AppState {
     pub disks: SharedDisks,
     pub networks: SharedNetworks,
     pub hostname: String,
+    /// ebbtop P3a: agent build, reported by `--version`, the discovery
+    /// responder and the metrics frame alike.
+    pub agent_version: String,
+    /// ebbtop P3a: random per-boot nonce. Minted once in `new()`; a client
+    /// that sees it change knows the agent restarted.
+    pub boot_nonce: String,
 
     // For correct per-process CPU% using /proc deltas (Linux only path uses this tracker)
     #[cfg(target_os = "linux")]
@@ -64,6 +70,13 @@ pub struct AppState {
     pub client_count: Arc<AtomicUsize>,
 
     pub auth_token: Option<String>,
+    /// ebbtop P3a: pairing-code and issued-client store (files in
+    /// `pairing::state_dir()`). Read on every ws upgrade; writes are atomic
+    /// renames, so a reader never sees a half-written store.
+    pub pairing: Arc<crate::pairing::PairingStore>,
+    /// Serialises `/pair` exchanges so two concurrent requests cannot both
+    /// consume one code.
+    pub pair_lock: Arc<tokio::sync::Mutex<()>>,
     // GPU negative cache (probe once). gpu_checked=true after first attempt; gpu_present reflects result.
     pub gpu_checked: Arc<AtomicBool>,
     pub gpu_present: Arc<AtomicBool>,
@@ -167,6 +180,12 @@ impl Default for AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        Self::with_pairing_dir(crate::pairing::state_dir())
+    }
+
+    /// Test/embedding constructor: identical state, explicit pairing
+    /// directory instead of the `EBBTOP_STATE_DIR` resolution.
+    pub fn with_pairing_dir(dir: impl Into<std::path::PathBuf>) -> Self {
         let sys = System::new();
         let components = Components::new_with_refreshed_list();
         let disks = Disks::new_with_refreshed_list();
@@ -178,6 +197,8 @@ impl AppState {
             disks: Arc::new(Mutex::new(disks)),
             networks: Arc::new(Mutex::new(networks)),
             hostname: System::host_name().unwrap_or_else(|| "unknown".into()),
+            agent_version: env!("CARGO_PKG_VERSION").to_string(),
+            boot_nonce: crate::secret::nonce(),
             #[cfg(target_os = "linux")]
             proc_cpu: Arc::new(Mutex::new(ProcCpuTracker::default())),
             #[cfg(not(target_os = "linux"))]
@@ -187,6 +208,8 @@ impl AppState {
                 .or_else(|_| std::env::var("SOCKTOP_TOKEN"))
                 .ok()
                 .filter(|s| !s.is_empty()),
+            pairing: Arc::new(crate::pairing::PairingStore::new(dir)),
+            pair_lock: Arc::new(tokio::sync::Mutex::new(())),
             gpu_checked: Arc::new(AtomicBool::new(false)),
             gpu_present: Arc::new(AtomicBool::new(false)),
             cache_metrics: Arc::new(Mutex::new(CacheEntry::new())),
@@ -196,4 +219,87 @@ impl AppState {
             cache_journal_entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    /// Decide what a connection may do, from the token it presented.
+    ///
+    /// The operator's manual token keeps exactly the behaviour it had before
+    /// P3a (`Some(expected)` and an equal query token, or no token configured
+    /// at all, which the original gate treated as "auth not required"). The
+    /// only addition is the enrollment store: a token issued through
+    /// `/pair` authenticates as [`AuthScope::ReadOnly`].
+    pub fn authenticate(&self, presented: Option<&str>) -> Option<AuthScope> {
+        match (self.auth_token.as_deref(), presented) {
+            (Some(expected), Some(t)) if t == expected => Some(AuthScope::Full),
+            (Some(_), Some(t)) if self.pairing.authenticate(t).is_some() => {
+                Some(AuthScope::ReadOnly)
+            }
+            // Unchanged legacy path: no EBBTOP_TOKEN configured means the
+            // original agent accepted every connection.
+            (None, _) => Some(AuthScope::Full),
+            _ => None,
+        }
+    }
 }
+
+/// What an authenticated connection may ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthScope {
+    /// The operator's manual token: the whole protocol, including `kill:`.
+    Full,
+    /// A token issued by `/pair`: read-only monitoring, never `kill:`.
+    ReadOnly,
+}
+
+impl AuthScope {
+    pub fn allows_kill(self) -> bool {
+        matches!(self, AuthScope::Full)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_token_is_full_scope_and_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = AppState::with_pairing_dir(dir.path());
+        st.auth_token = Some("manual".into());
+        assert_eq!(st.authenticate(Some("manual")), Some(AuthScope::Full));
+        assert_eq!(st.authenticate(Some("wrong")), None);
+        assert_eq!(st.authenticate(None), None);
+        assert!(st.authenticate(Some("manual")).unwrap().allows_kill());
+    }
+
+    #[test]
+    fn issued_token_is_read_only_and_verified_against_the_same_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = AppState::with_pairing_dir(dir.path());
+        st.auth_token = Some("manual".into());
+        let rec = st.pairing.issue(Some("laptop")).unwrap();
+        let scope = st.authenticate(Some(&rec.token)).unwrap();
+        assert_eq!(scope, AuthScope::ReadOnly);
+        assert!(!scope.allows_kill());
+    }
+
+    #[test]
+    fn no_configured_token_keeps_the_legacy_open_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut st = AppState::with_pairing_dir(dir.path());
+        st.auth_token = None;
+        assert_eq!(st.authenticate(None), Some(AuthScope::Full));
+        assert_eq!(st.authenticate(Some("anything")), Some(AuthScope::Full));
+    }
+
+    #[test]
+    fn every_process_gets_its_own_nonce() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let sa = AppState::with_pairing_dir(a.path());
+        let sb = AppState::with_pairing_dir(b.path());
+        assert_eq!(sa.boot_nonce.len(), 32);
+        assert_ne!(sa.boot_nonce, sb.boot_nonce);
+        assert!(!sa.agent_version.is_empty());
+    }
+}
+

@@ -38,6 +38,9 @@ pub const ERR_UID: &str = "uid mismatch";
 pub const ERR_STALE: &str = "stale start_time";
 #[allow(dead_code)]
 pub const ERR_PLATFORM: &str = "kill unsupported on this platform";
+/// ebbtop P3a: a `/pair`-issued token is read-only; the request never reaches
+/// the checks above (and is not journalled as a kill attempt).
+pub const ERR_READ_ONLY_SCOPE: &str = "read-only token scope";
 
 /// Strict grammar: `kill:<pid>:<start_time_ms>:<TERM|INT>`, nothing else.
 /// No whitespace trimming: the client sends exactly this, and anything

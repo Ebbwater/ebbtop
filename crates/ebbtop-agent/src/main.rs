@@ -1,20 +1,21 @@
 //! ebbtop agent entrypoint: serves host metrics over WebSocket at /ws.
 //! Owned replacement for the vendored socktop_agent. Wire protocol is
 //! intentionally unchanged so existing ebbtop clients keep working.
+//!
+//! P3a adds two control-plane surfaces to the same binary, neither of which
+//! changes the WebSocket data path:
+//! * `--pair` mints a short-lived pairing code and exits (the running agent
+//!   consumes it at `POST /pair`);
+//! * a UDP discovery responder on `EBBTOP_DISCOVERY_PORT` (default 45978)
+//!   that answers an exact probe with name, version and per-boot nonce.
 
-mod gpu;
-mod kill;
-mod proc_util;
-mod metrics;
-mod proto;
-mod state;
-mod types;
-mod ws;
-
-use axum::{Router, http::StatusCode, routing::get};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
-use state::AppState;
+use ebbtop_agent::discovery::{self, DiscoveryConfig};
+use ebbtop_agent::pairing::{self, CODE_TTL_MS, PairingStore};
+use ebbtop_agent::server;
+use ebbtop_agent::state::AppState;
 
 fn arg_flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
@@ -71,28 +72,62 @@ fn main() -> anyhow::Result<()> {
     runtime.block_on(async_main())
 }
 
+/// `ebbtop-agent --pair [--state-dir DIR]`: mint a pairing code, write it to
+/// the pending-code file the running agent reads, print it once, exit.
+///
+/// Prints only the code and instructions — never the agent token — and the
+/// daemon never writes a code to the journal.
+fn pair_command() -> anyhow::Result<()> {
+    let dir = arg_value("--state-dir").map(PathBuf::from);
+    let store = PairingStore::new(dir.unwrap_or_else(pairing::state_dir));
+    let pending = store.mint()?;
+    println!("Pairing code: {}", pending.code);
+    println!(
+        "Valid for {} minutes, single use. Enter it in EbbTop to add this host.",
+        CODE_TTL_MS / 60_000
+    );
+    println!("(State directory: {})", store.dir().display());
+    Ok(())
+}
+
 async fn async_main() -> anyhow::Result<()> {
     if arg_flag("--version") || arg_flag("-V") {
         println!("ebbtop-agent {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
-    let state = AppState::new();
-
-    async fn healthz() -> StatusCode {
-        StatusCode::OK
+    if arg_flag("--pair") {
+        return pair_command();
     }
-    let app = Router::new()
-        .route("/ws", get(ws::ws_handler))
-        .route("/healthz", get(healthz))
-        .with_state(state.clone());
+
+    let state = AppState::new();
+    let bind = bind_ip()?;
+    let ws_port = port();
+
+    // Discovery is a convenience: a bind failure must not stop monitoring.
+    // It listens on every IPv4 interface (a socket bound to one address never
+    // receives broadcasts) and answers only exact probes from private
+    // sources; see README "Why discovery is UDP broadcast".
+    let cfg = DiscoveryConfig::from_env();
+    match discovery::spawn(cfg, state.clone(), ws_port).await {
+        Ok(Some(_task)) => println!(
+            "ebbtop-agent: discovery responder on udp://{}/{}",
+            discovery::bind_addr(cfg.port).ip(),
+            cfg.port
+        ),
+        Ok(None) => println!("ebbtop-agent: discovery disabled (EBBTOP_AGENT_DISCOVERY)"),
+        Err(e) => eprintln!(
+            "ebbtop-agent: discovery responder unavailable on udp://0.0.0.0:{}: {e}",
+            cfg.port
+        ),
+    }
 
     // Plain ws:// only. Tailnet provides the transport security; the token
     // in the query string is the gate. No TLS listener by design.
-    let addr = SocketAddr::new(bind_ip()?, port());
+    let addr = SocketAddr::new(bind, ws_port);
     println!("ebbtop-agent: Listening on ws://{addr}/ws");
     axum_server::bind(addr)
-        .serve(app.into_make_service())
+        .serve(server::router(state).into_make_service())
         .await?;
     Ok(())
 }

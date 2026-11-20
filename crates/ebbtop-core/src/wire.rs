@@ -92,6 +92,15 @@ pub struct Metrics {
     /// unreadable /proc — the GUI then shows the type label alone.
     #[serde(default)]
     pub cpu_model: Option<String>,
+    /// ebbtop P3a: the agent build that produced this frame, e.g. "0.2.8".
+    /// None from an agent that predates the field; the client then shows the
+    /// version as unknown rather than inventing one.
+    #[serde(default)]
+    pub agent_version: Option<String>,
+    /// ebbtop P3a: the agent's random per-boot nonce, the same value the
+    /// discovery responder returns. A change means the agent restarted.
+    #[serde(default)]
+    pub boot_nonce: Option<String>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -372,6 +381,37 @@ mod tests {
         // Same for an agent that explicitly sends null.
         let explicit = METRICS.replace(r#""gpus":null}"#, r#""gpus":null,"cpu_model":null}"#);
         assert_eq!(decode_metrics(Frame::Text(&explicit)).unwrap().cpu_model, None);
+    }
+
+    /// P3a: a frame from an agent that predates the identity fields still
+    /// decodes, with both defaulting to None; a frame that carries them
+    /// decodes them. This is the additive-wire contract for the metrics
+    /// frame (the discovery/pair payloads have their own pinned fixtures).
+    #[test]
+    fn metrics_agent_identity_is_additive() {
+        assert!(!METRICS.contains("agent_version"));
+        assert!(!METRICS.contains("boot_nonce"));
+        let legacy = decode_metrics(Frame::Text(METRICS)).unwrap();
+        assert_eq!(legacy.agent_version, None);
+        assert_eq!(legacy.boot_nonce, None);
+
+        // Explicit nulls decode the same way.
+        let nulls = METRICS.replace(
+            r#""gpus":null}"#,
+            r#""gpus":null,"agent_version":null,"boot_nonce":null}"#,
+        );
+        let m = decode_metrics(Frame::Text(&nulls)).unwrap();
+        assert_eq!(m.agent_version, None);
+        assert_eq!(m.boot_nonce, None);
+
+        // A P3a agent supplies both.
+        let patched = METRICS.replace(
+            r#""gpus":null}"#,
+            r#""gpus":null,"agent_version":"0.2.8","boot_nonce":"00112233445566778899aabbccddeeff"}"#,
+        );
+        let m = decode_metrics(Frame::Text(&patched)).unwrap();
+        assert_eq!(m.agent_version.as_deref(), Some("0.2.8"));
+        assert_eq!(m.boot_nonce.as_deref(), Some("00112233445566778899aabbccddeeff"));
     }
 
     #[test]

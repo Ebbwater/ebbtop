@@ -1213,6 +1213,7 @@ dependencies = [
  "assert_cmd",
  "axum",
  "axum-server",
+ "ebbtop-core",
  "flate2",
  "futures-util",
  "gfxinfo",
