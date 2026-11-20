@@ -1,0 +1,25 @@
+name: ci
+
+# Runs on the k-server self-hosted runner slot (rootless podman, one fresh
+# container per job, private networks blackholed). Jobs on self-hosted runners
+# do not consume Actions minutes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, ebbtop-ci]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain report
+        run: rustc --version && cargo --version
+
+      - name: Test (core, agent, gui)
+        run: cargo test --locked -p ebbtop-core -p ebbtop-agent -p ebbtop-gui
+
+      - name: Release build (agent)
+        run: cargo build --release --locked -p ebbtop-agent
