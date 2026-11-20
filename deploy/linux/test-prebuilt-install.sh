@@ -933,6 +933,19 @@ case_legacy_bind() {
 #     the token and the pairing state unless --purge is given, and reports what
 #     it kept or deleted without ever printing the contents.
 # ===========================================================================
+# The shipped 0.2.9 agent really does carry the `--pair` capability, so the
+# "no" fixture is that same ELF with the literal overwritten byte for byte (same
+# length, so the installer's ELF checks still accept it). Stripping it is what
+# keeps the negative control meaningful now that the release binary has the
+# argument: copying the binary unchanged would make the case assert nothing.
+strip_pair_literal() { # $1 = binary; overwrite every `--pair` literal with `--paiX`
+  local f="$1" off
+  while IFS=: read -r off _; do
+    printf -- '--paiX' | dd of="$f" bs=1 seek="$off" conv=notrunc status=none
+  done < <(LC_ALL=C grep -abo -- '--pair' "$f" || true)
+  ! LC_ALL=C grep -qaF -- '--pair' "$f"
+}
+
 pairing_pkg() { # $1 = destination dir, $2 = yes|no: mark the binary as pairing-capable
   local src="$WORK/pkg-a" dest="$1"
   [[ -d "$src" ]] || extract "$ARCHIVE" "$src"
@@ -944,6 +957,9 @@ pairing_pkg() { # $1 = destination dir, $2 = yes|no: mark the binary as pairing-
     # to the real packaged binary keeps the fixture a valid ELF that the
     # installer's own checks and the capability probe both accept.
     printf '\n--pair\n' >> "$dest/ebbtop-agent"
+  else
+    strip_pair_literal "$dest/ebbtop-agent" \
+      || fail "$name" "could not strip the --pair literal to build the negative fixture"
   fi
   ( cd "$dest" && sha256sum BUILD ebbtop-agent ebbtop-agent.service > SHA256SUMS )
 }
