@@ -53,7 +53,12 @@ printf 'systemctl %s\n' "$*" >> "$STATE/calls.log"
 [[ "${1:-}" == "--user" ]] && shift
 sub="${1:-}"; shift || true
 case "$sub" in
-  daemon-reload|enable|disable|stop) exit 0 ;;
+  daemon-reload|enable|disable) exit 0 ;;
+  stop)
+    # A real stop leaves the unit inactive; mirroring that is what lets an
+    # uninstall be verified by is-active instead of only by the call log.
+    echo inactive > "$STATE/service"
+    exit 0 ;;
   restart)
     # A real `systemctl restart` returns 0 once the job ran; a unit that
     # cannot start is reported by `is-active`, not by restart.
@@ -82,9 +87,18 @@ STATE="${EBBTOP_FIXTURE_STATE:?}"
 printf 'ss %s\n' "$*" >> "$STATE/ss.log"
 port=45976
 [[ "$*" =~ :([0-9]+) ]] && port="${BASH_REMATCH[1]}"
-addr="$(sed -n 's/^[[:blank:]]*EBBTOP_BIND[[:blank:]]*=[[:blank:]]*//p' "$HOME/services/ebbtop-agent/agent.env" 2>/dev/null \
-  | head -n 1 | tr -d '\r' | sed -E 's/[[:blank:]]+$//')"
-[[ -n "$addr" ]] || addr=100.64.0.5
+# The stub reads the bind the way the installer and the agent do: a plain
+# KEY=VALUE line, leading space/TAB skipped, surrounding blanks chomped, the
+# last assignment winning, and EBBTOP_BIND taking precedence over the legacy
+# SOCKTOP_BIND exactly as the agent's bind_ip() falls back. 203.0.113.9 is a
+# deliberately wrong fallback: a fixture whose bind this stub cannot read fails
+# the `listen:` assertion instead of silently reporting the right address.
+addr=203.0.113.9
+for key in SOCKTOP_BIND EBBTOP_BIND; do
+  value="$(sed -n "s/^[[:blank:]]*${key}[[:blank:]]*=[[:blank:]]*//p" "$HOME/services/ebbtop-agent/agent.env" 2>/dev/null \
+    | tail -n 1 | tr -d '\r' | sed -E 's/[[:blank:]]+$//')"
+  if [[ -n "$value" ]]; then addr="$value"; fi
+done
 if [[ "$(cat "$STATE/service" 2>/dev/null || echo inactive)" == active ]]; then
   echo "LISTEN 0      128    ${addr}:${port}      0.0.0.0:*    users:((\"ebbtop-agent\",pid=4242,fd=7))"
 fi
@@ -612,10 +626,13 @@ case_source_parity() {
 # ===========================================================================
 BIND_TAIL=""        # realistic non-bind lines, built from the fixture token
 BIND_TAIL_CRLF=""
+LEGACY_TAIL=""      # the same lines in the pre-rename SOCKTOP_* spelling
+LEGACY_TAIL_CRLF=""
 
 bind_fixture() { # $1 = fixture name; writes $FIXHOME/services/ebbtop-agent/agent.env
   local f="$FIXHOME/services/ebbtop-agent/agent.env"
   local B='EBBTOP_BIND=100.64.0.5' W='EBBTOP_BIND=0.0.0.0'
+  local L='SOCKTOP_BIND=100.64.0.5' LW='SOCKTOP_BIND=0.0.0.0'
   case "$1" in
     # --- forms systemd reads as one plain EBBTOP_BIND=100.64.0.5
     plain)                         printf '%s\n%s' "$B" "$BIND_TAIL" ;;
@@ -650,12 +667,34 @@ bind_fixture() { # $1 = fixture name; writes $FIXHOME/services/ebbtop-agent/agen
     vt-wildcard-after-plain)       printf '%s\n\x0b%s\n%s' "$B" "$W" "$BIND_TAIL" ;;
     cr-duplicate)                  printf '%s\r%s\r' "$B" "$W" ;;
     crlf-spaced-key-tab-wildcard)  printf 'EBBTOP_BIND = 100.64.0.5\r\n\t%s\r\n' "$W" ;;
+    # --- legacy SOCKTOP_BIND hosts, i.e. installed before the EBBTOP_* rename
+    legacy-plain)                  printf '%s\n%s' "$L" "$LEGACY_TAIL" ;;
+    legacy-space-indented)         printf '   %s\n%s' "$L" "$LEGACY_TAIL" ;;
+    legacy-tab-indented)           printf '\t%s\n%s' "$L" "$LEGACY_TAIL" ;;
+    legacy-spaced-equals)          printf 'SOCKTOP_BIND = 100.64.0.5\n%s' "$LEGACY_TAIL" ;;
+    legacy-trailing-space)         printf '%s   \n%s' "$L" "$LEGACY_TAIL" ;;
+    legacy-crlf)                   printf '%s\r\n%s' "$L" "$LEGACY_TAIL_CRLF" ;;
+    legacy-comments)               printf '# EBBTOP_BIND=0.0.0.0\n;SOCKTOP_BIND=::\n%s\n%s' "$L" "$LEGACY_TAIL" ;;
+    legacy-no-final-newline)       printf '%s%s' "$LEGACY_TAIL" "$L" ;;
+    # --- both keys present, in every spelling: ambiguous, never guessed
+    both-keys)                     printf 'SOCKTOP_BIND=100.64.0.5\nEBBTOP_BIND=100.64.0.5\n%s' "$LEGACY_TAIL" ;;
+    both-keys-reversed)            printf '%s\n%s\n%s' "$B" "$L" "$LEGACY_TAIL" ;;
+    both-keys-spaced)              printf 'SOCKTOP_BIND = 100.64.0.5\nEBBTOP_BIND = 100.64.0.5\n%s' "$LEGACY_TAIL" ;;
+    both-keys-disagree)            printf '%s\n%s\n%s' "$B" "$LW" "$LEGACY_TAIL" ;;
+    # --- legacy forms that must be refused like their EBBTOP_BIND twins
+    legacy-quoted)                 printf 'SOCKTOP_BIND="0.0.0.0"\n%s' "$LEGACY_TAIL" ;;
+    legacy-backslash-escaped)      printf 'SOCKTOP_BIND=0\\.0\\.0\\.0\n%s' "$LEGACY_TAIL" ;;
+    legacy-wildcard)               printf '%s\n%s' "$LW" "$LEGACY_TAIL" ;;
+    legacy-loopback)               printf 'SOCKTOP_BIND=127.0.0.1\n%s' "$LEGACY_TAIL" ;;
+    legacy-duplicate)              printf '%s\n%s\n%s' "$L" "$LW" "$LEGACY_TAIL" ;;
+    legacy-vt-indented)            printf '\x0b%s\n%s' "$L" "$LEGACY_TAIL" ;;
+    legacy-exported)               printf 'export %s\n%s' "$L" "$LEGACY_TAIL" ;;
     *) fail bind-assignment "unknown fixture '$1'" ;;
   esac > "$f"
 }
 
-check_refusal() { # $1 = fixture name, $2 = prose label, $3 = expected message
-  local fixture="$1" label="$2" want="$3"
+check_refusal() { # $1 = fixture name, $2 = prose label, $3 = expected message, [$4 = second]
+  local fixture="$1" label="$2" want="$3" want2="${4:-}"
   local before calls_before ss_before calls_after ss_after errs verified
   bind_fixture "$fixture"
   before="$(snapshot "$FIXHOME")"; calls_before="$(calls)"; ss_before="$(ss_calls)"
@@ -667,6 +706,10 @@ check_refusal() { # $1 = fixture name, $2 = prose label, $3 = expected message
     || fail bind-assignment "$label: $errs installer error lines, expected exactly one: $(cat "$WORK/bind.out")"
   grep -qF -- "$want" "$WORK/bind.out" \
     || fail bind-assignment "$label: the refusal did not say '$want': $(cat "$WORK/bind.out")"
+  if [[ -n "$want2" ]]; then
+    grep -qF -- "$want2" "$WORK/bind.out" \
+      || fail bind-assignment "$label: the refusal did not name '$want2': $(cat "$WORK/bind.out")"
+  fi
   [[ "$(snapshot "$FIXHOME")" == "$before" ]] \
     || fail bind-assignment "$label: the fixture home changed"
   calls_after="$(calls)"; ss_after="$(ss_calls)"
@@ -702,28 +745,43 @@ check_accepted() { # $1 = note text, rest = fixture names
   note "$label"
 }
 
-case_bind_assignment() {
-  local name=bind-assignment pkg="$WORK/pkg-bind" out="$WORK/bind.out"
-  local before_env before_tok tok
-  extract "$ARCHIVE" "$pkg"
-  new_home bind
+bind_case_setup() { # $1 = fixture home label; extracts pkg-bind and installs a baseline
+  local out="$WORK/bind-baseline.out"
+  [[ -d "$WORK/pkg-bind" ]] || extract "$ARCHIVE" "$WORK/pkg-bind"
+  new_home "$1"
   set_addr 100.64.0.5
-  run_installer "$pkg" --prebuilt > "$out" 2>&1 \
-    || fail "$name" "baseline install failed: $(cat "$out")"
-  [[ "$(grep -c '^EBBTOP_BIND=' "$FIXHOME/services/ebbtop-agent/agent.env")" == 1 ]] \
-    || fail "$name" "the installer wrote more than one EBBTOP_BIND line"
+  run_installer "$WORK/pkg-bind" --prebuilt > "$out" 2>&1 \
+    || fail bind-assignment "baseline install for fixture '$1' failed: $(cat "$out")"
   tok="$(cat "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
   BIND_TAIL="EBBTOP_AGENT_PROCESSES_TTL_MS=500
 EBBTOP_AGENT_METRICS_TTL_MS=100
 EBBTOP_TOKEN=$tok
 "
   BIND_TAIL_CRLF="EBBTOP_AGENT_PROCESSES_TTL_MS=500"$'\r\n'"EBBTOP_AGENT_METRICS_TTL_MS=100"$'\r\n'"EBBTOP_TOKEN=$tok"$'\r\n'
+  # The key set a host installed before the EBBTOP_* rename carries (the same
+  # shape as the live k-server agent.env): SOCKTOP_BIND/SOCKTOP_TOKEN plus both
+  # TTL spellings, and no EBBTOP_BIND at all.
+  LEGACY_TAIL="SOCKTOP_AGENT_PROCESSES_TTL_MS=500
+SOCKTOP_AGENT_METRICS_TTL_MS=100
+EBBTOP_AGENT_METRICS_TTL_MS=100
+SOCKTOP_TOKEN=$tok
+"
+  LEGACY_TAIL_CRLF="SOCKTOP_AGENT_PROCESSES_TTL_MS=500"$'\r\n'"SOCKTOP_AGENT_METRICS_TTL_MS=100"$'\r\n'"EBBTOP_AGENT_METRICS_TTL_MS=100"$'\r\n'"SOCKTOP_TOKEN=$tok"$'\r\n'
+  return 0
+}
+
+case_bind_assignment() {
+  local name=bind-assignment out="$WORK/bind.out"
+  local before_env before_tok
+  bind_case_setup bind
+  [[ "$(grep -c '^EBBTOP_BIND=' "$FIXHOME/services/ebbtop-agent/agent.env")" == 1 ]] \
+    || fail "$name" "the installer wrote more than one EBBTOP_BIND line"
 
   # --- an ordinary upgrade: one plain EBBTOP_BIND, nothing rewritten
   before_env="$(sha256sum < "$FIXHOME/services/ebbtop-agent/agent.env")"
   before_tok="$(sha256sum < "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
   set_addr ""
-  run_installer "$pkg" --prebuilt > "$out" 2>&1 \
+  run_installer "$WORK/pkg-bind" --prebuilt > "$out" 2>&1 \
     || fail "$name" "ordinary upgrade failed: $(cat "$out")"
   grep -qx 'listen: 100.64.0.5:45976' "$out" \
     || fail "$name" "ordinary upgrade did not listen on 100.64.0.5:45976: $(cat "$out")"
@@ -817,6 +875,194 @@ case_packaging() {
   pass "$name" "dirty tree, non-ELF and wrong-ELF-machine binaries refused; two clean packaging runs produced the same sha256"
 }
 
+# ===========================================================================
+# 9. legacy-bind / bind-ambiguous: a host installed before the EBBTOP_* rename
+#    carries only SOCKTOP_BIND. The prebuilt upgrade reads that key as the bind
+#    source under the same byte grammar and the same IP-literal rules, leaves
+#    every existing byte alone (no rewrite, no renamed key), and refuses a file
+#    that carries both keys whatever their order or spelling.
+# ===========================================================================
+case_legacy_bind() {
+  local name=legacy-bind out="$WORK/legacy.out" svc before_env before_tok
+
+  bind_case_setup legacy
+  svc="$FIXHOME/services/ebbtop-agent"
+
+  # --- one legacy upgrade, byte-observed: no rewrite, no renamed key
+  bind_fixture legacy-plain
+  before_env="$(sha256sum < "$svc/agent.env")"
+  before_tok="$(sha256sum < "$svc/ebbtop.token")"
+  set_addr ""
+  run_installer "$WORK/pkg-bind" --prebuilt > "$out" 2>&1 \
+    || fail "$name" "an existing agent.env with only SOCKTOP_BIND was refused: $(cat "$out")"
+  grep -qx 'active: active' "$out" || fail "$name" "unit did not come up active: $(cat "$out")"
+  grep -qx 'listen: 100.64.0.5:45976' "$out" \
+    || fail "$name" "installer did not report the legacy bind as the listener: $(cat "$out")"
+  [[ "$(sha256sum < "$svc/agent.env")" == "$before_env" ]] || fail "$name" "agent.env was rewritten"
+  [[ "$(sha256sum < "$svc/ebbtop.token")" == "$before_tok" ]] || fail "$name" "token bytes changed"
+  grep -qx 'SOCKTOP_BIND=100.64.0.5' "$svc/agent.env" || fail "$name" "the legacy bind line was renamed or edited"
+  grep -q '^SOCKTOP_TOKEN=' "$svc/agent.env" || fail "$name" "the legacy token line was removed"
+  grep -q '^EBBTOP_BIND=' "$svc/agent.env" && fail "$name" "the installer added an EBBTOP_BIND line"
+  grep -q 'legacy SOCKTOP_BIND' "$out" || fail "$name" "installer did not say it used the legacy key: $(cat "$out")"
+  note "legacy upgrade: exit 0, listen 100.64.0.5:45976, agent.env and token byte-identical, no EBBTOP_BIND added"
+
+  # --- every form the EBBTOP_BIND grammar accepts, accepted for the legacy key
+  check_accepted "accepted a legacy SOCKTOP_BIND in plain, space/tab-indented, 'KEY = value', trailing-space, CRLF, comment and no-final-newline forms as 100.64.0.5, agent.env untouched" \
+    legacy-plain legacy-space-indented legacy-tab-indented legacy-spaced-equals legacy-trailing-space legacy-crlf legacy-comments legacy-no-final-newline
+  pass "$name" "an existing agent.env whose only bind assignment is the legacy SOCKTOP_BIND upgrades: the value is read under the same byte grammar and IP-literal rules as EBBTOP_BIND, the address is the one the unit loads, and agent.env and token bytes are unchanged (no rewrite, no renamed key)"
+
+  # --- both keys, or an unusable legacy form: refused before any mutation
+  check_refusal both-keys            "both keys, legacy first"                   "carries both EBBTOP_BIND" "SOCKTOP_BIND"
+  check_refusal both-keys-reversed   "both keys, EBBTOP_BIND first"              "carries both EBBTOP_BIND" "SOCKTOP_BIND"
+  check_refusal both-keys-spaced     "both keys in 'KEY = value' spelling"       "carries both EBBTOP_BIND" "SOCKTOP_BIND"
+  check_refusal both-keys-disagree   "a private EBBTOP_BIND beside a wildcard legacy bind" "carries both EBBTOP_BIND" "SOCKTOP_BIND"
+  check_refusal legacy-quoted            "a quoted legacy value"            "quoted or escaped values"
+  check_refusal legacy-backslash-escaped "a backslash-escaped legacy value" "quoted or escaped values"
+  check_refusal legacy-wildcard          "a wildcard legacy bind"           "refusing bind address '0.0.0.0'"
+  check_refusal legacy-loopback          "a loopback legacy bind"           "loopback-only"
+  check_refusal legacy-duplicate         "two legacy SOCKTOP_BIND assignments" "ambiguous"
+  check_refusal legacy-vt-indented       "a VT-indented legacy bind"        "the byte 0x0b is not supported"
+  check_refusal legacy-exported          "an exported legacy assignment"    "is not a plain KEY=VALUE assignment"
+  pass bind-ambiguous "a file carrying BOTH SOCKTOP_BIND and EBBTOP_BIND is refused as ambiguous in every order and spelling, and legacy quoted/escaped/wildcard/loopback/duplicate/VT/export forms are refused with the same rules as their EBBTOP_BIND twins - each non-zero with exactly one error line, an unchanged fixture and zero systemctl/ss calls"
+}
+
+# ===========================================================================
+# 10. pairing-hint / uninstall-state: after a successful prebuilt install the
+#     installer prints one hint line when the installed binary supports --pair
+#     and nothing when it does not, and never a code or a token. Uninstall keeps
+#     the token and the pairing state unless --purge is given, and reports what
+#     it kept or deleted without ever printing the contents.
+# ===========================================================================
+pairing_pkg() { # $1 = destination dir, $2 = yes|no: mark the binary as pairing-capable
+  local src="$WORK/pkg-a" dest="$1"
+  [[ -d "$src" ]] || extract "$ARCHIVE" "$src"
+  rm -rf -- "$dest"; mkdir -p "$dest"
+  cp -p "$src/BUILD" "$src/ebbtop-agent.service" "$src/install-agent.sh" "$dest/"
+  cp -p "$src/ebbtop-agent" "$dest/ebbtop-agent"
+  if [[ "$2" == yes ]]; then
+    # A pairing-capable agent carries the `--pair` argument literal; appending it
+    # to the real packaged binary keeps the fixture a valid ELF that the
+    # installer's own checks and the capability probe both accept.
+    printf '\n--pair\n' >> "$dest/ebbtop-agent"
+  fi
+  ( cd "$dest" && sha256sum BUILD ebbtop-agent ebbtop-agent.service > SHA256SUMS )
+}
+
+case_pairing_and_purge() {
+  local name=pairing-hint out="$WORK/pair.out" svc tok line
+  local tok_sha pair_sha clients_sha calls_before
+  local code_sentinel='{"code":"135791","expires_at_ms":1,"attempts":0}'
+  local client_sentinel='{"clients":[{"token":"beefcafe","label":"fixture"}]}'
+
+  # --- (c) a binary without --pair: no extra line at all
+  pairing_pkg "$WORK/pkg-nopair" no
+  new_home pair-no
+  set_addr 100.64.0.5
+  run_installer "$WORK/pkg-nopair" --prebuilt > "$out" 2>&1 \
+    || fail "$name" "install of the non-pairing binary failed: $(cat "$out")"
+  grep -q -- '--pair' "$out" && fail "$name" "installer printed a pairing instruction for a binary without --pair: $(grep -n -- '--pair' "$out")"
+  tok="$(cat "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
+  grep -qF "$tok" "$out" && fail "$name" "installer printed the token"
+  note "binary without --pair: no pairing line, token never printed"
+
+  # --- (c) a pairing-capable binary: exactly one hint line, no code, no token
+  pairing_pkg "$WORK/pkg-pair" yes
+  new_home pair-yes
+  set_addr 100.64.0.5
+  run_installer "$WORK/pkg-pair" --prebuilt > "$out" 2>&1 \
+    || fail "$name" "install of the pairing-capable binary failed: $(cat "$out")"
+  [[ "$(grep -c '^pair: ' "$out" || true)" == 1 ]] \
+    || fail "$name" "expected exactly one pairing hint line: $(grep -n 'pair' "$out" || true)"
+  line="$(grep '^pair: ' "$out")"
+  [[ "$line" == *"$FIXHOME/services/ebbtop-agent/bin/ebbtop-agent --pair"* ]] \
+    || fail "$name" "the hint does not name the installed binary with --pair: $line"
+  grep -Eq '[0-9]{6}' <<< "$line" && fail "$name" "the hint line carries a code-shaped value: $line"
+  tok="$(cat "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
+  grep -qF "$tok" "$out" && fail "$name" "installer printed the token"
+  note "binary with --pair: one hint line, no code, no token"
+  pass "$name" "the pairing hint is printed once, and only when the installed binary carries the --pair argument - absent for a binary without it - and neither the code nor the token is ever printed"
+
+  # --- (d) uninstall keeps the pairing state; only --purge deletes it
+  svc="$FIXHOME/services/ebbtop-agent"
+  printf '%s\n' "$code_sentinel"   > "$svc/pairing.json"
+  printf '%s\n' "$client_sentinel" > "$svc/clients.json"
+  chmod 600 "$svc/pairing.json" "$svc/clients.json"
+  tok_sha="$(sha256sum < "$svc/ebbtop.token")"
+  pair_sha="$(sha256sum < "$svc/pairing.json")"
+  clients_sha="$(sha256sum < "$svc/clients.json")"
+  calls_before="$(calls)"
+
+  set_addr ""
+  run_installer "$WORK/pkg-pair" --uninstall > "$out" 2>&1 \
+    || fail uninstall-state "uninstall failed: $(cat "$out")"
+  tail -n +$((calls_before + 1)) "$STATE/calls.log" | grep -q 'systemctl --user stop ebbtop-agent.service' \
+    || fail uninstall-state "uninstall did not stop the unit: $(tail -n +$((calls_before + 1)) "$STATE/calls.log")"
+  tail -n +$((calls_before + 1)) "$STATE/calls.log" | grep -q 'systemctl --user disable ebbtop-agent.service' \
+    || fail uninstall-state "uninstall did not disable the unit"
+  [[ ! -e "$FIXHOME/.config/systemd/user/ebbtop-agent.service" ]] \
+    || fail uninstall-state "the unit file survived the uninstall"
+  [[ ! -e "$svc/bin/ebbtop-agent" ]] || fail uninstall-state "the binary survived the uninstall"
+  grep -qx 'unit: inactive (not-found)' "$out" \
+    || fail uninstall-state "uninstall did not report an inactive unit: $(cat "$out")"
+  grep -q 'tokens: 1 file(s) kept in ' "$out" \
+    || fail uninstall-state "uninstall did not count the kept token: $(cat "$out")"
+  grep -q 'pairing: 2 state file(s) kept (--purge deletes them)' "$out" \
+    || fail uninstall-state "uninstall did not count the kept pairing state: $(cat "$out")"
+  [[ "$(sha256sum < "$svc/ebbtop.token")" == "$tok_sha" ]] \
+    || fail uninstall-state "a non-purge uninstall changed the token"
+  [[ "$(sha256sum < "$svc/pairing.json")" == "$pair_sha" ]] \
+    || fail uninstall-state "a non-purge uninstall changed pairing.json"
+  [[ "$(sha256sum < "$svc/clients.json")" == "$clients_sha" ]] \
+    || fail uninstall-state "a non-purge uninstall changed clients.json"
+  grep -q '135791' "$out" && fail uninstall-state "uninstall printed the pending code"
+  grep -q 'beefcafe' "$out" && fail uninstall-state "uninstall printed an issued client token"
+  note "uninstall without --purge: unit and binary gone, token + pairing.json + clients.json kept byte-identical"
+
+  # --- --purge deletes the token and the pairing state, still printing neither
+  set_addr 100.64.0.5
+  run_installer "$WORK/pkg-pair" --prebuilt > "$WORK/purge-install.out" 2>&1 \
+    || fail uninstall-state "reinstall before --purge failed: $(cat "$WORK/purge-install.out")"
+  printf '%s\n' "$code_sentinel"   > "$svc/pairing.json"
+  printf '%s\n' "$client_sentinel" > "$svc/clients.json"
+  chmod 600 "$svc/pairing.json" "$svc/clients.json"
+  set_addr ""
+  run_installer "$WORK/pkg-pair" --uninstall --purge > "$out" 2>&1 \
+    || fail uninstall-state "uninstall --purge failed: $(cat "$out")"
+  [[ ! -e "$svc" ]] || fail uninstall-state "the service directory survived --purge"
+  grep -q 'tokens: 1 file(s) deleted' "$out" \
+    || fail uninstall-state "--purge did not report the deleted token: $(cat "$out")"
+  grep -q 'pairing: 2 state file(s) deleted' "$out" \
+    || fail uninstall-state "--purge did not report the deleted pairing state: $(cat "$out")"
+  grep -q 'state: .* removed' "$out" \
+    || fail uninstall-state "--purge did not report the removed state directory: $(cat "$out")"
+  grep -q '135791\|beefcafe' "$out" && fail uninstall-state "--purge printed pairing state content"
+  note "uninstall --purge: 1 token and 2 pairing state files counted and deleted, service directory removed, no content printed"
+
+  # --- EBBTOP_STATE_DIR elsewhere: --purge deletes only the two pairing files
+  new_home purge-ext
+  set_addr 100.64.0.5
+  ENV_ARGS+=(EBBTOP_STATE_DIR="$FIXHOME/state")
+  mkdir -p "$FIXHOME/state"
+  printf '%s\n' "$code_sentinel"   > "$FIXHOME/state/pairing.json"
+  printf '%s\n' "$client_sentinel" > "$FIXHOME/state/clients.json"
+  printf 'unrelated\n' > "$FIXHOME/state/keepme.txt"
+  run_installer "$WORK/pkg-pair" --prebuilt > "$WORK/purge-ext-install.out" 2>&1 \
+    || fail uninstall-state "install with an overridden state dir failed: $(cat "$WORK/purge-ext-install.out")"
+  set_addr ""
+  ENV_ARGS+=(EBBTOP_STATE_DIR="$FIXHOME/state")
+  run_installer "$WORK/pkg-pair" --uninstall --purge > "$out" 2>&1 \
+    || fail uninstall-state "uninstall --purge with an overridden state dir failed: $(cat "$out")"
+  [[ ! -e "$FIXHOME/state/pairing.json" ]] || fail uninstall-state "pairing.json survived --purge in EBBTOP_STATE_DIR"
+  [[ ! -e "$FIXHOME/state/clients.json" ]] || fail uninstall-state "clients.json survived --purge in EBBTOP_STATE_DIR"
+  [[ -f "$FIXHOME/state/keepme.txt" ]] || fail uninstall-state "--purge deleted an unrelated file in EBBTOP_STATE_DIR"
+  grep -q 'pairing: 2 state file(s) deleted' "$out" \
+    || fail uninstall-state "an overridden state dir was not counted as 2 deleted pairing files: $(cat "$out")"
+  grep -q '135791\|beefcafe' "$out" && fail uninstall-state "--purge printed pairing state content"
+  note "EBBTOP_STATE_DIR override: the two pairing files deleted, an unrelated file in that directory kept"
+
+  pass uninstall-state "uninstall removes the unit and the binary and keeps the token and the pairing state untouched; only --uninstall --purge deletes them (pairing.json and clients.json in the default and in an overridden EBBTOP_STATE_DIR), counting files and never printing their contents"
+}
+
 case_no_toolchain
 if [[ "$MODE" == "all" ]]; then
   case_bare_env
@@ -826,6 +1072,8 @@ if [[ "$MODE" == "all" ]]; then
   case_source_parity
   case_bind_assignment
   case_packaging
+  case_legacy_bind
+  case_pairing_and_purge
 fi
 
 if [[ -n "$REAL_BASELINE" ]]; then

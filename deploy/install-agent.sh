@@ -5,6 +5,9 @@
 #   ~/ebbtop/deploy/install-agent.sh --rollback restore previous binary
 #   ./install-agent.sh --prebuilt               install a packaged release
 #                                               (no git, cargo or rustc needed)
+#   ./install-agent.sh --uninstall [--purge]    stop and remove it again;
+#                                               --purge also deletes the token
+#                                               and the pairing state
 #
 # --prebuilt is only valid from an extracted ebbtop-agent-linux-x86_64.tar.gz:
 # the binary, unit and manifest are read from this script's own directory.
@@ -13,6 +16,8 @@
 #   EBBTOP_ADDR   address the agent binds (tailnet or LAN IP of this host)
 # Optional env:
 #   EBBTOP_PORT   port (default 45976)
+#   EBBTOP_STATE_DIR  agent state directory (default ~/services/ebbtop-agent);
+#                 --uninstall --purge deletes pairing.json/clients.json here
 set -euo pipefail
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
@@ -29,13 +34,18 @@ ADDR="${EBBTOP_ADDR:-}"
 
 usage() {
   cat >&2 <<'USAGE'
-usage: install-agent.sh [--prebuilt | --rollback]
+usage: install-agent.sh [--prebuilt | --rollback | --uninstall [--purge]]
 
   (no argument)  build from source in this checkout and install/update it
   --prebuilt     install the package in this script's directory
                  (ebbtop-agent, ebbtop-agent.service, BUILD, SHA256SUMS);
                  needs no git, cargo or rustc
   --rollback     restore the previous binary saved as ebbtop-agent.bak
+  --uninstall    stop and disable the unit, remove the unit file and the
+                 binary; keep ~/services/ebbtop-agent (token and settings)
+  --purge        with --uninstall: also delete that directory, which removes
+                 the token and the pairing state (pairing.json, clients.json);
+                 enrolled clients lose access
 USAGE
 }
 
@@ -161,16 +171,25 @@ verify_package() {
 #     non-ASCII byte (an NBSP indent is not whitespace to systemd, so it is
 #     not whitespace here either);
 #   * CR ends a line exactly as systemd treats it;
-#   * exactly one plain, unquoted EBBTOP_BIND=<IP literal> assignment;
+#   * exactly one plain, unquoted EBBTOP_BIND=<IP literal> assignment, or, for
+#     a host installed before the EBBTOP_* rename, exactly one plain, unquoted
+#     legacy SOCKTOP_BIND=<IP literal> and no EBBTOP_BIND. The agent reads
+#     EBBTOP_BIND first and falls back to SOCKTOP_BIND, so a file with the
+#     legacy key alone yields the address the agent will actually bind; the
+#     value is validated under the same grammar and the same IP-literal rules.
+#     A file carrying BOTH keys is refused as ambiguous: the agent would take
+#     EBBTOP_BIND and silently ignore the other, so the two lines could
+#     disagree without anyone noticing;
 #   * every other line is a '#'/';' comment or a plain KEY=VALUE line whose
 #     key matches [A-Za-z_][A-Za-z0-9_]*.
 # Duplicates and every form this installer cannot read exactly as systemd
 # reads it are refused after package verification and before any write or
 # systemctl/ss call, so the address validated here is the address the unit
-# loads.
+# loads. agent.env is never rewritten or renamed: accepting the legacy key
+# only means the existing bytes are read, not migrated.
 env_file_bind() {
-  local file="$1" line key raw value lineno=0 bad
-  local -a bind_lines=() bind_values=()
+  local file="$1" line key raw value lineno=0 bad src_key src_line
+  local -a bind_lines=() bind_values=() legacy_lines=() legacy_values=()
 
   # Raw-byte checks, before any shell parsing. NUL ends systemd's parse, so an
   # EBBTOP_BIND after it would be ignored and the agent would fall back to
@@ -197,21 +216,41 @@ env_file_bind() {
     key="${key%"${key##*[![:blank:]]}"}"            # trailing space/TAB on the key
     [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
       || die "unsupported line $lineno in $file: '$key' is not a plain KEY=VALUE assignment"
-    [[ "$key" == EBBTOP_BIND ]] || continue
-    bind_lines+=("$lineno")
-    bind_values+=("$raw")
+    case "$key" in
+      EBBTOP_BIND)  bind_lines+=("$lineno");   bind_values+=("$raw") ;;
+      SOCKTOP_BIND) legacy_lines+=("$lineno"); legacy_values+=("$raw") ;;
+    esac
   done < <(LC_ALL=C tr '\r' '\n' < "$file")
 
+  # Both keys at once is ambiguous: the agent prefers EBBTOP_BIND, so the
+  # legacy line would be dead weight that can disagree with the live address.
+  if (( ${#bind_lines[@]} > 0 && ${#legacy_lines[@]} > 0 )); then
+    die "ambiguous $file: it carries both EBBTOP_BIND (line ${bind_lines[*]}) and the legacy SOCKTOP_BIND (line ${legacy_lines[*]}); the agent would use EBBTOP_BIND and ignore the other, so the two lines could disagree. Remove one and re-run."
+  fi
   if (( ${#bind_lines[@]} > 1 )); then
     die "ambiguous $file: ${#bind_lines[@]} EBBTOP_BIND assignments (lines ${bind_lines[*]}); systemd applies the last one, so the address the agent binds would depend on line order. Keep exactly one EBBTOP_BIND=<this host's tailnet/LAN IP>."
   fi
-  (( ${#bind_lines[@]} == 1 )) \
-    || die "existing $file has no EBBTOP_BIND; the agent would bind 0.0.0.0. Add EBBTOP_BIND=<this host's tailnet/LAN IP> and re-run."
+  if (( ${#legacy_lines[@]} > 1 )); then
+    die "ambiguous $file: ${#legacy_lines[@]} legacy SOCKTOP_BIND assignments (lines ${legacy_lines[*]}); systemd applies the last one, so the address the agent binds would depend on line order. Keep exactly one SOCKTOP_BIND=<this host's tailnet/LAN IP>, or rename it to EBBTOP_BIND."
+  fi
+  if (( ${#bind_lines[@]} == 0 && ${#legacy_lines[@]} == 0 )); then
+    die "existing $file has no EBBTOP_BIND (and no legacy SOCKTOP_BIND); the agent would bind 0.0.0.0. Add EBBTOP_BIND=<this host's tailnet/LAN IP> and re-run."
+  fi
 
-  value="${bind_values[0]}"
+  if (( ${#bind_lines[@]} == 1 )); then
+    src_key=EBBTOP_BIND
+    src_line="${bind_lines[0]}"
+    value="${bind_values[0]}"
+  else
+    # Host installed before the EBBTOP_* rename: same grammar, same rules.
+    src_key=SOCKTOP_BIND
+    src_line="${legacy_lines[0]}"
+    value="${legacy_values[0]}"
+  fi
+
   case "$value" in
     *\"*|*\'*|*\\*)
-      die "unsupported EBBTOP_BIND on line ${bind_lines[0]} of $file: quoted or escaped values are not supported (systemd would unquote it). Write EBBTOP_BIND=<this host's tailnet/LAN IP>." ;;
+      die "unsupported $src_key on line $src_line of $file: quoted or escaped values are not supported (systemd would unquote it). Write $src_key=<this host's tailnet/LAN IP>." ;;
   esac
   value="${value#"${value%%[![:blank:]]*}"}"   # systemd skips space/TAB after '='
   value="${value%"${value##*[![:blank:]]}"}"   # and chomps trailing space/TAB
@@ -219,17 +258,33 @@ env_file_bind() {
 }
 
 prebuilt_bind() {
-  local addr=""
-  if [[ -f "$SVC/agent.env" ]]; then
+  local addr="" envfile="$SVC/agent.env"
+  if [[ -f "$envfile" ]]; then
     # Explicit propagation: bash ignores errexit for an assignment whose
     # command substitution fails, so a refusal there must exit here.
-    addr="$(env_file_bind "$SVC/agent.env")" || exit 1
+    addr="$(env_file_bind "$envfile")" || exit 1
   else
     [[ -n "$ADDR" ]] || die "fresh install needs EBBTOP_ADDR=this host's tailnet/LAN IP"
     addr="$ADDR"
   fi
   validate_bind "$addr"
+  # Reached only once the address is accepted. The file has been proven to hold
+  # exactly one of the two bind keys, so "no EBBTOP_BIND line" means the legacy
+  # key is what supplied the address. Printed to stderr: stdout carries the
+  # address. Informational only - nothing is migrated or rewritten.
+  if [[ -f "$envfile" ]] && ! grep -q '^[[:blank:]]*EBBTOP_BIND[[:blank:]]*=' "$envfile"; then
+    echo "note: $envfile carries the legacy SOCKTOP_BIND; using it as the bind address ($addr), file left byte-identical" >&2
+  fi
   printf '%s\n' "$addr"
+}
+
+# Pairing (P3a) is an opt-in surface of the installed binary. Capability is read
+# from the installed bytes rather than probed by running the agent: a binary
+# from before pairing does not handle --help either, it ignores the unknown flag
+# and starts serving, so a --help probe is not inert. The binary that implements
+# `--pair` carries that literal as its argument name.
+supports_pairing() {
+  LC_ALL=C grep -qaF -e '--pair' "$1" 2>/dev/null
 }
 
 install_prebuilt() {
@@ -316,21 +371,106 @@ install_prebuilt() {
   else
     echo "linger: ${linger:-unknown} - this unit will NOT start at boot; enable it with: sudo loginctl enable-linger $(id -un)"
   fi
+
+  # P3a: one hint line, and only when the installed binary can mint a code.
+  # The installer never mints a code and never prints a code or token value;
+  # `--pair` prints the code itself, on this host's terminal.
+  if supports_pairing "$SVC/bin/ebbtop-agent"; then
+    echo "pair: mint a pairing code on this host with: $SVC/bin/ebbtop-agent --pair"
+  fi
+}
+
+# --- uninstall -------------------------------------------------------------
+# Token files and pairing state are counted, never read out. Without --purge
+# they stay where they are: the next install reuses the token and the clients
+# already enrolled. With --purge the service directory is removed, and the
+# pairing state is removed from $EBBTOP_STATE_DIR when that points elsewhere
+# (the agent's `--pair` and `/pair` share that directory).
+token_files() {
+  local f
+  for f in "$SVC/ebbtop.token" "$SVC/kmon.token"; do
+    if [[ -f "$f" ]]; then printf '%s\n' "$f"; fi
+  done
+}
+
+pairing_files() {
+  local dir="$SVC" f
+  [[ -n "${EBBTOP_STATE_DIR:-}" ]] && dir="$EBBTOP_STATE_DIR"
+  for f in pairing.json clients.json; do
+    if [[ -f "$dir/$f" ]]; then printf '%s\n' "$dir/$f"; fi
+  done
+}
+
+uninstall_agent() {
+  local purge="$1" st en listen
+  local -a toks=() pairs=()
+
+  mapfile -t toks < <(token_files)
+  mapfile -t pairs < <(pairing_files)
+
+  if [[ ! -e "$UNIT" && ! -e "$OLD_UNIT" && ! -e "$SVC/bin/ebbtop-agent" && ${#toks[@]} -eq 0 && ${#pairs[@]} -eq 0 ]]; then
+    echo "nothing to remove on this host (no $UNIT, no $OLD_UNIT, no $SVC/bin/ebbtop-agent, no token or pairing state)"
+    return 0
+  fi
+
+  echo "unit: $UNIT"
+  echo "binary: $SVC/bin/ebbtop-agent"
+  echo "tokens: ${#toks[@]} file(s) present"
+  echo "pairing: ${#pairs[@]} state file(s) present"
+  if (( purge )); then
+    echo "plan: stop and disable the unit, remove the unit file and the binary, then delete $SVC and the pairing state (the token goes with it; clients lose access)"
+  else
+    echo "plan: stop and disable the unit, remove the unit file and the binary; keep $SVC (token, settings and pairing state)"
+  fi
+
+  systemctl --user stop ebbtop-agent.service 2>/dev/null || true
+  systemctl --user disable ebbtop-agent.service 2>/dev/null || true
+  rm -f -- "$UNIT" "$OLD_UNIT"
+  systemctl --user daemon-reload 2>/dev/null || true
+  rm -f -- "$SVC/bin/ebbtop-agent" "$SVC/bin/ebbtop-agent.bak"
+  if (( purge )); then
+    if (( ${#pairs[@]} )); then rm -f -- "${pairs[@]}"; fi
+    rm -rf -- "$SVC"
+  fi
+
+  st="$(systemctl --user is-active ebbtop-agent.service 2>/dev/null || true)"
+  en="$(systemctl --user is-enabled ebbtop-agent.service 2>/dev/null || true)"
+  listen="$(ss -tlnH "sport = :$PORT" 2>/dev/null | awk '{print $4}' | paste -sd' ' || true)"
+  echo "unit: ${st:-unknown} (${en:-not-found})"
+  if [[ -e "$UNIT" ]]; then echo "unit file: still present at $UNIT"; else echo "unit file: removed"; fi
+  if [[ -e "$SVC/bin/ebbtop-agent" ]]; then echo "binary: still present at $SVC/bin/ebbtop-agent"; else echo "binary: removed"; fi
+  echo "listen: ${listen:-none (nothing listening on port $PORT)}"
+  if (( purge )); then
+    echo "tokens: ${#toks[@]} file(s) deleted"
+    echo "pairing: ${#pairs[@]} state file(s) deleted"
+    if [[ -e "$SVC" ]]; then echo "state: $SVC still exists"; else echo "state: $SVC removed"; fi
+  else
+    echo "tokens: ${#toks[@]} file(s) kept in $SVC (--purge deletes them)"
+    echo "pairing: ${#pairs[@]} state file(s) kept (--purge deletes them)"
+  fi
 }
 
 # --- dispatch --------------------------------------------------------------
-if (( $# > 1 )); then
-  echo "unknown argument: $2" >&2
-  usage
-  exit 2
-fi
-
+MODE=""
+PURGE=0
 case "${1:-}" in
   "")          MODE=source ;;
   --prebuilt)  MODE=prebuilt ;;
   --rollback)  MODE=rollback ;;
+  --uninstall) MODE=uninstall ;;
+  --purge)     echo "--purge only makes sense with --uninstall" >&2; usage; exit 2 ;;
   *)           echo "unknown option: $1" >&2; usage; exit 2 ;;
 esac
+
+if (( $# > 1 )); then
+  if [[ "$MODE" == "uninstall" && "$2" == "--purge" && $# -eq 2 ]]; then
+    PURGE=1
+  else
+    echo "unknown argument: $2" >&2
+    usage
+    exit 2
+  fi
+fi
 
 if [[ "$MODE" == "rollback" ]]; then
   if [[ -f "$SVC/bin/ebbtop-agent.bak" ]]; then
@@ -341,6 +481,11 @@ if [[ "$MODE" == "rollback" ]]; then
   fi
   systemctl --user restart ebbtop-agent.service
   echo "rolled back"; exit 0
+fi
+
+if [[ "$MODE" == "uninstall" ]]; then
+  uninstall_agent "$PURGE"
+  exit 0
 fi
 
 if [[ "$MODE" == "prebuilt" ]]; then

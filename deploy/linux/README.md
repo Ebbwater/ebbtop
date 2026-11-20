@@ -65,6 +65,19 @@ is-active`, the address actually listening on port `45976`, the sha256 prefix of
 the installed binary and the linger state. If linger is off it prints the exact
 command needed: `sudo loginctl enable-linger <user>`.
 
+When the installed binary supports pairing, one more line follows:
+
+```
+pair: mint a pairing code on this host with: /home/<user>/services/ebbtop-agent/bin/ebbtop-agent --pair
+```
+
+The capability is decided from the bytes that were just installed — the `--pair`
+argument the binary carries — never by running the agent: a binary from before
+pairing has no `--help` handler either, so probing it would start a listener. A
+binary without `--pair` prints nothing extra, so the output of an older package
+is unchanged. The installer never mints and never prints a pairing code or a
+token; `--pair` prints the code on this host's own terminal.
+
 ## Upgrade, token retention and rollback
 
 Re-running the installer from a newer archive is the upgrade path. An existing
@@ -91,14 +104,37 @@ reads it is refused while nothing has changed. The accepted file is:
 - line-ended by LF, CRLF or a bare CR, since CR ends a line exactly as systemd
   treats it;
 - indented only with space and TAB, and only at the start or end of a line;
-- carrying exactly one plain, unquoted `EBBTOP_BIND=<IP literal>` assignment: no
-  quotes, no backslash escapes, no `export`, and no second assignment in any
-  spelling (duplicates are refused instead of resolved, because systemd applies
-  the last one and the address would then depend on line order);
+- carrying exactly one plain, unquoted bind assignment — `EBBTOP_BIND=<IP
+  literal>`, or the legacy `SOCKTOP_BIND=<IP literal>` on a host installed
+  before the rename — with no quotes, no backslash escapes, no `export`, and no
+  second assignment of either key in any spelling (duplicates are refused
+  instead of resolved, because systemd applies the last one and the address
+  would then depend on line order);
 - plain `KEY=VALUE` on every other line, with keys matching
   `[A-Za-z_][A-Za-z0-9_]*`, or `#`/`;` comment lines.
 
 Every unsupported or ambiguous form exits non-zero with exactly one error line.
+
+#### Hosts installed before the `EBBTOP_*` rename (`SOCKTOP_BIND`)
+
+An `agent.env` written by an older install carries `SOCKTOP_BIND` and
+`SOCKTOP_TOKEN` and no `EBBTOP_BIND` at all. The agent reads `EBBTOP_BIND` first
+and falls back to `SOCKTOP_BIND`, so the legacy line is the address it actually
+binds. The prebuilt upgrade therefore accepts the legacy key as the bind source,
+read under exactly the same byte grammar and the same IP-literal rules — no
+wildcard, no loopback-only address — as `EBBTOP_BIND`.
+
+Nothing is migrated. The file is not rewritten, no key is renamed, `ebbtop.token`
+keeps its bytes and mode 600, and the token line keeps its own spelling; the
+installer only reads the address and prints a `note:` line saying which key
+supplied it.
+
+An `agent.env` that carries **both** keys is refused as ambiguous, in either
+order and in every spelling: the agent would take `EBBTOP_BIND` and ignore the
+legacy line, so the two could disagree without anyone noticing. Remove one line
+and re-run. Two assignments of the same bind key are refused for the same reason
+they are for `EBBTOP_BIND`: systemd applies the last one, so the address would
+depend on line order.
 
 #### Why the old "leading whitespace is fine" promise was false
 
@@ -121,6 +157,34 @@ sha256 and is the binary the unit starts. It exits non-zero.
 `.bak` back over the binary and restarts the unit. With no `.bak` present it
 exits non-zero with `no .bak to roll back to` instead of pretending to succeed.
 
+## Uninstall and `--purge`
+
+```sh
+bash ./install-agent.sh --uninstall            # stop, disable, remove unit and binary
+bash ./install-agent.sh --uninstall --purge    # also delete the token and the pairing state
+```
+
+`--uninstall` stops and disables the unit, removes the unit file, the installed
+binary and its `.bak`, and leaves `~/services/ebbtop-agent` in place:
+`agent.env`, `ebbtop.token` and the pairing state are kept byte-identical, so the
+next install reuses them and clients keep working.
+
+`--purge` deletes that directory as well — token, environment file and pairing
+state — after which enrolled clients lose access. When `EBBTOP_STATE_DIR` points
+somewhere else (the agent's `--pair` and `/pair` honour it), `--purge` deletes
+only `pairing.json` and `clients.json` there and touches no other file.
+
+Both modes count what they act on and never print a token, a pairing code or any
+file content:
+
+```
+tokens: 1 file(s) kept in /home/<user>/services/ebbtop-agent (--purge deletes them)
+pairing: 2 state file(s) kept (--purge deletes them)
+```
+
+Neither mode prompts. `--uninstall` is the explicit request, and the `plan:` line
+printed before anything is removed says exactly what will be deleted.
+
 ## What is verified before anything changes
 
 The installer verifies the package first and mutates nothing if that fails:
@@ -136,7 +200,8 @@ The installer verifies the package first and mutates nothing if that fails:
 5. The bind address must be a configurable non-wildcard, non-loopback IP. An
    existing `agent.env`, when there is one, must also be a file the installer
    can read exactly as systemd reads it (see *The `agent.env` syntax the
-   installer accepts*).
+   installer accepts*), carrying exactly one bind source — `EBBTOP_BIND`, or the
+   legacy `SOCKTOP_BIND` on a host installed before the rename, never both.
 
 Only then does it move the current binary aside, write the unit and call
 `systemctl --user`. A truncated archive, a non-gzip file, a modified member, an
@@ -191,7 +256,9 @@ on `PATH`, so the real `~/services/ebbtop-agent` and the live unit are never
 touched. Cases: no-toolchain install, bare `agent.env`, invalid archive,
 tampered member, member set, wrong architecture, token retention, settings
 retention, rollback (with and without `.bak`), source-install parity, the
-`agent.env` bind-assignment grammar and the packaging refusals.
+`agent.env` bind-assignment grammar, the packaging refusals, the legacy
+`SOCKTOP_BIND` upgrade and its refusals, the pairing hint, and the
+uninstall/`--purge` state handling.
 `--no-toolchain-only` runs just the first. Each negative case diffs the whole
 fixture home and the service-manager and `ss` call logs before and after, which
 is how "refused before any mutation" is proved; each bind-assignment refusal
@@ -234,12 +301,36 @@ release document deliberately puts the Linux asset second, keeps a
 parser that takes the first digest or prefix-matches the asset name fails the
 harness instead of passing it.
 
+The legacy-bind case does the same for a pre-rename host: an `agent.env` whose
+only bind assignment is `SOCKTOP_BIND` upgrades with `agent.env` and the token
+byte-identical and no `EBBTOP_BIND` line added, the accepted forms and the
+refused ones (including a file carrying both keys in either order) mirror the
+`EBBTOP_BIND` twins. The `ss` stub reads the bind with the same grammar and with
+the agent's `EBBTOP_BIND`-before-`SOCKTOP_BIND` precedence, so the reported
+listener cannot disagree with the validated address; its fallback is a
+deliberately wrong address, so a fixture the stub cannot parse fails instead of
+passing by accident.
+
+The pairing case installs a package whose binary carries the `--pair` argument
+and asserts exactly one hint line naming the installed binary, no
+code-shaped value and no token on the output; the unmarked package must produce
+no hint line at all. The uninstall case asserts that `--uninstall` removes the
+unit file and the binary while keeping `ebbtop.token`, `pairing.json` and
+`clients.json` byte-identical, that `--uninstall --purge` deletes them (counting
+1 token and 2 pairing files) and removes the service directory, and that with an
+overridden `EBBTOP_STATE_DIR` only those two pairing files are deleted from that
+directory. Every mode is checked for printed content: a sentinel code and a
+sentinel client token must not appear anywhere in the output.
+
 What these harnesses cannot prove, and what still needs a native host or VM:
 
 - install on a clean supported Linux host with no Git and no Cargo installed;
 - `systemctl --user is-active` on a real unit (the harness uses a stub);
 - a listener on the intended private address reached from a separate client;
 - loopback/wildcard refusal against a real service manager;
+- uninstall and `--uninstall --purge` against a real service manager, a real
+  state directory and a real pairing-capable agent binary (the fixture marks
+  the packaged binary instead);
 - reboot with linger enabled and the unit coming back by itself;
 - an upgrade on a VM with the token retained;
 - rollback after a real failed service start;
