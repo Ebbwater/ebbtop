@@ -144,11 +144,86 @@ verify_package() {
     || die "package unit does not start the installed agent binary"
 }
 
+# An existing agent.env is read the way systemd reads an EnvironmentFile, and
+# only a conservative subset of that grammar is supported. systemd v259
+# (src/basic/env-file.c) parses the file as bytes: the whitespace it skips is
+# exactly space, TAB, LF and CR; VT (0x0b) and FF (0x0c) are ordinary KEY
+# characters; it stops at the first NUL byte; '#' and ';' start a comment; the
+# key ends at the first '=' with trailing whitespace removed; an unquoted value
+# runs to the end of the line with surrounding whitespace stripped; and a
+# repeated key is replaced, so the LAST assignment wins.
+#
+# bash cannot be used to decide what systemd sees: `read` silently drops NUL
+# and `[[:space:]]` is locale-dependent and wider than systemd's class. The
+# file is therefore checked as raw bytes first, and only this plain ASCII
+# subset is accepted:
+#   * TAB, LF, CR and printable ASCII; no NUL, no other control byte and no
+#     non-ASCII byte (an NBSP indent is not whitespace to systemd, so it is
+#     not whitespace here either);
+#   * CR ends a line exactly as systemd treats it;
+#   * exactly one plain, unquoted EBBTOP_BIND=<IP literal> assignment;
+#   * every other line is a '#'/';' comment or a plain KEY=VALUE line whose
+#     key matches [A-Za-z_][A-Za-z0-9_]*.
+# Duplicates and every form this installer cannot read exactly as systemd
+# reads it are refused after package verification and before any write or
+# systemctl/ss call, so the address validated here is the address the unit
+# loads.
+env_file_bind() {
+  local file="$1" line key raw value lineno=0 bad
+  local -a bind_lines=() bind_values=()
+
+  # Raw-byte checks, before any shell parsing. NUL ends systemd's parse, so an
+  # EBBTOP_BIND after it would be ignored and the agent would fall back to
+  # 0.0.0.0; VT/FF would become part of a key, so systemd would not see
+  # EBBTOP_BIND at all.
+  if [[ "$(LC_ALL=C tr -dc '\000' < "$file" | wc -c)" -ne 0 ]]; then
+    die "unsupported $file: it contains a NUL byte; systemd stops reading an EnvironmentFile there, so EBBTOP_BIND would be ignored and the agent would listen on 0.0.0.0. Remove the NUL byte and keep exactly one plain EBBTOP_BIND=<this host's tailnet/LAN IP> line."
+  fi
+  bad="$(LC_ALL=C tr -d '\011\012\015\040-\176' < "$file" | od -An -tx1 | tr -d ' \n' | cut -c1-2)"
+  if [[ -n "$bad" ]]; then
+    die "unsupported $file: the byte 0x$bad is not supported; only printable ASCII, TAB, CR and LF are allowed. systemd treats VT, FF and non-ASCII bytes as part of a key or value, so keep exactly one plain EBBTOP_BIND=<this host's tailnet/LAN IP> line and drop other control or non-ASCII bytes."
+  fi
+
+  # CR terminates a line in systemd's parser; read the file the same way.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    lineno=$((lineno + 1))
+    key="${line#"${line%%[![:blank:]]*}"}"          # leading space/TAB
+    [[ -z "$key" ]] && continue                     # empty line
+    case "$key" in [\#\;]*) continue ;; esac        # '#' and ';' comments
+    [[ "$key" == *=* ]] \
+      || die "unsupported line $lineno in $file: a non-comment line without '=' (write KEY=VALUE)"
+    raw="${key#*=}"
+    key="${key%%=*}"
+    key="${key%"${key##*[![:blank:]]}"}"            # trailing space/TAB on the key
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
+      || die "unsupported line $lineno in $file: '$key' is not a plain KEY=VALUE assignment"
+    [[ "$key" == EBBTOP_BIND ]] || continue
+    bind_lines+=("$lineno")
+    bind_values+=("$raw")
+  done < <(LC_ALL=C tr '\r' '\n' < "$file")
+
+  if (( ${#bind_lines[@]} > 1 )); then
+    die "ambiguous $file: ${#bind_lines[@]} EBBTOP_BIND assignments (lines ${bind_lines[*]}); systemd applies the last one, so the address the agent binds would depend on line order. Keep exactly one EBBTOP_BIND=<this host's tailnet/LAN IP>."
+  fi
+  (( ${#bind_lines[@]} == 1 )) \
+    || die "existing $file has no EBBTOP_BIND; the agent would bind 0.0.0.0. Add EBBTOP_BIND=<this host's tailnet/LAN IP> and re-run."
+
+  value="${bind_values[0]}"
+  case "$value" in
+    *\"*|*\'*|*\\*)
+      die "unsupported EBBTOP_BIND on line ${bind_lines[0]} of $file: quoted or escaped values are not supported (systemd would unquote it). Write EBBTOP_BIND=<this host's tailnet/LAN IP>." ;;
+  esac
+  value="${value#"${value%%[![:blank:]]*}"}"   # systemd skips space/TAB after '='
+  value="${value%"${value##*[![:blank:]]}"}"   # and chomps trailing space/TAB
+  printf '%s\n' "$value"
+}
+
 prebuilt_bind() {
   local addr=""
   if [[ -f "$SVC/agent.env" ]]; then
-    addr="$(sed -n 's/^EBBTOP_BIND=//p' "$SVC/agent.env" | head -n 1)"
-    [[ -n "$addr" ]] || die "existing $SVC/agent.env has no EBBTOP_BIND; the agent would bind 0.0.0.0. Add EBBTOP_BIND=<this host's tailnet/LAN IP> and re-run."
+    # Explicit propagation: bash ignores errexit for an assignment whose
+    # command substitution fails, so a refusal there must exit here.
+    addr="$(env_file_bind "$SVC/agent.env")" || exit 1
   else
     [[ -n "$ADDR" ]] || die "fresh install needs EBBTOP_ADDR=this host's tailnet/LAN IP"
     addr="$ADDR"
@@ -166,7 +241,7 @@ install_prebuilt() {
   [[ "$arch" == "x86_64" ]] \
     || die "unsupported architecture '$arch': this package is x86_64 only"
   verify_package "$dir"
-  addr="$(prebuilt_bind)"
+  addr="$(prebuilt_bind)" || exit 1
 
   migrate_from_kmon
 

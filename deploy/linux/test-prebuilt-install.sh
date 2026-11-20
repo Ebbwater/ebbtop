@@ -41,6 +41,7 @@ STATE="$WORK/state"
 mkdir -p "$STUB" "$STUB_ARCH" "$STATE"
 echo yes > "$STATE/linger"
 : > "$STATE/calls.log"
+: > "$STATE/ss.log"
 export EBBTOP_FIXTURE_STATE="$STATE"
 
 # --- stubs: the only service manager, socket table and login record here ----
@@ -78,9 +79,11 @@ cat > "$STUB/ss" <<'STUB'
 #!/usr/bin/env bash
 set -u
 STATE="${EBBTOP_FIXTURE_STATE:?}"
+printf 'ss %s\n' "$*" >> "$STATE/ss.log"
 port=45976
 [[ "$*" =~ :([0-9]+) ]] && port="${BASH_REMATCH[1]}"
-addr="$(sed -n 's/^EBBTOP_BIND=//p' "$HOME/services/ebbtop-agent/agent.env" 2>/dev/null | head -n 1)"
+addr="$(sed -n 's/^[[:blank:]]*EBBTOP_BIND[[:blank:]]*=[[:blank:]]*//p' "$HOME/services/ebbtop-agent/agent.env" 2>/dev/null \
+  | head -n 1 | tr -d '\r' | sed -E 's/[[:blank:]]+$//')"
 [[ -n "$addr" ]] || addr=100.64.0.5
 if [[ "$(cat "$STATE/service" 2>/dev/null || echo inactive)" == active ]]; then
   echo "LISTEN 0      128    ${addr}:${port}      0.0.0.0:*    users:((\"ebbtop-agent\",pid=4242,fd=7))"
@@ -163,6 +166,8 @@ snapshot() { # $1 = directory; prints type/mode/size/path plus content hashes
 }
 
 calls() { wc -l < "$STATE/calls.log" | tr -d ' '; }
+
+ss_calls() { wc -l < "$STATE/ss.log" | tr -d ' '; }
 
 expect_no_mutation() { # $1 = case, $2 = snapshot before, $3 = calls before
   local after_calls
@@ -601,7 +606,171 @@ case_source_parity() {
 }
 
 # ===========================================================================
-# 7. packaging refusals: dirty tree, wrong ELF machine, non-ELF, and a
+# 7. bind-assignment: an existing agent.env is read the way systemd reads it,
+#    so the address the installer validates is the address the unit loads.
+#    Refusals happen after package verification and before any write or call.
+# ===========================================================================
+BIND_TAIL=""        # realistic non-bind lines, built from the fixture token
+BIND_TAIL_CRLF=""
+
+bind_fixture() { # $1 = fixture name; writes $FIXHOME/services/ebbtop-agent/agent.env
+  local f="$FIXHOME/services/ebbtop-agent/agent.env"
+  local B='EBBTOP_BIND=100.64.0.5' W='EBBTOP_BIND=0.0.0.0'
+  case "$1" in
+    # --- forms systemd reads as one plain EBBTOP_BIND=100.64.0.5
+    plain)                         printf '%s\n%s' "$B" "$BIND_TAIL" ;;
+    space-indented)                printf '   %s\n%s' "$B" "$BIND_TAIL" ;;
+    tab-indented)                  printf '\t%s\n%s' "$B" "$BIND_TAIL" ;;
+    spaced-equals)                 printf 'EBBTOP_BIND = 100.64.0.5\n%s' "$BIND_TAIL" ;;
+    trailing-space)                printf '%s   \n%s' "$B" "$BIND_TAIL" ;;
+    crlf)                          printf '%s\r\n%s' "$B" "$BIND_TAIL_CRLF" ;;
+    comments)                      printf '# %s\n;EBBTOP_BIND=::\n%s\n%s' "$W" "$B" "$BIND_TAIL" ;;
+    no-final-newline)              printf '%s%s' "$BIND_TAIL" "$B" ;;
+    # --- duplicates and unsupported forms, each refused
+    valid-then-wildcard)           printf '%s\n%s\n%s' "$B" "$W" "$BIND_TAIL" ;;
+    wildcard-then-valid)           printf '%s\n%s\n%s' "$W" "$B" "$BIND_TAIL" ;;
+    space-indented-wildcard)       printf '%s\n   %s\n%s' "$B" "$W" "$BIND_TAIL" ;;
+    tab-indented-wildcard)         printf '%s\n\t%s\n%s' "$B" "$W" "$BIND_TAIL" ;;
+    indented-key-then-wildcard)    printf '  %s\n%s\n%s' "$B" "$W" "$BIND_TAIL" ;;
+    duplicate)                     printf '%s\n%s\n%s' "$B" "$B" "$BIND_TAIL" ;;
+    lone-space-indented-wildcard)  printf '   %s\n%s' "$W" "$BIND_TAIL" ;;
+    quoted)                        printf 'EBBTOP_BIND="0.0.0.0"\n%s' "$BIND_TAIL" ;;
+    backslash-escaped)             printf 'EBBTOP_BIND=0\\.0\\.0\\.0\n%s' "$BIND_TAIL" ;;
+    exported)                      printf 'export %s\n%s' "$B" "$BIND_TAIL" ;;
+    no-equals)                     printf '%s\nnot an assignment\n%s' "$B" "$BIND_TAIL" ;;
+    comments-no-bind)              printf '# %s\n;EBBTOP_BIND=::\n' "$W" ;;
+    vt-indented)                   printf '\x0b%s\n%s' "$B" "$BIND_TAIL" ;;
+    ff-indented)                   printf '\x0c%s\n%s' "$B" "$BIND_TAIL" ;;
+    vt-suffixed-key)               printf 'EBBTOP_BIND\x0b=100.64.0.5\n%s' "$BIND_TAIL" ;;
+    ff-suffixed-key)               printf 'EBBTOP_BIND\x0c=100.64.0.5\n%s' "$BIND_TAIL" ;;
+    nul-prefixed)                  printf '\x00%s\n%s' "$B" "$BIND_TAIL" ;;
+    vt-indented-no-newline)        printf '\x0b%s' "$B" ;;
+    nul-on-own-line)               printf '\n\x00\n%s\n%s' "$B" "$BIND_TAIL" ;;
+    nbsp-indented)                 printf '\xc2\xa0%s\n%s' "$B" "$BIND_TAIL" ;;
+    vt-wildcard-after-plain)       printf '%s\n\x0b%s\n%s' "$B" "$W" "$BIND_TAIL" ;;
+    cr-duplicate)                  printf '%s\r%s\r' "$B" "$W" ;;
+    crlf-spaced-key-tab-wildcard)  printf 'EBBTOP_BIND = 100.64.0.5\r\n\t%s\r\n' "$W" ;;
+    *) fail bind-assignment "unknown fixture '$1'" ;;
+  esac > "$f"
+}
+
+check_refusal() { # $1 = fixture name, $2 = prose label, $3 = expected message
+  local fixture="$1" label="$2" want="$3"
+  local before calls_before ss_before calls_after ss_after errs verified
+  bind_fixture "$fixture"
+  before="$(snapshot "$FIXHOME")"; calls_before="$(calls)"; ss_before="$(ss_calls)"
+  if run_installer "$WORK/pkg-bind" --prebuilt > "$WORK/bind.out" 2>&1; then
+    fail bind-assignment "$label was accepted: $(cat "$WORK/bind.out")"
+  fi
+  errs="$(grep -c '^install-agent.sh: ' "$WORK/bind.out" || true)"
+  [[ "$errs" == 1 ]] \
+    || fail bind-assignment "$label: $errs installer error lines, expected exactly one: $(cat "$WORK/bind.out")"
+  grep -qF -- "$want" "$WORK/bind.out" \
+    || fail bind-assignment "$label: the refusal did not say '$want': $(cat "$WORK/bind.out")"
+  [[ "$(snapshot "$FIXHOME")" == "$before" ]] \
+    || fail bind-assignment "$label: the fixture home changed"
+  calls_after="$(calls)"; ss_after="$(ss_calls)"
+  [[ "$calls_after" == "$calls_before" ]] \
+    || fail bind-assignment "$label: the service manager was called $((calls_after - calls_before)) time(s)"
+  [[ "$ss_after" == "$ss_before" ]] \
+    || fail bind-assignment "$label: ss was called $((ss_after - ss_before)) time(s)"
+  verified="$(grep -m1 '^verified: SHA256SUMS ok' "$WORK/bind.out" || true)"
+  [[ -n "$verified" ]] \
+    || fail bind-assignment "$label: the package was not verified before the refusal"
+  note "$label: refused before any write or call - $verified"
+}
+
+check_accepted() { # $1 = note text, rest = fixture names
+  local label="$1" fixture before_env before_tok
+  shift
+  for fixture in "$@"; do
+    bind_fixture "$fixture"
+    before_env="$(sha256sum < "$FIXHOME/services/ebbtop-agent/agent.env")"
+    before_tok="$(sha256sum < "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
+    set_addr ""
+    run_installer "$WORK/pkg-bind" --prebuilt > "$WORK/bind.out" 2>&1 \
+      || fail bind-assignment "$fixture was refused: $(cat "$WORK/bind.out")"
+    grep -qx 'active: active' "$WORK/bind.out" \
+      || fail bind-assignment "$fixture: unit did not come up active: $(cat "$WORK/bind.out")"
+    grep -qx 'listen: 100.64.0.5:45976' "$WORK/bind.out" \
+      || fail bind-assignment "$fixture: installer did not report 100.64.0.5:45976: $(cat "$WORK/bind.out")"
+    [[ "$(sha256sum < "$FIXHOME/services/ebbtop-agent/agent.env")" == "$before_env" ]] \
+      || fail bind-assignment "$fixture: agent.env was rewritten"
+    [[ "$(sha256sum < "$FIXHOME/services/ebbtop-agent/ebbtop.token")" == "$before_tok" ]] \
+      || fail bind-assignment "$fixture: token bytes changed"
+  done
+  note "$label"
+}
+
+case_bind_assignment() {
+  local name=bind-assignment pkg="$WORK/pkg-bind" out="$WORK/bind.out"
+  local before_env before_tok tok
+  extract "$ARCHIVE" "$pkg"
+  new_home bind
+  set_addr 100.64.0.5
+  run_installer "$pkg" --prebuilt > "$out" 2>&1 \
+    || fail "$name" "baseline install failed: $(cat "$out")"
+  [[ "$(grep -c '^EBBTOP_BIND=' "$FIXHOME/services/ebbtop-agent/agent.env")" == 1 ]] \
+    || fail "$name" "the installer wrote more than one EBBTOP_BIND line"
+  tok="$(cat "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
+  BIND_TAIL="EBBTOP_AGENT_PROCESSES_TTL_MS=500
+EBBTOP_AGENT_METRICS_TTL_MS=100
+EBBTOP_TOKEN=$tok
+"
+  BIND_TAIL_CRLF="EBBTOP_AGENT_PROCESSES_TTL_MS=500"$'\r\n'"EBBTOP_AGENT_METRICS_TTL_MS=100"$'\r\n'"EBBTOP_TOKEN=$tok"$'\r\n'
+
+  # --- an ordinary upgrade: one plain EBBTOP_BIND, nothing rewritten
+  before_env="$(sha256sum < "$FIXHOME/services/ebbtop-agent/agent.env")"
+  before_tok="$(sha256sum < "$FIXHOME/services/ebbtop-agent/ebbtop.token")"
+  set_addr ""
+  run_installer "$pkg" --prebuilt > "$out" 2>&1 \
+    || fail "$name" "ordinary upgrade failed: $(cat "$out")"
+  grep -qx 'listen: 100.64.0.5:45976' "$out" \
+    || fail "$name" "ordinary upgrade did not listen on 100.64.0.5:45976: $(cat "$out")"
+  [[ "$(sha256sum < "$FIXHOME/services/ebbtop-agent/agent.env")" == "$before_env" ]] \
+    || fail "$name" "ordinary upgrade rewrote agent.env"
+  [[ "$(sha256sum < "$FIXHOME/services/ebbtop-agent/ebbtop.token")" == "$before_tok" ]] \
+    || fail "$name" "ordinary upgrade changed the token bytes"
+  note "ordinary upgrade: one EBBTOP_BIND, exit 0, listen 100.64.0.5:45976, agent.env and token byte-identical"
+
+  # --- forms systemd reads as the private address are accepted
+  check_accepted "accepted plain, space-indented, tab-indented, 'KEY = value', trailing-space and CRLF forms as 100.64.0.5, agent.env untouched" \
+    plain space-indented tab-indented spaced-equals trailing-space crlf
+  check_accepted "accepted a plain bind with no final newline as 100.64.0.5, agent.env untouched" \
+    no-final-newline
+  check_accepted "commented '# EBBTOP_BIND=0.0.0.0' and ';EBBTOP_BIND=::' ignored, as systemd ignores them" \
+    comments
+
+  # --- duplicates, ambiguous and unsupported forms are refused before mutation
+  check_refusal valid-then-wildcard              "valid bind followed by a wildcard"              "ambiguous"
+  check_refusal wildcard-then-valid              "wildcard followed by a valid bind"              "ambiguous"
+  check_refusal space-indented-wildcard          "valid bind followed by a space-indented wildcard" "ambiguous"
+  check_refusal tab-indented-wildcard            "valid bind followed by a tab-indented wildcard" "ambiguous"
+  check_refusal indented-key-then-wildcard       "indented key followed by a wildcard"            "ambiguous"
+  check_refusal duplicate                        "two identical assignments"                      "ambiguous"
+  check_refusal lone-space-indented-wildcard     "a lone space-indented wildcard"                 "refusing bind address '0.0.0.0'"
+  check_refusal quoted                           "a quoted wildcard"                              "quoted or escaped values"
+  check_refusal backslash-escaped                "a backslash-escaped wildcard"                   "quoted or escaped values"
+  check_refusal exported                         "an exported assignment"                         "is not a plain KEY=VALUE assignment"
+  check_refusal no-equals                        "a non-comment line without '='"                 "non-comment line without '='"
+  check_refusal comments-no-bind                 "comments but no bind"                           "has no EBBTOP_BIND"
+  check_refusal vt-indented                      "a VT-indented bind"                             "the byte 0x0b is not supported"
+  check_refusal ff-indented                      "a FF-indented bind"                             "the byte 0x0c is not supported"
+  check_refusal vt-suffixed-key                  "a VT-suffixed key"                              "the byte 0x0b is not supported"
+  check_refusal ff-suffixed-key                  "a FF-suffixed key"                              "the byte 0x0c is not supported"
+  check_refusal nul-prefixed                     "a NUL-prefixed bind"                            "contains a NUL byte"
+  check_refusal vt-indented-no-newline           "a VT-indented bind with no final newline"       "the byte 0x0b is not supported"
+  check_refusal nul-on-own-line                  "a NUL on its own line before the bind"          "contains a NUL byte"
+  check_refusal nbsp-indented                    "an NBSP-indented bind"                          "the byte 0xc2 is not supported"
+  check_refusal vt-wildcard-after-plain          "a VT-indented wildcard after a plain bind"      "the byte 0x0b is not supported"
+  check_refusal cr-duplicate                     "a CR-separated duplicate"                       "ambiguous"
+  check_refusal crlf-spaced-key-tab-wildcard     "a spaced key and a tab-indented wildcard on CRLF lines" "ambiguous"
+
+  pass "$name" "ordinary upgrade unchanged; plain/indented/tabbed/spaced/CRLF/comment forms (incl. no final newline) read as systemd reads them; duplicate (incl. indented and CR-separated) forms refused; quoted/escaped/non-assignment forms refused; VT/FF-indented or -suffixed keys, NUL bytes and non-ASCII bytes refused - every refusal non-zero with an unchanged fixture, zero service/listener calls"
+}
+
+# ===========================================================================
+# 8. packaging refusals: dirty tree, wrong ELF machine, non-ELF, and a
 #    reproducible tarball. Skipped in --no-toolchain-only mode.
 # ===========================================================================
 case_packaging() {
@@ -655,6 +824,7 @@ if [[ "$MODE" == "all" ]]; then
   case_retention
   case_rollback
   case_source_parity
+  case_bind_assignment
   case_packaging
 fi
 

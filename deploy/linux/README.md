@@ -43,6 +43,45 @@ any setting appended after first install stay byte-identical, and
 `ebbtop.token` keeps its exact bytes and mode `600`. The previous binary is
 kept as `~/services/ebbtop-agent/bin/ebbtop-agent.bak`.
 
+### The `agent.env` syntax the installer accepts
+
+An existing `agent.env` is read to learn the address the unit will bind, and
+only a subset of systemd's `EnvironmentFile` grammar is supported. The check
+runs **after** the package is verified and **before** any write or any
+`systemctl`/`ss` call, so a file the installer cannot read exactly as systemd
+reads it is refused while nothing has changed. The accepted file is:
+
+- free of NUL bytes — systemd stops reading the file at the first NUL, so an
+  `EBBTOP_BIND` after it would be ignored and the agent would fall back to
+  `0.0.0.0`;
+- free of every byte outside printable ASCII, TAB, CR and LF; any other byte is
+  refused naming it (`the byte 0x0b is not supported`), because systemd treats
+  VT, FF, other control bytes and non-ASCII bytes such as NBSP as part of a key
+  or value rather than as whitespace;
+- line-ended by LF, CRLF or a bare CR, since CR ends a line exactly as systemd
+  treats it;
+- indented only with space and TAB, and only at the start or end of a line;
+- carrying exactly one plain, unquoted `EBBTOP_BIND=<IP literal>` assignment: no
+  quotes, no backslash escapes, no `export`, and no second assignment in any
+  spelling (duplicates are refused instead of resolved, because systemd applies
+  the last one and the address would then depend on line order);
+- plain `KEY=VALUE` on every other line, with keys matching
+  `[A-Za-z_][A-Za-z0-9_]*`, or `#`/`;` comment lines.
+
+Every unsupported or ambiguous form exits non-zero with exactly one error line.
+
+#### Why the old "leading whitespace is fine" promise was false
+
+An earlier revision of this file promised that leading whitespace before the key
+was ignored. That was true only for the space and TAB that systemd's parser
+skips; it was false for VT (`0x0b`), FF (`0x0c`) and NBSP, which the installer
+silently stripped but systemd keeps as part of the key. A file such as
+`<VT>EBBTOP_BIND=100.64.0.5` therefore validated as the private address, was
+installed, and reported success while the unit loaded no `EBBTOP_BIND` at all —
+the agent then listened on `0.0.0.0`. The installer now decides from the raw
+bytes, refuses those bytes by name, and cannot validate an address the unit will
+not load.
+
 If the new binary does not come up (`systemctl --user is-active` is not
 `active` after the restart), the installer restores `ebbtop-agent.bak`,
 restarts the unit and verifies that the restored binary has the previous
@@ -64,7 +103,10 @@ The installer verifies the package first and mutates nothing if that fails:
    `ebbtop-agent.service` by bare name and every **sha256** must match.
 4. The unit must keep the documented contract (`EnvironmentFile` at
    `%h/services/ebbtop-agent/agent.env`, `ExecStart` at the installed binary).
-5. The bind address must be a configurable non-wildcard, non-loopback IP.
+5. The bind address must be a configurable non-wildcard, non-loopback IP. An
+   existing `agent.env`, when there is one, must also be a file the installer
+   can read exactly as systemd reads it (see *The `agent.env` syntax the
+   installer accepts*).
 
 Only then does it move the current binary aside, write the unit and call
 `systemctl --user`. A truncated archive, a non-gzip file, a modified member, an
@@ -116,11 +158,23 @@ the member list, the size and the tarball **sha256**.
 `test-prebuilt-install.sh` runs every case inside a disposable fixture `HOME`
 with stub `systemctl`, `ss`, `loginctl` and failing `git`/`cargo`/`rustc` stubs
 on `PATH`, so the real `~/services/ebbtop-agent` and the live unit are never
-touched. Cases: no-toolchain install, invalid archive, tampered member, member
-set, wrong architecture, token retention, settings retention, rollback (with and
-without `.bak`), and the packaging refusals. `--no-toolchain-only` runs just the
-first. Each negative case diffs the whole fixture home and the service-manager
-call log before and after, which is how "refused before any mutation" is proved.
+touched. Cases: no-toolchain install, bare `agent.env`, invalid archive,
+tampered member, member set, wrong architecture, token retention, settings
+retention, rollback (with and without `.bak`), source-install parity, the
+`agent.env` bind-assignment grammar and the packaging refusals.
+`--no-toolchain-only` runs just the first. Each negative case diffs the whole
+fixture home and the service-manager and `ss` call logs before and after, which
+is how "refused before any mutation" is proved; each bind-assignment refusal
+also asserts exactly one installer error line.
+
+The bind-assignment case pins the byte grammar above: an ordinary upgrade keeps
+`agent.env` and the token byte-identical, the plain/space-indented/tab-indented/
+`KEY = value`/trailing-space/CRLF/comment forms (and a plain file with no final
+newline) are accepted and read as systemd reads them, and every refused form —
+duplicates in any spelling, quoted or escaped values, `export`, a non-comment
+line without `=`, a file with no bind, VT/FF-indented or -suffixed keys, NUL
+bytes and non-ASCII bytes — exits non-zero with one error line, an unchanged
+fixture and zero `systemctl`/`ss` calls.
 
 What this harness cannot prove, and what still needs a native host or VM:
 
