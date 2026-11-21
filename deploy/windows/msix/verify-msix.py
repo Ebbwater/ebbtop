@@ -151,11 +151,15 @@ def main(argv: list[str]) -> int:
                     block.get("Hash") == encoded,
                     f"block {i} of {name!r} does not match its block-map hash",
                 )
-                # The SDK records the uncompressed block size; it must agree.
+                # Block@Size is the COMPRESSED size of the block as stored in
+                # the package (observed on Microsoft's own makemsix output:
+                # a full 65536-byte block carries Size < 65536). The hash
+                # above is the integrity invariant; Size only has to be a
+                # plausible stored size for the block.
                 if block.get("Size") is not None:
                     check(
-                        int(block.get("Size")) == len(chunk),
-                        f"block {i} of {name!r} has a wrong size in the block map",
+                        0 < int(block.get("Size")) <= len(chunk),
+                        f"block {i} of {name!r} has an implausible size in the block map",
                     )
         for name in names:
             if name in ("AppxBlockMap.xml", "[Content_Types].xml"):

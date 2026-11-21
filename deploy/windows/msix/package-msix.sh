@@ -80,7 +80,7 @@ python3 deploy/windows/versioninfo.py \
   --require-product-name EbbTop \
   --require-version "$VERSION" \
   "$STAGE/ebbtop.exe" >/dev/null
-if strings -a "$STAGE/ebbtop.exe" | grep -qF 'install.ps1'; then
+if [[ -n "$(strings -a "$STAGE/ebbtop.exe" | grep -F 'install.ps1')" ]]; then
   echo "store build still references install.ps1 (updater not compiled out)" >&2
   exit 1
 fi

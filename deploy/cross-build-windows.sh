@@ -37,9 +37,13 @@ export AR="$LM/llvm-ar"
 export EBBTOP_REQUIRE_VERSIONINFO=1
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=x86_64-w64-mingw32-clang
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="-C target-feature=+crt-static"
+# Optional feature passthrough: package-msix.sh sets EBBTOP_CARGO_FEATURES=store
+# for the Microsoft Store build (updater compiled out). Empty means the regular
+# release build with default features.
+FEATURES="${EBBTOP_CARGO_FEATURES:-}"
 cd "$REPO"
 rustup target add "$T" >/dev/null
-cargo build --release --locked --target "$T" -p ebbtop-gui -p ebbtop-core
+cargo build --release --locked --target "$T" -p ebbtop-gui -p ebbtop-core ${FEATURES:+--features "$FEATURES"}
 mkdir -p dist
 cp "target/$T/release/ebbtop.exe" "target/$T/release/ebbtop-probe.exe" dist/
 cp deploy/windows/install.ps1 dist/
