@@ -1391,7 +1391,12 @@ impl App {
             let want_focus = !self.settings_open && ui.input(|i| i.key_pressed(egui::Key::Slash));
             let mut clear_workload = false;
             ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.filter).hint_text("filter name / user / pid (/)").desired_width(220.0));
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.filter)
+                        .hint_text("filter name / user / pid (/)")
+                        .desired_width(220.0)
+                )
+                .accessible_name("Filter processes");
                 if want_focus {
                     r.request_focus();
                 }
@@ -2037,13 +2042,13 @@ impl App {
                     let mut token_edited = false;
                     egui::Grid::new("onboard").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
                         ui.label("Name");
-                        ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver"));
+                        ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver")).accessible_name("Name");
                         ui.end_row();
                         ui.label("URL");
-                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text("myserver or ws://host:45976/ws"));
+                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text("myserver or ws://host:45976/ws")).accessible_name("URL");
                         ui.end_row();
                         ui.label("Token");
-                        let tok = ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text("paste the agent token"));
+                        let tok = ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text("paste the agent token")).accessible_name("Agent token");
                         token_edited = tok.changed();
                         ui.end_row();
                     });
@@ -2299,9 +2304,9 @@ impl App {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Name");
-            ui.add(egui::TextEdit::singleline(&mut self.source_name_edit).desired_width(110.0).hint_text("myserver"));
+            ui.add(egui::TextEdit::singleline(&mut self.source_name_edit).desired_width(110.0).hint_text("myserver")).accessible_name("New source name");
             ui.label("URL");
-            ui.add(egui::TextEdit::singleline(&mut self.source_url_edit).desired_width(220.0).hint_text("ws://host:port/ws"));
+            ui.add(egui::TextEdit::singleline(&mut self.source_url_edit).desired_width(220.0).hint_text("ws://host:port/ws")).accessible_name("New source URL");
             if ui.button("Add").clicked() {
                 let name = self.source_name_edit.clone();
                 let url = self.source_url_edit.clone();
@@ -2347,7 +2352,8 @@ impl App {
                 egui::TextEdit::singleline(&mut self.pair_addr_edit)
                     .desired_width(220.0)
                     .hint_text("host or ws://host:45976/ws"),
-            );
+            )
+            .accessible_name("Address to pair with");
             if ui
                 .button("Pair with code")
                 .on_hover_text("pair with the address you typed, using a 6-digit code")
@@ -2403,7 +2409,10 @@ impl App {
                 let _ = store::save_config(&self.cfg);
             }
         });
-        if ui.add(egui::Slider::new(&mut self.cfg.top_frac, 0.25..=0.75).text("Top height")).changed() {
+        let top_height = ui
+            .add(egui::Slider::new(&mut self.cfg.top_frac, 0.25..=0.75).text("Top height"))
+            .accessible_name("Top height");
+        if top_height.changed() {
             let _ = store::save_config(&self.cfg);
         }
         ui.separator();
@@ -2435,11 +2444,12 @@ impl App {
         }
         egui::Grid::new("conn").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
             ui.label("Agent URL");
-            ui.add(egui::TextEdit::singleline(&mut self.url_edit).desired_width(300.0).hint_text("ws://host:port/ws"));
+            ui.add(egui::TextEdit::singleline(&mut self.url_edit).desired_width(300.0).hint_text("ws://host:port/ws")).accessible_name("Agent URL");
             ui.end_row();
             ui.label("Token");
             ui.add(egui::TextEdit::singleline(&mut self.token_edit).password(true).desired_width(300.0)
-                .hint_text("leave empty to keep the saved token"));
+                .hint_text("leave empty to keep the saved token"))
+                .accessible_name("Agent token");
             ui.end_row();
             ui.label("Stored");
             ui.label(match &self.token_src {
@@ -2801,6 +2811,8 @@ mod tests {
     use super::*;
     use ebbtop_core::client::Event;
     use ebbtop_core::wire::{DiskInfo, DiskIo, GpuMetrics, Metrics, NetworkInfo, Process, Processes};
+
+    mod a11y;
 
     fn fake_state(app: &App, now: u64) {
         let mut s = app.shared().lock().unwrap().clone();
@@ -4456,30 +4468,33 @@ mod tests {
     #[test]
     fn narrow_bar_keeps_refusal_but_hides_success() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
-        let now = client::now_ms();
-        fake_state(&app, now);
-        // Refusal stays visible at 640 px.
-        app.shared().lock().unwrap().apply(
-            Event::KillResult {
-                r: ebbtop_core::wire::KillResult {
-                    ok: false, pid: 4242, signal: "TERM".into(), error: Some("pid 1".into()),
+        fake_state(&app, client::now_ms());
+        // Re-arm the reply before every render: the status bar retires a
+        // successful kill after KILL_OK_TTL_MS of wall clock, so a frame that
+        // lands late under a loaded suite would otherwise assert on a reply
+        // that has already expired. Same class of harness fix as the pinned
+        // sample age in `render_age`, and the assertions are unchanged.
+        fn kill_reply(app: &App, ok: bool, error: Option<&str>) {
+            let now = client::now_ms();
+            app.shared().lock().unwrap().apply(
+                Event::KillResult {
+                    r: ebbtop_core::wire::KillResult {
+                        ok, pid: 4242, signal: "TERM".into(), error: error.map(str::to_string),
+                    },
+                    recv_ms: now,
                 },
-                recv_ms: now,
-            },
-            now,
-        );
+                now,
+            );
+        }
+        // Refusal stays visible at 640 px.
+        kill_reply(&app, false, Some("pid 1"));
         let t = render(&mut app, 640.0, 520.0);
         assert!(t.iter().any(|x| x.contains("kill 4242 refused")), "refusal must show narrow: {t:?}");
         // Transient success hides at 640 px but shows wide.
-        app.shared().lock().unwrap().apply(
-            Event::KillResult {
-                r: ebbtop_core::wire::KillResult { ok: true, pid: 4242, signal: "TERM".into(), error: None },
-                recv_ms: now,
-            },
-            now,
-        );
+        kill_reply(&app, true, None);
         let t = render(&mut app, 640.0, 520.0);
         assert!(!t.iter().any(|x| x.contains("kill 4242")), "success should hide narrow: {t:?}");
+        kill_reply(&app, true, None);
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("kill 4242 TERM sent")), "{t:?}");
     }
