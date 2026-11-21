@@ -6,7 +6,13 @@
 mod app;
 mod discovery;
 mod store;
+// The updater (release check, verified download, install.ps1/macOS apply) is
+// compiled out of Store builds: the MSIX is sealed and Microsoft delivers
+// updates for Store apps. Everything else -- including the version string in
+// `version` -- is shared.
+#[cfg(not(feature = "store"))]
 mod update;
+mod version;
 mod widgets;
 
 /// Best-effort crash reporter: the Windows GUI subsystem hides stderr, so a

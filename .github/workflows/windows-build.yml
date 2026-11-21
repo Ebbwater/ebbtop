@@ -1,17 +1,17 @@
 name: windows-build
 
-# Windows x64 release build.
+# Windows x64 release build for SignPath.
 #
-# This is the release builder for the Windows artifacts, including the packaged
-# build that goes to the Microsoft Store through Partner Center. It runs the
-# same recipe as k-server -- deploy/cross-build-windows.sh with the same pinned
-# llvm-mingw tarball -- so the published bytes and the locally verified bytes
-# cannot drift.
+# SignPath Foundation verifies artifact origin: every job that leads to a
+# signing request must run on a GitHub-hosted runner. This workflow is that
+# origin. It runs the same recipe as k-server -- deploy/cross-build-windows.sh
+# with the same pinned llvm-mingw tarball -- so the signed bytes and the
+# locally verified bytes cannot drift.
 #
 # Triggers are tag-only plus manual dispatch, never a branch push or a pull
 # request, so the workflow cannot consume hosted-runner minutes outside a
 # release. The Linux test suite stays on the project's own CI runner in ci.yml:
-# tests do not belong in a release build, and hosted minutes are billed.
+# tests are not part of a signing request, and hosted minutes are billed.
 on:
   push:
     tags: ["v*"]
@@ -30,9 +30,9 @@ env:
 jobs:
   windows-x64:
     name: Windows x64 cross-build (hosted runner)
-    # GitHub-hosted. Keep it that way: a release artifact should come from a
-    # runner that the public workflow definition describes, not from a machine
-    # outside the repository's build story.
+    # GitHub-hosted ONLY. Never add a private-runner label to this job: an
+    # artifact built on private infrastructure fails SignPath origin
+    # verification and cannot be signed.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -77,6 +77,18 @@ jobs:
           python3 deploy/windows/versioninfo.py dist/ebbtop.exe dist/ebbtop-probe.exe \
             | tee dist/VERSIONINFO.txt
 
+      # ---------------------------------------------------------------------
+      # SignPath is NOT wired up. EbbTop applied to the SignPath Foundation
+      # and was declined for insufficient download reputation, so no signing
+      # credential exists and no signing request is made. The GitHub ZIP
+      # stays unsigned; docs/SIGNING.md states that posture.
+      #
+      # If a signing identity is ever procured, the submit step goes HERE, in
+      # this job on ubuntu-latest (GitHub-hosted, because origin is verified),
+      # signing BEFORE the upload below, with SHA256SUMS/BUILD/ZIP regenerated
+      # from the signed bytes (a signature changes the file digest).
+      # ---------------------------------------------------------------------
+
       - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -94,3 +106,193 @@ jobs:
             dist/BUILD
             dist/VERSIONINFO.txt
             dist/EbbTop-Windows-x64.zip
+
+  # ---------------------------------------------------------------------------
+  # Microsoft Store package: the MSIX we submit to Partner Center.
+  #
+  # Same gating and the same hosted-runner rule as windows-x64, and the same
+  # cross-build recipe; the only difference is EBBTOP_CARGO_FEATURES=store, set
+  # inside deploy/windows/msix/package-msix.sh, which compiles the in-app
+  # updater out (the MSIX is sealed and the Store delivers updates).
+  #
+  # The package is UNSIGNED on purpose: the Store re-signs MSIX with a
+  # Microsoft certificate at publish time, so no CA certificate is needed for
+  # this channel. Do not add a signing step here.
+  # ---------------------------------------------------------------------------
+  store-package:
+    name: Microsoft Store MSIX (x64, hosted runner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out the tagged release commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Toolchain report
+        run: |
+          rustc --version
+          cargo --version
+          cmake --version | head -1
+          uname -srm
+
+      - name: Install the pinned llvm-mingw toolchain
+        run: |
+          set -euo pipefail
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_RELEASE}/${LLVM_MINGW_ARCHIVE}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/llvm-mingw.tar.xz" "$url"
+          echo "${LLVM_MINGW_SHA256}  $RUNNER_TEMP/llvm-mingw.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/llvm-mingw"
+          tar -xJf "$RUNNER_TEMP/llvm-mingw.tar.xz" -C "$RUNNER_TEMP/llvm-mingw" --strip-components=1
+          "$RUNNER_TEMP/llvm-mingw/bin/llvm-windres" --version
+          "$RUNNER_TEMP/llvm-mingw/bin/x86_64-w64-mingw32-clang" --version
+
+      - name: Build the pinned MSIX SDK (makemsix)
+        run: bash deploy/windows/msix/bootstrap-makemsix.sh "$RUNNER_TEMP/ebbtop-msix-sdk"
+
+      - name: Store-feature unit tests
+        # The update UI must be provably absent from rendered text; this is the
+        # same suite the ci.yml runner runs, with the feature on.
+        run: cargo test --locked -p ebbtop-gui --features store
+
+      - name: Build and pack the unsigned MSIX
+        env:
+          EBBTOP_LLVM_MINGW_BIN: ${{ runner.temp }}/llvm-mingw/bin
+          EBBTOP_MAKEMSIX: ${{ runner.temp }}/ebbtop-msix-sdk/bin/makemsix
+        run: bash deploy/windows/msix/package-msix.sh
+
+      - name: Record package identity
+        run: |
+          set -euo pipefail
+          cat dist/msix/BUILD
+          cat dist/msix/*.sha256
+          python3 deploy/windows/versioninfo.py dist/ebbtop.exe
+
+      - name: Upload the unsigned MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: EbbTop-Store-msix-${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/msix/EbbTop-*-x64.msix
+            dist/msix/EbbTop-*-x64.msix.sha256
+            dist/msix/BUILD
+
+  # ---------------------------------------------------------------------------
+  # Windows App Certification Kit gate.
+  #
+  # WACK is the test kit the Store runs during certification, and appcert.exe
+  # ships with the Windows SDK already present on the windows-latest image, so
+  # it runs here instead of being a manual submission-time task.
+  #
+  # The package has to be installed to be tested, and a package can only be
+  # installed when it is signed: so this job signs a COPY with a throwaway
+  # self-signed certificate whose subject is exactly the manifest Publisher
+  # (CN=32700780-...), trusts it in the machine's TrustedPeople store, installs
+  # the copy, runs appcert, and discards the certificate with the runner. The
+  # released artifact is still the unsigned package from store-package.
+  #
+  # continue-on-error: a headless runner can produce incidental FAILs (no
+  # interactive session for some UI checks). The report XML is the evidence and
+  # is uploaded even then; a real deployability FAIL still fails this job's
+  # "Parse the WACK report" step once it is read.
+  # ---------------------------------------------------------------------------
+  wack-gate:
+    name: WACK (Windows App Certification Kit)
+    needs: store-package
+    runs-on: windows-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      # Must be byte-identical to Package/Identity/@Publisher in the manifest;
+      # a mismatch means Add-AppxPackage refuses the package.
+      MSIX_PUBLISHER: CN=32700780-5AAE-4D15-A591-B49543B86C16
+      MSIX_IDENTITY_NAME: Ebbwater.EbbTop
+    steps:
+      - name: Check out the tagged release commit
+        uses: actions/checkout@v4
+
+      - name: Download the unsigned MSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: EbbTop-Store-msix-${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
+          path: msix
+
+      - name: Check appcert is present
+        shell: pwsh
+        run: |
+          $appcert = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\App Certification Kit\appcert.exe'
+          if (-not (Test-Path $appcert)) { throw "appcert.exe not found at $appcert" }
+          & $appcert 2>&1 | Select-Object -First 5
+
+      - name: Sign a throwaway copy for side-loading
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msix = Get-ChildItem msix -Filter *.msix | Select-Object -First 1
+          Copy-Item $msix.FullName wack-test.msix
+          # Self-signed, subject == manifest Publisher, one-day validity, no CA.
+          $cert = New-SelfSignedCertificate `
+            -Type Custom `
+            -Subject $env:MSIX_PUBLISHER `
+            -KeyUsage DigitalSignature `
+            -FriendlyName 'EbbTop WACK throwaway' `
+            -CertStoreLocation 'Cert:\CurrentUser\My' `
+            -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}') `
+            -NotAfter (Get-Date).AddDays(1)
+          # TrustedPeople is where Windows looks for a packaged app's signer.
+          $pub = Join-Path $env:RUNNER_TEMP 'ebbtop-wack.cer'
+          Export-Certificate -Cert $cert -FilePath $pub | Out-Null
+          Import-Certificate -FilePath $pub -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+          Import-Certificate -FilePath $pub -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople' | Out-Null
+          # signtool ships with the same SDK.
+          $signtool = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin\x64\signtool.exe'
+          & $signtool sign /fd SHA256 /a /s My /n $env:MSIX_PUBLISHER wack-test.msix
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed with $LASTEXITCODE" }
+          (Get-AuthenticodeSignature wack-test.msix).Status
+
+      - name: Install the signed copy
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-AppxPackage -Path wack-test.msix -ForceApplicationShutdown
+          Get-AppxPackage -Name $env:MSIX_IDENTITY_NAME |
+            Select-Object Name, PackageFamilyName, Status, SignatureKind | Format-List
+
+      - name: Run the Windows App Certification Kit
+        shell: pwsh
+        run: |
+          $appcert = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\App Certification Kit\appcert.exe'
+          $report = Join-Path $env:RUNNER_TEMP 'wack-report.xml'
+          & $appcert reset
+          & $appcert test -appxpackagepath (Resolve-Path wack-test.msix) -reportoutputpath $report
+          Write-Host "appcert exit: $LASTEXITCODE"
+          if (-not (Test-Path $report)) { throw "no WACK report at $report" }
+          Copy-Item $report wack-report.xml
+
+      - name: Parse the WACK report
+        shell: pwsh
+        run: |
+          # A blocking (non-optional) FAIL fails the job. The job itself is
+          # continue-on-error so the report always uploads; read the summary
+          # above and the artifact to see what failed.
+          pwsh -NoProfile -File deploy/windows/msix/parse-wack-report.ps1 `
+            -ReportPath wack-report.xml
+          exit $LASTEXITCODE
+        continue-on-error: true
+
+      - name: Uninstall the test package
+        if: always()
+        shell: pwsh
+        continue-on-error: true
+        run: Remove-AppxPackage -Package ((Get-AppxPackage -Name $env:MSIX_IDENTITY_NAME).PackageFullName)
+
+      - name: Upload the WACK report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: EbbTop-WACK-report-${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: wack-report.xml

@@ -348,24 +348,40 @@ temp=58C` over the tailnet probe).
 - `pairing.json` and `clients.json` are agent state in `~/services/ebbtop-agent`, beside `agent.env`, but they are not in the unit's `EnvironmentFile`. `install-agent.sh --purge` deletes them with the token and the unit; a plain uninstall leaves them in place.
 - Discovery cannot cross a broadcast boundary (see "Why discovery is UDP broadcast"), and it reports the hostname the agent already serves over ws, so it adds reachability, not information.
 
-## Windows distribution
+## Code signing
 
-EbbTop for Windows is moving to the Microsoft Store, with the listing created in
-Partner Center. A Store install is signed by Microsoft on submission when the
-app ships as an MSIX package, which is why the packaging comes before the
-listing. Until that listing is live, the Windows download is the per-user ZIP on
-the [product page](https://www.ebbwater.net/ebbtop/) and it is unsigned, so
-Windows may show a SmartScreen warning on first run. What is signed, what stays
-unsigned (the Linux agent archive, the macOS bundle), and how to check a
-download are stated in [docs/SIGNING.md](docs/SIGNING.md).
+**Windows downloads from GitHub are unsigned.** Integrity comes from the
+published `SHA256SUMS` over HTTPS: compare the hash of what you downloaded
+before you run it. This is not a temporary state — EbbTop applied to the
+[SignPath Foundation](https://signpath.org) open source signing program and
+SignPath declined the application for insufficient download reputation, so
+there is no signing certificate and no pending application. If a SmartScreen
+warning or a Defender `!ml` quarantine appears, it is a reputation false
+positive, not a modified download: check the hash and decide whether to
+exclude it yourself.
 
-The Windows executables carry the metadata a packaged build needs
-(`ProductName` EbbTop, file and product version from the crate version) and the
-cross-build refuses to package an exe whose PE version block is missing or
-wrong. The release build is `.github/workflows/windows-build.yml`: it runs the
-same `deploy/cross-build-windows.sh` recipe on GitHub-hosted `ubuntu-latest`
-with a pinned llvm-mingw toolchain, and it only triggers on `v*` tags or a
-manual dispatch, so it never runs for an ordinary push.
+**The Microsoft Store is the signed channel.** EbbTop is packaged as an MSIX
+for the Store, and Microsoft re-signs it with a Microsoft certificate during
+publishing, so a Store install carries a trusted signature and no SmartScreen
+reputation problem. See [the Store listing pack](docs/store-listing.md) for the
+listing copy and [docs/SIGNING.md](docs/SIGNING.md) for what each artifact
+carries.
+
+Both Windows executables already carry the metadata a package needs
+(`ProductName` EbbTop, file and product version from the crate version) and
+the cross-build refuses to package an exe whose PE version block is missing or
+wrong. Two workflows exist, so they cannot drift:
+
+- `.github/workflows/windows-build.yml` `windows-x64` builds the GitHub ZIP
+  with `deploy/cross-build-windows.sh` on hosted `ubuntu-latest` with a pinned
+  llvm-mingw toolchain.
+- The same workflow's `store-package` job builds the MSIX from the same recipe
+  with the `store` cargo feature (no in-app updater, since the Store delivers
+  updates), and `wack-gate` runs Microsoft's Windows App Certification Kit
+  against it on `windows-latest`, uploading the report as an artifact.
+
+Both trigger on `v*` tags or manual dispatch only, so neither runs for an
+ordinary push.
 
 ## Phase 2 kill: implemented
 

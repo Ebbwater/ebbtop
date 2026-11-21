@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  EbbTop package manifest (Microsoft Store MSIX, packaged Win32 desktop app).
+
+  These identity values were issued by Partner Center when the app name was
+  reserved. They are public distribution identities, not secrets, and they
+  must match Partner Center byte-for-byte or the upload is rejected:
+
+    Package/Identity/@Name              Ebbwater.EbbTop
+    Package/Identity/@Publisher         CN=32700780-5AAE-4D15-A591-B49543B86C16
+    Package/Properties/PublisherDisplayName  Ebbwater
+    Package Family Name (for reference)  Ebbwater.EbbTop_46f4w9xy8kqdr
+    Store ID (for reference)            9PJJXH1SBQ23
+
+  Package/Identity/@Version is the four-part form of the workspace version
+  (Cargo.toml: 0.2.9 -> 0.2.9.0). deploy/windows/msix/package-msix.sh reads
+  this file as-is and refuses to pack when the version here does not match
+  Cargo.toml, so a release bump is a two-line, reviewable change (version
+  here plus Cargo.toml) rather than a template substitution at build time.
+  The Windows VERSIONINFO block stamped by crates/ebbtop-gui/build.rs carries
+  the same product name and version; the packaging script re-reads it from
+  the built PE and refuses a mismatch.
+
+  No signature here on purpose: the Microsoft Store re-signs the MSIX with a
+  Microsoft certificate during publishing, which is why this channel needs no
+  CA certificate. The only local signature ever made is inside the WACK gate
+  (.github/workflows/windows-build.yml): a throwaway self-signed certificate
+  whose subject is exactly the Publisher above, so the package can be
+  side-loaded on a disposable runner for certification testing.
+-->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    IgnorableNamespaces="uap rescap">
+
+  <Identity
+      Name="Ebbwater.EbbTop"
+      Publisher="CN=32700780-5AAE-4D15-A591-B49543B86C16"
+      Version="0.2.9.0"
+      ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>EbbTop</DisplayName>
+    <PublisherDisplayName>Ebbwater</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Live monitor for your own Linux hosts: CPU, memory, network, disk and a sortable process table.</Description>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <!-- Full-trust packaged desktop app (not UWP): the app is a plain Win32
+         exe that opens its own windows, and it needs outbound sockets for
+         the hosts the user configures. Nothing else is requested. -->
+    <rescap:Capability Name="runFullTrust" />
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="EbbTop" Executable="ebbtop.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+          DisplayName="EbbTop"
+          Description="Live monitor for your own Linux hosts"
+          BackgroundColor="transparent"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" ShortName="EbbTop" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#23272B" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+</Package>

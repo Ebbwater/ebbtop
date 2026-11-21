@@ -1,72 +1,138 @@
-# EbbTop Windows distribution and signing
+# EbbTop Code Signing Policy
 
-This document describes how the EbbTop Windows build reaches users, what is
-signed and what is not, and how to check a download. It describes the route as
-it stands and does not claim a signature that does not exist yet.
+This document states how EbbTop artifacts are signed today, how a signed
+artifact traces back to its source, and what is unsigned. It describes the
+current posture, not a plan.
 
-## Where the Windows build ships
+## The short version
 
-EbbTop for Windows is moving to the Microsoft Store. The listing is created in
-Partner Center, which holds the app's publisher identity, and that identity is
-what a package declares.
+- **GitHub downloads are unsigned.** The Windows executables, the Windows ZIP
+  and the Linux agent archive on [Releases](https://github.com/Ebbwater/ebbtop/releases)
+  carry no Authenticode signature. Integrity comes from the published
+  `SHA256SUMS` over HTTPS (and the archive's own internal manifest).
+- **The Microsoft Store channel is signed by Microsoft.** The Store takes the
+  MSIX we submit and re-signs it with a Microsoft certificate during
+  publishing. The signer shown to users is Microsoft; the publisher shown on
+  the listing is Ebbwater.
+- **No code signing certificate is currently purchased.** There is no OV or EV
+  certificate, no cloud HSM subscription, and no pending application.
 
-A Store install is signed by Microsoft during submission when the app ships as
-an **MSIX** package. An MSI or EXE submitted to the Store does not receive Store
-signing and would need a publisher code signing certificate of its own, so the
-package is prepared as MSIX. Until the listing is live, the direct download is
-how the app is installed.
+## Why the GitHub downloads are unsigned
 
-## What is signed today
+EbbTop applied to the [SignPath Foundation](https://signpath.org) open source
+signing program. SignPath declined the application: at the time of review the
+project did not have the download reputation their criteria require. That
+route is closed, and no certificate authority product has been purchased
+instead.
 
-Nothing. The current Windows build is a per-user ZIP
-(`EbbTop-Windows-x64.zip`) holding unsigned executables, so Windows may show a
-SmartScreen warning on first run. When the Store listing ships, installs from
-the Store carry a Microsoft issued signature, and this document names the
-submission that first carries it.
+The practical consequence, stated plainly: a browser download of `ebbtop.exe`
+may show a SmartScreen warning, and Defender's ML heuristics may quarantine it
+until reputation accumulates. Verify the download against `SHA256SUMS`; if it
+is a false positive, excluding it is the machine owner's decision. If this
+posture ever changes, this document changes in the same commit as the build
+change.
+
+The Store channel avoids the problem: Microsoft signs the MSIX, so a Store
+install carries a trusted signature.
+
+## The Microsoft Store channel
+
+- Package: MSIX for a packaged Win32 desktop app (`ebbtop.exe`, x64), built by
+  `.github/workflows/windows-build.yml` (`store-package` job) from the tagged
+  release commit with the `store` cargo feature enabled, so the app carries no
+  self-updater.
+- Identity, issued by Partner Center when the app name was reserved:
+
+  | Field | Value |
+  |---|---|
+  | Package/Identity Name | `Ebbwater.EbbTop` |
+  | Publisher | `CN=32700780-5AAE-4D15-A591-B49543B86C16` |
+  | Package Family Name | `Ebbwater.EbbTop_46f4w9xy8kqdr` |
+  | Store ID | `9PJJXH1SBQ23` |
+
+  Source of truth: `deploy/windows/msix/AppxManifest.xml`.
+- The package we produce is **unsigned**. The Store re-signs it; a self-signed
+  package would be rejected at upload, so the workflow has no signing step.
+- The `wack-gate` job does sign a copy locally, with a throwaway self-signed
+  certificate whose subject is the Publisher DN above, only to side-load the
+  package on a disposable runner and run Microsoft's Windows App Certification
+  Kit. That certificate is created and discarded inside one job; it never
+  signs a release artifact and is never published.
+
+What the Microsoft signature means: the bytes match the package we submitted
+and Microsoft vouches they have not been altered since. It is not an audit of
+the source.
 
 ## Build provenance
 
-Every Windows artifact is built by the public workflow in
-[`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml)
-from the tagged release commit in
-[github.com/Ebbwater/ebbtop](https://github.com/Ebbwater/ebbtop). The workflow
-runs on GitHub hosted runners, uses a pinned cross compiler, and is triggered by
-`v*` tags or manual dispatch only. The packaged executables carry a
-`VERSIONINFO` block with product name `EbbTop` and the release version, which is
-also what Store packaging expects. Locally built binaries are never published as
-a release.
+Every package comes from the project's public GitHub Actions workflow at the
+tagged release commit in
+[github.com/Ebbwater/ebbtop](https://github.com/Ebbwater/ebbtop):
 
-## What stays unsigned
+- The `windows-x64`, `store-package` and `wack-gate` jobs run on GitHub-hosted
+  runners (`ubuntu-latest`, `windows-latest`), triggered by `v*` tags or manual
+  dispatch only, so nothing runs for an ordinary push.
+- The workflow and the scripts it runs (`deploy/cross-build-windows.sh`,
+  `deploy/windows/msix/package-msix.sh`, `deploy/windows/msix/make-assets.py`,
+  `deploy/windows/msix/verify-msix.py`) live in the repository and are
+  reviewed like any other change.
+- The package records its commit in `dist/msix/BUILD`. The packaging script
+  re-reads product name and version out of the built PE
+  (`deploy/windows/versioninfo.py`) and refuses a mismatch with the manifest.
+- `deploy/windows/msix/verify-msix.py` validates the packed bytes: OPC parts,
+  manifest shape, every referenced asset present, every block-map hash over the
+  packaged files, and that the package is unsigned.
+- The MSIX SDK used to pack is pinned by commit
+  (`deploy/windows/msix/bootstrap-makemsix.sh`) and its source worktree digest
+  is checked before compiling.
 
-- `ebbtop-agent-linux-x86_64.tar.gz`, the prebuilt Linux agent, is built from
-  the same tagged commit and is not code signed on any platform. Integrity comes
-  from the digest the release reports, which `ebbtop-install.sh` checks before
-  running anything, plus the archive's own `SHA256SUMS`.
-- The macOS bundle is ad-hoc signed only. It moves to Apple Developer ID
-  signing and notarization when that identity exists.
-- Any artifact not named above is unsigned.
+Locally built binaries are never signed and are never published.
 
-## Checking a download
+## Release approval
 
-The release publishes `SHA256SUMS` beside the artifacts, and the Windows ZIP
-carries a copy inside it:
+Nothing is published automatically. A release is the maintainer's decision: the
+tag is created by hand, the workflow artifacts are inspected, and the Store
+submission is a manual upload in Partner Center.
 
-    sha256sum -c SHA256SUMS                        # Linux
-    Get-FileHash .\ebbtop.exe -Algorithm SHA256    # Windows PowerShell
+## Artifact metadata
 
-A checksum confirms the bytes you received match the bytes that were published.
-It does not prove who published them, which is what a signature does. Until a
-signed package exists, the HTTPS download from the project's release page is the
-trust anchor.
+Both Windows executables carry product name `EbbTop` and a file and product
+version matching the release tag. The cross-build refuses to package an exe
+whose PE version block is missing or wrong, and the manifest's
+`Identity/Version` must equal the workspace version or the packaging script
+stops.
 
-## Team and account requirements
+## Unsigned artifacts, stated plainly
 
-- The repository and all project accounts require multi-factor authentication.
-- The maintainer holds the Author, Reviewer, and Approver roles used by the
-  store submission and release process; none of them is delegated. The people in
-  those roles are public on
-  [the organization people page](https://github.com/orgs/Ebbwater/people), and
-  the repository grants write access through the Ebbwater Members team.
-- Reports about a release artifact, suspected malicious behavior, or a policy
-  violation can be raised as a GitHub issue; the project team will assist in
-  investigation.
+| Artifact | Signature | Integrity |
+|---|---|---|
+| `ebbtop.exe`, `ebbtop-probe.exe`, `EbbTop-Windows-x64.zip`, `install.ps1`, `setup.ps1` (GitHub Releases) | none | `SHA256SUMS` over HTTPS |
+| `ebbtop-agent-linux-x86_64.tar.gz` (GitHub Releases) | none | release digest plus the archive's internal manifest |
+| `EbbTop.app.zip` (macOS, GitHub Releases) | ad-hoc only | `SHA256SUMS` over HTTPS |
+| `EbbTop-<version>-x64.msix` (Microsoft Store) | Microsoft, by Store re-signing at publish time | MSIX block map plus the Store signature |
+| Any artifact not listed above | none | — |
+
+## Verification
+
+A Store-installed copy:
+
+    Get-AppxPackage -Name Ebbwater.EbbTop | Select-Object -Expand SignatureKind
+
+reads `Store` for a package installed from the Store.
+
+A GitHub download (PowerShell, from the folder holding the release files):
+
+    Get-FileHash ebbtop.exe -Algorithm SHA256   # compare with SHA256SUMS
+    Get-AuthenticodeSignature .\ebbtop.exe      # NotSigned is expected
+
+A package before upload:
+
+    sha256sum dist/msix/EbbTop-<version>-x64.msix
+    python3 deploy/windows/msix/verify-msix.py dist/msix/EbbTop-<version>-x64.msix \
+        --expect-version <version>.0
+
+## Reports
+
+Suspected malicious behavior, or a signed artifact with altered bytes, can be
+raised as a GitHub issue on the repository or through the Microsoft Store
+report path.

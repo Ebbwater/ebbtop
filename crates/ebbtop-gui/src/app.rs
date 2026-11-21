@@ -10,6 +10,7 @@ use egui::{Color32, RichText, Ui};
 use egui_extras::{Column, TableBuilder};
 use ebbtop_core::client::{self, ClientConfig};
 use ebbtop_core::history::{Conn, NetRate, Ring, State};
+#[cfg(not(feature = "store"))]
 use ebbtop_core::update as core_update;
 use ebbtop_core::view::{self, SortKey};
 use ebbtop_core::wire::{KillJob, KillSignal};
@@ -17,7 +18,9 @@ use tokio::sync::mpsc;
 
 use crate::discovery::{self, PairAction, PairOutcome, Pairing};
 use crate::store::{self, Config, TokenSource};
+#[cfg(not(feature = "store"))]
 use crate::update::{self, UpdateCheck, UpdateStatus};
+use crate::version;
 use crate::widgets as w;
 
 const STALE_MS: i64 = 2000;
@@ -82,6 +85,9 @@ enum SettingsTab {
     Sources,
     Display,
     Connection,
+    /// Compiled out of Store builds: the MSIX is sealed and the Store owns
+    /// updates, so there is no check state to show or button to press.
+    #[cfg(not(feature = "store"))]
     Updates,
 }
 
@@ -191,11 +197,15 @@ pub struct App {
     /// lock is dropped, so they are unaffected.
     pending_source: Option<usize>,
     /// Background release check (spec section 1) + update dialog state.
+    /// Absent from Store builds (see `crates/ebbtop-gui/Cargo.toml`).
+    #[cfg(not(feature = "store"))]
     update: UpdateCheck,
+    #[cfg(not(feature = "store"))]
     update_open: bool,
     /// Launch + interval re-checks. True in the running app; false for
     /// harness-built apps so tests (which drive `start()` explicitly)
     /// never spawn the real GitHub fetch from `draw`.
+    #[cfg(not(feature = "store"))]
     update_auto: bool,
     /// Settings > Sources: discovery for a new host, the code prompt it opens
     /// and a typed address for the manual path. Same flow as the wizard.
@@ -247,9 +257,13 @@ impl App {
         app.start_client(&ctx);
         // Launch release check on its own thread; never blocks startup.
         // Skipped when a persisted check is still fresh (24 h cadence).
-        app.update_auto = true;
-        if app.update.due() {
-            app.update.start(update::fetch_latest_release);
+        // Store builds have no updater at all: the MSIX is sealed.
+        #[cfg(not(feature = "store"))]
+        {
+            app.update_auto = true;
+            if app.update.due() {
+                app.update.start(update::fetch_latest_release);
+            }
         }
         app.update_title(&ctx);
         app
@@ -259,9 +273,13 @@ impl App {
     pub fn with(cfg: Config, token: Option<String>, token_src: TokenSource, rt: Option<tokio::runtime::Runtime>) -> Self {
         let first_run = cfg.sources.is_empty();
         // Seed before the move below: restores the 24 h cadence and any
-        // skipped release across restarts.
-        let update =
-            UpdateCheck::with_persisted(cfg.update_last_check_ms, cfg.update_skipped.clone(), client::now_ms());
+        // skipped release across restarts. Store builds have no updater.
+        #[cfg(not(feature = "store"))]
+        let update = UpdateCheck::with_persisted(
+            cfg.update_last_check_ms,
+            cfg.update_skipped.clone(),
+            client::now_ms(),
+        );
         Self {
             url_edit: cfg.active_source().map(|s| s.url.clone()).unwrap_or_default(),
             cfg,
@@ -293,8 +311,11 @@ impl App {
             kill_tx: None,
             kill_note: None,
             pending_source: None,
+            #[cfg(not(feature = "store"))]
             update,
+            #[cfg(not(feature = "store"))]
             update_open: false,
+            #[cfg(not(feature = "store"))]
             update_auto: false,
             pair_discovery: discovery::Discovery::default(),
             pair_new: None,
@@ -386,27 +407,35 @@ impl App {
         // Release check bookkeeping: drain a finished check (logging the
         // outcome), re-check at the interval, and pop the dialog for a
         // version the user has not seen yet. The fetch runs on its own
-        // thread; none of this blocks the frame.
-        if self.update.poll() {
-            match self.update.status() {
-                UpdateStatus::Available { version, .. } => store::append_log(&format!(
-                    "update available {version} (current {})", update::current_version())),
-                UpdateStatus::UpToDate { version } => {
-                    store::append_log(&format!("update check up to date {version}"));
+        // thread; none of this blocks the frame. Store builds compile the
+        // whole block out (sealed MSIX, Store-delivered updates).
+        #[cfg(not(feature = "store"))]
+        {
+            if self.update.poll() {
+                match self.update.status() {
+                    UpdateStatus::Available { version, .. } => store::append_log(&format!(
+                        "update available {version} (current {})",
+                        version::current_version()
+                    )),
+                    UpdateStatus::UpToDate { version } => {
+                        store::append_log(&format!("update check up to date {version}"));
+                    }
+                    UpdateStatus::Failed(e) => {
+                        store::append_log(&format!("update check failed: {e}"))
+                    }
+                    _ => {}
                 }
-                UpdateStatus::Failed(e) => store::append_log(&format!("update check failed: {e}")),
-                _ => {}
+                // Persist the check time so the 24 h cadence survives restarts.
+                self.cfg.update_last_check_ms = client::now_ms();
+                let _ = store::save_config(&self.cfg);
             }
-            // Persist the check time so the 24 h cadence survives restarts.
-            self.cfg.update_last_check_ms = client::now_ms();
-            let _ = store::save_config(&self.cfg);
-        }
-        if self.update_auto && self.update.due() {
-            self.update.start(update::fetch_latest_release);
-        }
-        if self.update.should_prompt() {
-            self.update_open = true;
-            self.update.mark_notified();
+            if self.update_auto && self.update.due() {
+                self.update.start(update::fetch_latest_release);
+            }
+            if self.update.should_prompt() {
+                self.update_open = true;
+                self.update.mark_notified();
+            }
         }
         let now = client::now_ms();
         let shared = self.shared.clone();
@@ -538,6 +567,7 @@ impl App {
         if self.settings_open {
             self.settings(ui.ctx());
         }
+        #[cfg(not(feature = "store"))]
         if self.update_open {
             self.update_dialog(ui.ctx());
         }
@@ -777,7 +807,8 @@ impl App {
             }
             // Release check outcome: an available release gets a prompt
             // button; a failed check is a quiet note (spec: retry next
-            // interval, app runs as before).
+            // interval, app runs as before). Store builds have no check.
+            #[cfg(not(feature = "store"))]
             match self.update.status() {
                 UpdateStatus::Available { version, .. } => {
                     let version = version.clone();
@@ -1901,7 +1932,7 @@ impl App {
         let platform = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
         let connection = self.connection_word();
         let facts = store::SupportFacts {
-            version: update::current_version(),
+            version: version::current_version(),
             platform: &platform,
             sources: self.cfg.sources.len(),
             endpoint: &endpoint,
@@ -2212,6 +2243,7 @@ impl App {
                         (SettingsTab::Sources, "Sources"),
                         (SettingsTab::Display, "Display"),
                         (SettingsTab::Connection, "Connection"),
+                        #[cfg(not(feature = "store"))]
                         (SettingsTab::Updates, "Updates"),
                     ] {
                         if ui.selectable_label(self.settings_tab == tab, label).clicked() {
@@ -2229,6 +2261,7 @@ impl App {
                             save = true;
                         }
                     }
+                    #[cfg(not(feature = "store"))]
                     SettingsTab::Updates => self.settings_updates(ui),
                 }
             });
@@ -2513,8 +2546,10 @@ impl App {
     }
 
     /// Updates tab: current version, last check outcome, manual check.
+    /// Compiled out of Store builds (no updater, no check state).
+    #[cfg(not(feature = "store"))]
     fn settings_updates(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new(format!("EbbTop {}", update::current_version())).strong().color(w::TEXT));
+        ui.label(RichText::new(format!("EbbTop {}", version::current_version())).strong().color(w::TEXT));
         let status = match self.update.status() {
             UpdateStatus::Idle => "never checked".to_string(),
             UpdateStatus::Checking => "checking…".to_string(),
@@ -2548,7 +2583,8 @@ impl App {
     /// (Downloading), restart (Ready), and retry (Failed). Accepting moves
     /// to `Accepted`; the verified download starts on the next frame so
     /// the button click never blocks. Later declines and stays quiet
-    /// until a newer release appears.
+    /// until a newer release appears. Compiled out of Store builds.
+    #[cfg(not(feature = "store"))]
     fn update_dialog(&mut self, ctx: &egui::Context) {
         // Accepted is transient: kick off the download, then render the
         // resulting Downloading (or Failed) state below.
@@ -2655,6 +2691,8 @@ impl App {
     /// platform's asset plus `SHA256SUMS` from
     /// the carried asset list; a platform with no served asset, or a
     /// release without the needed URLs, lands in `Failed` with the reason.
+    /// Compiled out of Store builds.
+    #[cfg(not(feature = "store"))]
     fn begin_update_download(&mut self) {
         let (version, assets) = match self.update.status() {
             UpdateStatus::Accepted { version, assets } => (version.clone(), assets.clone()),
@@ -2694,6 +2732,7 @@ impl App {
     }
 
     /// "Download update" pressed: approve and clear any earlier skip.
+    #[cfg(not(feature = "store"))]
     fn accept_update(&mut self) {
         let version = match self.update.status() {
             UpdateStatus::Available { version, .. } => version.clone(),
@@ -2707,6 +2746,7 @@ impl App {
 
     /// "Later" pressed: decline and persist the skip for this tag; a
     /// newer release still prompts.
+    #[cfg(not(feature = "store"))]
     fn decline_update(&mut self) {
         let version = match self.update.status() {
             UpdateStatus::Available { version, .. } | UpdateStatus::Ready { version, .. } => {
@@ -2729,6 +2769,8 @@ impl App {
     /// "Restart to update" pressed: run the verified installer (Windows) or
     /// swap in the verified bundle (macOS), relaunch, and quit. Anything
     /// missing lands in `Failed` — a bad path never kills the running app.
+    /// Compiled out of Store builds.
+    #[cfg(not(feature = "store"))]
     fn restart_for_update(&mut self, ctx: &egui::Context) {
         let (version, path) = match self.update.status() {
             UpdateStatus::Ready { version, path } => (version.clone(), path.clone()),
@@ -3133,15 +3175,20 @@ mod tests {
             assert!(has(&t, "kill 4242 refused: pid 1"), "{w}: kill refusal: {t:?}");
         }
 
-        // Release prompt and its Update button.
-        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
-        app.onboard = None;
-        fake_state(&app, now);
-        app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
-        settle_update(&mut app);
-        let t = render(&mut app, 960.0, 1040.0);
-        assert!(has(&t, "update v99.7.0 ready"), "update prompt: {t:?}");
-        assert!(t.iter().any(|x| x == "Update"), "Update button: {t:?}");
+        // Release prompt and its Update button. Store builds have neither:
+        // the bar carries no update note (see the store render test below).
+        #[cfg(not(feature = "store"))]
+        {
+            let app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            let mut app = app;
+            app.onboard = None;
+            fake_state(&app, now);
+            app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+            settle_update(&mut app);
+            let t = render(&mut app, 960.0, 1040.0);
+            assert!(has(&t, "update v99.7.0 ready"), "update prompt: {t:?}");
+            assert!(t.iter().any(|x| x == "Update"), "Update button: {t:?}");
+        }
 
         // Source picker only when there is a choice, and its labels.
         let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
@@ -3190,20 +3237,23 @@ mod tests {
 
         // The bar's Update button still opens the update dialog. draw() pops
         // that dialog on its own for a fresh version, so close it first and
-        // click the bar's own prompt.
-        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
-        app.onboard = None;
-        fake_state(&app, now);
-        app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
-        settle_update(&mut app);
-        let ctx = egui::Context::default();
-        style(&ctx);
-        frame(&ctx, &mut app, w, h, vec![]);
-        app.update_open = false;
-        let t = texts(&frame(&ctx, &mut app, w, h, vec![]));
-        assert!(has(&t, "update v99.7.0 ready"), "update prompt in the bar: {t:?}");
-        click(&ctx, &mut app, "Update");
-        assert!(app.update_open, "the bar's Update button must still open the dialog");
+        // click the bar's own prompt. Store builds have no such button.
+        #[cfg(not(feature = "store"))]
+        {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, now);
+            app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+            settle_update(&mut app);
+            let ctx = egui::Context::default();
+            style(&ctx);
+            frame(&ctx, &mut app, w, h, vec![]);
+            app.update_open = false;
+            let t = texts(&frame(&ctx, &mut app, w, h, vec![]));
+            assert!(has(&t, "update v99.7.0 ready"), "update prompt in the bar: {t:?}");
+            click(&ctx, &mut app, "Update");
+            assert!(app.update_open, "the bar's Update button must still open the dialog");
+        }
     }
 
     #[test]
@@ -3807,6 +3857,7 @@ mod tests {
 
     /// Spin a locally injected check to completion without touching the
     /// network, so render tests never spawn the real GitHub fetch.
+    #[cfg(not(feature = "store"))]
     fn settle_update(app: &mut App) {
         for _ in 0..500 {
             if app.update.poll() {
@@ -3817,6 +3868,7 @@ mod tests {
         panic!("update check thread did not report");
     }
 
+    #[cfg(not(feature = "store"))]
     #[test]
     fn updates_tab_offers_manual_check() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
@@ -3825,9 +3877,58 @@ mod tests {
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("Updates")), "updates tab missing: {t:?}");
         assert!(t.iter().any(|x| x.contains("Check for updates")), "manual check missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains(update::current_version())), "current version missing: {t:?}");
+        assert!(t.iter().any(|x| x.contains(version::current_version())), "current version missing: {t:?}");
     }
 
+    /// Store builds have no updater at all (`--features store`): the Updates
+    /// tab, its manual check, the status-bar update note and the update
+    /// dialog are compiled out. Everything else still renders, and the
+    /// version is still reported by About/support.
+    #[cfg(feature = "store")]
+    #[test]
+    fn store_build_renders_no_update_ui() {
+        let has = |t: &[String], s: &str| t.iter().any(|x| x.contains(s));
+        let app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        let mut app = app;
+        app.onboard = None;
+        fake_state(&app, client::now_ms());
+        // Settings: the three real tabs, and no Updates tab to open.
+        app.settings_open = true;
+        let t = render(&mut app, 960.0, 1000.0);
+        for tab in ["Sources", "Display", "Connection"] {
+            assert!(has(&t, tab), "store build lost the {tab} tab: {t:?}");
+        }
+        for banned in [
+            "Updates",
+            "Check for updates",
+            "never checked",
+            "update check",
+            "Update available",
+            "Download update",
+            "Restart to update",
+            "update ",
+        ] {
+            assert!(!has(&t, banned), "store build rendered {banned:?}: {t:?}");
+        }
+        // The dashboard and its status bar carry no update line.
+        app.settings_open = false;
+        let t = render(&mut app, 960.0, 1040.0);
+        assert!(has(&t, " LIVE "), "dashboard still renders: {t:?}");
+        for banned in ["update ", "Update", "Later"] {
+            assert!(
+                !t.iter().any(|x| x == banned || x.contains(banned)),
+                "store build rendered {banned:?}: {t:?}"
+            );
+        }
+        // About/support still reports this build's version.
+        let s = app.support_summary_text();
+        assert!(
+            s.contains(&format!("version: {}", version::current_version())),
+            "version missing from support summary:\n{s}"
+        );
+    }
+
+    #[cfg(not(feature = "store"))]
     #[test]
     fn available_update_prompts_with_version() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
@@ -3841,6 +3942,7 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("update v99.7.0 ready")), "status note missing: {t:?}");
     }
 
+    #[cfg(not(feature = "store"))]
     #[test]
     fn downloading_update_shows_progress() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
@@ -3852,6 +3954,7 @@ mod tests {
         assert!(!t.iter().any(|x| x.contains("Restart to update")), "no restart while downloading: {t:?}");
     }
 
+    #[cfg(not(feature = "store"))]
     #[test]
     fn ready_update_offers_restart() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
@@ -3865,6 +3968,7 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("v9.9.9")), "version missing: {t:?}");
     }
 
+    #[cfg(not(feature = "store"))]
     #[test]
     fn failed_check_shows_quiet_note_and_runs_as_before() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
@@ -4703,6 +4807,96 @@ mod tests {
         }
     }
 
+    /// Microsoft Store listing screenshots, 1366x768 (the Store's desktop
+    /// screenshot size). These are the four PNGs in docs/store-screenshots/:
+    ///
+    ///   EBBTOP_SHOT_DIR=$PWD/docs/store-screenshots \
+    ///     cargo test -p ebbtop-gui store_screenshots -- --ignored
+    ///
+    /// All scenes are fixture-built (no live host, no real addresses or
+    /// tokens). The dashboard and processes shots use fake_state, with
+    /// workload_rows swapping in real cgroup paths for the workload view;
+    /// the two pairing shots use the first-run wizard's discovery and
+    /// code-entry states. The only wall-clock-dependent pixels are the
+    /// "age" and sampled-at clock strings; a regeneration re-renders those,
+    /// so PNG bytes differ between runs by exactly that line.
+    #[test]
+    #[ignore]
+    fn store_screenshots() {
+        let dir =
+            std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
+        let mut shot = |name: &str, mut app: App| {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1366.0, 768.0))
+                .wgpu()
+                .build_ui(move |ui| {
+                    style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
+                    app.draw(ui)
+                });
+            for _ in 0..4 {
+                harness.step();
+            }
+            let img = harness.render().expect("render");
+            let path = dir.join(name);
+            img.save(&path).expect("save");
+            eprintln!("wrote {}", path.display());
+        };
+        // 1. Live dashboard, the standard fixture. The fixture time carries
+        //    +60 s of headroom: the age/stale math compares draw-time now_ms
+        //    against the fixture stamp, and a software-rendered frame takes
+        //    seconds to lay out, which would otherwise cross the 2 s STALE
+        //    threshold and render a stale shot on a slow machine. With the
+        //    offset the frame reads LIVE age 0.0s on any machine; the
+        //    sampled-at clock in the shot reads a minute ahead of wall time,
+        //    which is consistent with the fictional fixture data.
+        {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, client::now_ms() + 60_000);
+            shot("ebbtop-store-1366x768-dashboard.png", app);
+        }
+        // 2. Processes with real workload groups (workload_rows fixture),
+        //    same age headroom as the dashboard shot.
+        {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            let now = client::now_ms() + 60_000;
+            fake_state(&app, now);
+            workload_rows(&app, now);
+            shot("ebbtop-store-1366x768-processes.png", app);
+        }
+        // 3. First-run wizard with a finished discovery scan.
+        {
+            let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+            {
+                let ob = app.onboard.as_mut().expect("wizard open");
+                ob.discovery.agents = vec![
+                    agent("k-server", "0.2.9", "192.168.1.20", 45976),
+                    agent("build-box", "0.2.9", "192.168.1.31", 45976),
+                ];
+                ob.discovery.finished = true;
+            }
+            shot("ebbtop-store-1366x768-pairing-discovered.png", app);
+        }
+        // 4. The pairing-code step on the wizard's manual path. A fixture
+        //    value, not a real code: no host minted it.
+        {
+            let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+            {
+                let ob = app.onboard.as_mut().expect("wizard open");
+                ob.name = "k-server".into();
+                ob.url = "ws://192.168.1.20:45976/ws".into();
+                let mut p = Pairing::for_address("k-server", "ws://192.168.1.20:45976/ws");
+                p.code = "123456".into();
+                ob.pair = Some(p);
+            }
+            shot("ebbtop-store-1366x768-pairing-code.png", app);
+        }
+    }
+
     /// CPU cost of one UI frame (layout + tessellation input, no GPU), 400 procs.
     /// cargo test --release -p ebbtop-gui frame_cost -- --ignored --nocapture
     #[test]
@@ -5280,7 +5474,7 @@ mod tests {
         assert!(!s.contains("10.9.9.9"), "summary leaked the address:\n{s}");
         assert!(s.contains("Closed right after the handshake"), "summary lost the classified failure:\n{s}");
         assert!(s.contains("endpoint: ws, default port, /ws"), "summary lost the endpoint shape:\n{s}");
-        assert!(s.contains(&format!("version: {}", update::current_version())), "no version:\n{s}");
+        assert!(s.contains(&format!("version: {}", version::current_version())), "no version:\n{s}");
     }
 
     #[test]
