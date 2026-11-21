@@ -359,6 +359,15 @@ Linux agent archive, the macOS bundle) are all stated in
 [docs/SIGNING.md](docs/SIGNING.md). Until then, Windows downloads are
 unsigned and integrity is provided by the release checksums over HTTPS.
 
+Both Windows executables already carry the metadata a signing request needs
+(`ProductName` EbbTop, file and product version from the crate version) and
+the cross-build refuses to package an exe whose PE version block is missing or
+wrong. The release build for signing is
+`.github/workflows/windows-build.yml`: it runs the same
+`deploy/cross-build-windows.sh` recipe on GitHub-hosted `ubuntu-latest` with a
+pinned llvm-mingw toolchain, and it only triggers on `v*` tags or a manual
+dispatch, so it never runs for an ordinary push.
+
 ## Phase 2 kill: implemented
 
 - Request, on demand only (never per-tick): `kill:<pid>:<start_time_ms>:<TERM|INT>`, nothing else. The agent refuses any other `kill…` text with an error reply and a journal line.

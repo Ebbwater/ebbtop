@@ -3,25 +3,38 @@
 # The packaging step uses Info-ZIP zip and unzip.
 # Toolchain: llvm-mingw 20261020 ucrt (sha256 55064b60...e8ae335), unpacked in
 # ~/.local/opt/llvm-mingw. Static CRT so the exe needs only system DLLs.
-# The .exe icon (crates/ebbtop-gui/build.rs, winresource) needs the rc step:
-# llvm-windres/llvm-ar. winresource shells out to them for *-gnullvm targets,
-# so PATH with $LM first is load-bearing, and WINDRES/AR are pinned to
-# llvm-mingw below so the icon embeds even if a stale windres/ar shadows
-# PATH. If llvm-windres ever stops accepting winresource's .rc (or the .o it
-# emits), build.rs warns and ships without the exe icon instead of breaking
-# the build: the window icon (main.rs, assets/ebbtop.rgba) still applies.
-# Retry then: run `llvm-windres --version` + `cargo build -v` in this
-# environment and check the windres error in the cargo:warning line.
+# EBBTOP_LLVM_MINGW_BIN overrides that bin/ path; the hosted release workflow
+# (.github/workflows/windows-build.yml) downloads the same pinned tarball and
+# runs THIS script, so k-server and GitHub-hosted builds cannot drift.
+# The .exe icon and the VERSIONINFO block (crates/*/build.rs, winresource)
+# need the rc step: llvm-windres/llvm-ar. winresource shells out to them for
+# *-gnullvm targets, so PATH with $LM first is load-bearing, and WINDRES/AR are
+# pinned to llvm-mingw below so the resources embed even if a stale windres/ar
+# shadows PATH. EBBTOP_REQUIRE_VERSIONINFO=1 turns a failed rc step into a hard
+# build error, and the readback gate below re-parses the built PE: SignPath's
+# artifact metadata restrictions require ProductName/ProductVersion on every
+# binary that enters a signing request, so a metadata-less exe must never be
+# packaged. If llvm-windres ever stops accepting winresource's .rc (or the .o
+# it emits), build fails here; retry with `llvm-windres --version` +
+# `cargo build -v` in this environment and read the cargo:warning line.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-LM="$HOME/.local/opt/llvm-mingw/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin"
+LM="${EBBTOP_LLVM_MINGW_BIN:-$HOME/.local/opt/llvm-mingw/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin}"
 T=x86_64-pc-windows-gnullvm
+[[ -x "$LM/llvm-windres" ]] || {
+  echo "llvm-mingw binaries not found in $LM (expected llvm-mingw 20261020 ucrt; set EBBTOP_LLVM_MINGW_BIN to its bin/)" >&2
+  exit 1
+}
+VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 export PATH="$LM:$PATH"
-# rc step for crates/ebbtop-gui/build.rs (winresource, *.ico -> .rsrc).
-# winresource honours WINDRES/AR over its own prefix inference; pin both
-# to llvm-mingw so `cargo build` below embeds the icon deterministically.
+# rc step for crates/ebbtop-gui/build.rs and crates/ebbtop-core/build.rs
+# (winresource: *.ico + VERSIONINFO -> .rsrc). winresource honours WINDRES/AR
+# over its own prefix inference; pin both to llvm-mingw so `cargo build` below
+# embeds the resources deterministically.
 export WINDRES="$LM/llvm-windres"
 export AR="$LM/llvm-ar"
+# Release builds must not silently ship an exe without VERSIONINFO.
+export EBBTOP_REQUIRE_VERSIONINFO=1
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=x86_64-w64-mingw32-clang
 export CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="-C target-feature=+crt-static"
 cd "$REPO"
@@ -40,9 +53,25 @@ for f in dist/ebbtop.exe dist/ebbtop-probe.exe; do
     grep -viE '^(api-ms-win-|advapi32|bcrypt|bcryptprimitives|combase|dwmapi|gdi32|imm32|kernel32|ntdll|ole32|oleaut32|opengl32|shell32|uiautomationcore|user32|uxtheme|ws2_32)' || true)
   [[ -z "$extra" ]] || { echo "$f imports non-system DLLs: $extra"; exit 1; }
 done
+# VERSIONINFO readback: parse the PE resource directory of each built exe and
+# require product name, product+file version, author and a per-binary
+# description/original filename. Fails the build before any checksum is taken.
+python3 deploy/windows/versioninfo.py \
+  --require-product-name EbbTop \
+  --require-version "$VERSION" \
+  --require-company Ebbwater \
+  --require-file-description "EbbTop desktop client" \
+  dist/ebbtop.exe
+python3 deploy/windows/versioninfo.py \
+  --require-product-name EbbTop \
+  --require-version "$VERSION" \
+  --require-company Ebbwater \
+  --require-file-description "EbbTop connection probe" \
+  dist/ebbtop-probe.exe
+# Checksums cover the bytes as built, so they follow the metadata gate.
 (cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 > SHA256SUMS)
 {
-  echo "version $(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+  echo "version $VERSION"
   echo "commit $(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)"
 } > dist/BUILD
 bash deploy/windows/bundle.sh dist

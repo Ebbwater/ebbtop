@@ -1,0 +1,144 @@
+name: windows-build
+
+# Windows x64 release build for SignPath.
+#
+# SignPath Foundation verifies artifact origin: every job that leads to a
+# signing request must run on a GitHub-hosted runner. This workflow is that
+# origin. It runs the same recipe as k-server -- deploy/cross-build-windows.sh
+# with the same pinned llvm-mingw tarball -- so the signed bytes and the
+# locally verified bytes cannot drift.
+#
+# Triggers are tag-only plus manual dispatch, never a branch push or a pull
+# request, so the workflow cannot consume hosted-runner minutes outside a
+# release. The Linux test suite stays on the project's own CI runner in ci.yml:
+# tests are not part of a signing request, and hosted minutes are billed.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Pinned toolchain. Same release, asset and digest as the k-server install
+  # in ~/.local/opt/llvm-mingw (deploy/cross-build-windows.sh documents it).
+  LLVM_MINGW_RELEASE: "20261020"
+  LLVM_MINGW_ARCHIVE: llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz
+  LLVM_MINGW_SHA256: 55064b60b991a1e1e8090b8c2f84e82b22cfe5903d12c159d65064cf5e8ae335
+
+jobs:
+  windows-x64:
+    name: Windows x64 cross-build (hosted runner)
+    # GitHub-hosted ONLY. Never add a private-runner label to this job: an
+    # artifact built on private infrastructure fails SignPath origin
+    # verification and cannot be signed.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out the tagged release commit
+        uses: actions/checkout@v4
+        with:
+          # dist/BUILD stamps the commit and tag builds are a detached HEAD, so
+          # keep the full history for a resolvable rev-parse.
+          fetch-depth: 0
+
+      - name: Toolchain report
+        run: |
+          rustc --version
+          cargo --version
+          uname -srm
+
+      - name: Install the pinned llvm-mingw toolchain
+        run: |
+          set -euo pipefail
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/${LLVM_MINGW_RELEASE}/${LLVM_MINGW_ARCHIVE}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/llvm-mingw.tar.xz" "$url"
+          echo "${LLVM_MINGW_SHA256}  $RUNNER_TEMP/llvm-mingw.tar.xz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/llvm-mingw"
+          tar -xJf "$RUNNER_TEMP/llvm-mingw.tar.xz" -C "$RUNNER_TEMP/llvm-mingw" --strip-components=1
+          "$RUNNER_TEMP/llvm-mingw/bin/llvm-windres" --version
+          "$RUNNER_TEMP/llvm-mingw/bin/x86_64-w64-mingw32-clang" --version
+
+      - name: Bundle packager regression (includes negative controls)
+        run: bash deploy/windows/test-bundle.sh
+
+      - name: Build, verify VERSIONINFO and package
+        env:
+          EBBTOP_LLVM_MINGW_BIN: ${{ runner.temp }}/llvm-mingw/bin
+        run: bash deploy/cross-build-windows.sh
+
+      - name: Record artifact identity
+        run: |
+          set -euo pipefail
+          cat dist/BUILD
+          cat dist/SHA256SUMS
+          sha256sum dist/EbbTop-Windows-x64.zip
+          python3 deploy/windows/versioninfo.py dist/ebbtop.exe dist/ebbtop-probe.exe \
+            | tee dist/VERSIONINFO.txt
+
+      # ---------------------------------------------------------------------
+      # TODO(signpath): insert the signing steps here once the SignPath
+      # Foundation application is approved and an API token exists as a
+      # repository secret (SIGNPATH_API_TOKEN). Nothing in this workflow signs
+      # today, and no signing credential is stored in the repository.
+      #
+      # Shape, to be pinned to a release of SignPath's action and reviewed
+      # before it lands:
+      #
+      #   - name: Upload unsigned exes for signing
+      #     id: unsigned
+      #     uses: actions/upload-artifact@v4
+      #     with:
+      #       name: EbbTop-Windows-x64-unsigned
+      #       retention-days: 1
+      #       path: |
+      #         dist/ebbtop.exe
+      #         dist/ebbtop-probe.exe
+      #
+      #   - name: Submit Windows artifacts for signing
+      #     uses: signpath/github-action-submit-signing-request@v1
+      #     with:
+      #       api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #       organization-id: <organization id from SignPath>
+      #       project-slug: ebbtop
+      #       signing-policy-slug: <release signing policy slug>
+      #       artifact-configuration-slug: <windows artifact configuration slug>
+      #       github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+      #       wait-for-completion: true
+      #       output-artifact-directory: dist-signed
+      #
+      #   - name: Replace dist exes with the signed bytes
+      #     run: cp dist-signed/*.exe dist/
+      #
+      # Requirements for that change, so a future edit does not quietly break
+      # eligibility:
+      #   * the submit step must stay in THIS job on ubuntu-latest, GitHub
+      #     hosted, because SignPath verifies the origin runner;
+      #   * the SignPath artifact configuration must restrict metadata to
+      #     ProductName = EbbTop and ProductVersion = <release tag>, which the
+      #     VERSIONINFO block stamped by the build satisfies;
+      #   * signing happens BEFORE the upload below, SHA256SUMS/BUILD/ZIP must
+      #     be regenerated from the signed bytes (a signature changes the file
+      #     digest), and only then is the release published;
+      #   * a signing request needs manual approval in SignPath -- this
+      #     workflow never publishes a release on its own.
+      # ---------------------------------------------------------------------
+
+      - name: Upload Windows release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          # A tag reads v0.2.9; a manual run uses the run number because a
+          # branch name may contain "/" and upload-artifact rejects that.
+          name: EbbTop-Windows-x64-${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/ebbtop.exe
+            dist/ebbtop-probe.exe
+            dist/install.ps1
+            dist/setup.ps1
+            dist/SHA256SUMS
+            dist/BUILD
+            dist/VERSIONINFO.txt
+            dist/EbbTop-Windows-x64.zip

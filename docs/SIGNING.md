@@ -29,7 +29,9 @@ workflow from the tagged release commit in
 [github.com/Ebbwater/ebbtop](https://github.com/Ebbwater/ebbtop):
 
 - All workflow jobs that lead to a signing request run on GitHub-hosted
-  runners.
+  runners (`ubuntu-latest` in
+  [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml),
+  triggered by `v*` tags and manual dispatch only).
 - The workflow configuration and build scripts are part of the repository.
   They are reviewed like any other change.
 - SignPath verifies that the submitted artifact was produced by that workflow
