@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Read the VERSIONINFO resource out of a Windows PE file (stdlib only).
 
-SignPath enforces artifact metadata on every signed binary (product name and
-product version). This script is the build-side readback: it parses the PE
-resource directory itself -- no llvm-objdump, no wine, no python packages --
-so the cross-build script and the hosted workflow can refuse to ship an exe
-whose version block is missing or wrong.
+Windows packaging enforces artifact metadata on every binary it ships (product
+name and product version). This script is the build-side readback: it parses
+the PE resource directory itself -- no llvm-objdump, no wine, no python
+packages -- so the cross-build script and the hosted workflow can refuse to
+ship an exe whose version block is missing or wrong.
 
   python3 deploy/windows/versioninfo.py dist/ebbtop.exe
   python3 deploy/windows/versioninfo.py --require-product-name EbbTop \\
