@@ -1,13 +1,11 @@
 //! Windows VERSIONINFO metadata for `ebbtop-probe.exe` (the headless
 //! diagnostics binary in `src/bin/ebbtop-probe.rs`).
 //!
-//! SignPath's artifact metadata restrictions require a product name and
-//! product version on every binary that enters a signing request, so the
-//! probe carries the same `ProductName`/`ProductVersion` as the GUI and only
-//! `FileDescription`/`OriginalFilename` differ. `CompanyName` is the
-//! project's author identity (Ebbwater), not the certificate publisher: the
-//! Authenticode publisher on a signed build is SignPath Foundation, and
-//! Windows shows the two in separate places.
+//! A packaged Windows build needs a product name and product version on every
+//! binary, which is what the Microsoft Store packaging expects, so the probe
+//! carries the same `ProductName`/`ProductVersion` as the GUI and only
+//! `FileDescription`/`OriginalFilename` differ. `CompanyName` is the project's
+//! author identity (Ebbwater), which is what Windows shows on the Details tab.
 //!
 //! Build-only: `winresource` hands a small `.rc` to `llvm-windres`/`windres`
 //! and links the resulting `.o`. Nothing is added to the crate's runtime
@@ -27,11 +25,10 @@
 
 use std::env;
 
-/// Product name on every release binary. SignPath rejects a signing request
-/// whose artifact lacks the product name or product version attributes.
+/// Product name on every release binary. Windows packaging rejects a package
+/// whose binaries lack a product name or product version attribute.
 const PRODUCT_NAME: &str = "EbbTop";
-/// Author identity for the Details tab. The certificate publisher on a signed
-/// build is SignPath Foundation and is shown by Windows separately.
+/// Author identity for the Details tab.
 const COMPANY_NAME: &str = "Ebbwater";
 const FILE_DESCRIPTION: &str = "EbbTop connection probe";
 const ORIGINAL_FILENAME: &str = "ebbtop-probe.exe";

@@ -1,17 +1,17 @@
 name: windows-build
 
-# Windows x64 release build for SignPath.
+# Windows x64 release build.
 #
-# SignPath Foundation verifies artifact origin: every job that leads to a
-# signing request must run on a GitHub-hosted runner. This workflow is that
-# origin. It runs the same recipe as k-server -- deploy/cross-build-windows.sh
-# with the same pinned llvm-mingw tarball -- so the signed bytes and the
-# locally verified bytes cannot drift.
+# This is the release builder for the Windows artifacts, including the packaged
+# build that goes to the Microsoft Store through Partner Center. It runs the
+# same recipe as k-server -- deploy/cross-build-windows.sh with the same pinned
+# llvm-mingw tarball -- so the published bytes and the locally verified bytes
+# cannot drift.
 #
 # Triggers are tag-only plus manual dispatch, never a branch push or a pull
 # request, so the workflow cannot consume hosted-runner minutes outside a
 # release. The Linux test suite stays on the project's own CI runner in ci.yml:
-# tests are not part of a signing request, and hosted minutes are billed.
+# tests do not belong in a release build, and hosted minutes are billed.
 on:
   push:
     tags: ["v*"]
@@ -30,9 +30,9 @@ env:
 jobs:
   windows-x64:
     name: Windows x64 cross-build (hosted runner)
-    # GitHub-hosted ONLY. Never add a private-runner label to this job: an
-    # artifact built on private infrastructure fails SignPath origin
-    # verification and cannot be signed.
+    # GitHub-hosted. Keep it that way: a release artifact should come from a
+    # runner that the public workflow definition describes, not from a machine
+    # outside the repository's build story.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -76,54 +76,6 @@ jobs:
           sha256sum dist/EbbTop-Windows-x64.zip
           python3 deploy/windows/versioninfo.py dist/ebbtop.exe dist/ebbtop-probe.exe \
             | tee dist/VERSIONINFO.txt
-
-      # ---------------------------------------------------------------------
-      # TODO(signpath): insert the signing steps here once the SignPath
-      # Foundation application is approved and an API token exists as a
-      # repository secret (SIGNPATH_API_TOKEN). Nothing in this workflow signs
-      # today, and no signing credential is stored in the repository.
-      #
-      # Shape, to be pinned to a release of SignPath's action and reviewed
-      # before it lands:
-      #
-      #   - name: Upload unsigned exes for signing
-      #     id: unsigned
-      #     uses: actions/upload-artifact@v4
-      #     with:
-      #       name: EbbTop-Windows-x64-unsigned
-      #       retention-days: 1
-      #       path: |
-      #         dist/ebbtop.exe
-      #         dist/ebbtop-probe.exe
-      #
-      #   - name: Submit Windows artifacts for signing
-      #     uses: signpath/github-action-submit-signing-request@v1
-      #     with:
-      #       api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-      #       organization-id: <organization id from SignPath>
-      #       project-slug: ebbtop
-      #       signing-policy-slug: <release signing policy slug>
-      #       artifact-configuration-slug: <windows artifact configuration slug>
-      #       github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
-      #       wait-for-completion: true
-      #       output-artifact-directory: dist-signed
-      #
-      #   - name: Replace dist exes with the signed bytes
-      #     run: cp dist-signed/*.exe dist/
-      #
-      # Requirements for that change, so a future edit does not quietly break
-      # eligibility:
-      #   * the submit step must stay in THIS job on ubuntu-latest, GitHub
-      #     hosted, because SignPath verifies the origin runner;
-      #   * the SignPath artifact configuration must restrict metadata to
-      #     ProductName = EbbTop and ProductVersion = <release tag>, which the
-      #     VERSIONINFO block stamped by the build satisfies;
-      #   * signing happens BEFORE the upload below, SHA256SUMS/BUILD/ZIP must
-      #     be regenerated from the signed bytes (a signature changes the file
-      #     digest), and only then is the release published;
-      #   * a signing request needs manual approval in SignPath -- this
-      #     workflow never publishes a release on its own.
-      # ---------------------------------------------------------------------
 
       - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v4

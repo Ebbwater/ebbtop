@@ -348,25 +348,24 @@ temp=58C` over the tailnet probe).
 - `pairing.json` and `clients.json` are agent state in `~/services/ebbtop-agent`, beside `agent.env`, but they are not in the unit's `EnvironmentFile`. `install-agent.sh --purge` deletes them with the token and the unit; a plain uninstall leaves them in place.
 - Discovery cannot cross a broadcast boundary (see "Why discovery is UDP broadcast"), and it reports the hostname the agent already serves over ws, so it adds reachability, not information.
 
-## Code signing
+## Windows distribution
 
-Windows release artifacts are signed through the
-[SignPath Foundation](https://signpath.org) open source signing program once
-that integration is active; the publisher shown on the signature will be
-SignPath Foundation. What is signed, how a signed binary traces back to its
-source commit, the per-release approval step, and what stays unsigned (the
-Linux agent archive, the macOS bundle) are all stated in
-[docs/SIGNING.md](docs/SIGNING.md). Until then, Windows downloads are
-unsigned and integrity is provided by the release checksums over HTTPS.
+EbbTop for Windows is moving to the Microsoft Store, with the listing created in
+Partner Center. A Store install is signed by Microsoft on submission when the
+app ships as an MSIX package, which is why the packaging comes before the
+listing. Until that listing is live, the Windows download is the per-user ZIP on
+the [product page](https://www.ebbwater.net/ebbtop/) and it is unsigned, so
+Windows may show a SmartScreen warning on first run. What is signed, what stays
+unsigned (the Linux agent archive, the macOS bundle), and how to check a
+download are stated in [docs/SIGNING.md](docs/SIGNING.md).
 
-Both Windows executables already carry the metadata a signing request needs
-(`ProductName` EbbTop, file and product version from the crate version) and
-the cross-build refuses to package an exe whose PE version block is missing or
-wrong. The release build for signing is
-`.github/workflows/windows-build.yml`: it runs the same
-`deploy/cross-build-windows.sh` recipe on GitHub-hosted `ubuntu-latest` with a
-pinned llvm-mingw toolchain, and it only triggers on `v*` tags or a manual
-dispatch, so it never runs for an ordinary push.
+The Windows executables carry the metadata a packaged build needs
+(`ProductName` EbbTop, file and product version from the crate version) and the
+cross-build refuses to package an exe whose PE version block is missing or
+wrong. The release build is `.github/workflows/windows-build.yml`: it runs the
+same `deploy/cross-build-windows.sh` recipe on GitHub-hosted `ubuntu-latest`
+with a pinned llvm-mingw toolchain, and it only triggers on `v*` tags or a
+manual dispatch, so it never runs for an ordinary push.
 
 ## Phase 2 kill: implemented
 
