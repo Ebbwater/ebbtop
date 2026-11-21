@@ -134,9 +134,13 @@ def main(argv: list[str]) -> int:
         mapped: set[str] = set()
         for entry in blocks:
             name = entry.get("Name", "")
-            mapped.add(name)
-            check(name in names, f"block map references {name!r}, which is not in the package")
-            raw = z.read(name)
+            # makemsix writes block-map File@Name with backslash separators;
+            # OPC part names in the package use forward slashes. Compare on
+            # the normalized form.
+            norm = name.replace("\\", "/")
+            mapped.add(norm)
+            check(norm in names, f"block map references {name!r}, which is not in the package")
+            raw = z.read(norm)
             check(
                 int(entry.get("Size", "-1")) == len(raw),
                 f"block map size for {name!r} does not match the packaged file",
@@ -153,12 +157,15 @@ def main(argv: list[str]) -> int:
                 )
                 # Block@Size is the COMPRESSED size of the block as stored in
                 # the package (observed on Microsoft's own makemsix output:
-                # a full 65536-byte block carries Size < 65536). The hash
-                # above is the integrity invariant; Size only has to be a
-                # plausible stored size for the block.
+                # a full 65536-byte block carries Size < 65536; an
+                # incompressible block can carry slightly more than its raw
+                # size from deflate framing). The per-block SHA-256 hash is
+                # the integrity invariant; Size only has to be a plausible
+                # stored size for the block.
                 if block.get("Size") is not None:
+                    size = block.get("Size")
                     check(
-                        0 < int(block.get("Size")) <= len(chunk),
+                        size is not None and 0 < int(size) < len(chunk) + 1024,
                         f"block {i} of {name!r} has an implausible size in the block map",
                     )
         for name in names:
