@@ -27,6 +27,13 @@ sha2 = "0.11"
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }
 
+[features]
+# Microsoft Store packaging: MSIX packages are sealed and the Store delivers
+# updates, so this build has no in-app release check, no update dialog and no
+# updater (including its `install.ps1` path). Default off: the regular GitHub
+# download build is the one with the updater, and stays byte-identical.
+store = []
+
 # Build-only (see build.rs): embeds the Windows .exe icon via windres.
 # Not linked into the exe; Linux/macOS native builds compile it but the
 # build script no-ops (CARGO_CFG_TARGET_OS gate), so the binary is

@@ -350,23 +350,38 @@ temp=58C` over the tailnet probe).
 
 ## Code signing
 
-Windows release artifacts are signed through the
-[SignPath Foundation](https://signpath.org) open source signing program once
-that integration is active; the publisher shown on the signature will be
-SignPath Foundation. What is signed, how a signed binary traces back to its
-source commit, the per-release approval step, and what stays unsigned (the
-Linux agent archive, the macOS bundle) are all stated in
-[docs/SIGNING.md](docs/SIGNING.md). Until then, Windows downloads are
-unsigned and integrity is provided by the release checksums over HTTPS.
+**Windows downloads from GitHub are unsigned.** Integrity comes from the
+published `SHA256SUMS` over HTTPS: compare the hash of what you downloaded
+before you run it. This is not a temporary state — EbbTop applied to the
+[SignPath Foundation](https://signpath.org) open source signing program and
+SignPath declined the application for insufficient download reputation, so
+there is no signing certificate and no pending application. If a SmartScreen
+warning or a Defender `!ml` quarantine appears, it is a reputation false
+positive, not a modified download: check the hash and decide whether to
+exclude it yourself.
 
-Both Windows executables already carry the metadata a signing request needs
+**The Microsoft Store is the signed channel.** EbbTop is packaged as an MSIX
+for the Store, and Microsoft re-signs it with a Microsoft certificate during
+publishing, so a Store install carries a trusted signature and no SmartScreen
+reputation problem. See [the Store listing pack](docs/store-listing.md) for the
+listing copy and [docs/SIGNING.md](docs/SIGNING.md) for what each artifact
+carries.
+
+Both Windows executables already carry the metadata a package needs
 (`ProductName` EbbTop, file and product version from the crate version) and
 the cross-build refuses to package an exe whose PE version block is missing or
-wrong. The release build for signing is
-`.github/workflows/windows-build.yml`: it runs the same
-`deploy/cross-build-windows.sh` recipe on GitHub-hosted `ubuntu-latest` with a
-pinned llvm-mingw toolchain, and it only triggers on `v*` tags or a manual
-dispatch, so it never runs for an ordinary push.
+wrong. Two workflows exist, so they cannot drift:
+
+- `.github/workflows/windows-build.yml` `windows-x64` builds the GitHub ZIP
+  with `deploy/cross-build-windows.sh` on hosted `ubuntu-latest` with a pinned
+  llvm-mingw toolchain.
+- The same workflow's `store-package` job builds the MSIX from the same recipe
+  with the `store` cargo feature (no in-app updater, since the Store delivers
+  updates), and `wack-gate` runs Microsoft's Windows App Certification Kit
+  against it on `windows-latest`, uploading the report as an artifact.
+
+Both trigger on `v*` tags or manual dispatch only, so neither runs for an
+ordinary push.
 
 ## Phase 2 kill: implemented
 

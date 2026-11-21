@@ -23,10 +23,8 @@ pub const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/Ebbwater/ebb
 /// Automatic re-check cadence from the spec.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 
-/// This build's version (`workspace 0.2.0` today).
-pub fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
+/// This build's version, shared with the store-gated build (`version.rs`).
+pub use crate::version::current_version;
 
 /// `tag_name` out of a `/releases/latest` body. `None` when the body is not
 /// JSON, carries no string `tag_name`, or the tag is blank.
