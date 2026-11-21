@@ -4807,6 +4807,96 @@ mod tests {
         }
     }
 
+    /// Microsoft Store listing screenshots, 1366x768 (the Store's desktop
+    /// screenshot size). These are the four PNGs in docs/store-screenshots/:
+    ///
+    ///   EBBTOP_SHOT_DIR=$PWD/docs/store-screenshots \
+    ///     cargo test -p ebbtop-gui store_screenshots -- --ignored
+    ///
+    /// All scenes are fixture-built (no live host, no real addresses or
+    /// tokens). The dashboard and processes shots use fake_state, with
+    /// workload_rows swapping in real cgroup paths for the workload view;
+    /// the two pairing shots use the first-run wizard's discovery and
+    /// code-entry states. The only wall-clock-dependent pixels are the
+    /// "age" and sampled-at clock strings; a regeneration re-renders those,
+    /// so PNG bytes differ between runs by exactly that line.
+    #[test]
+    #[ignore]
+    fn store_screenshots() {
+        let dir =
+            std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
+        let mut shot = |name: &str, mut app: App| {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1366.0, 768.0))
+                .wgpu()
+                .build_ui(move |ui| {
+                    style(ui.ctx());
+                    // Debug-only id-clash warnings draw a glyph this machine's
+                    // fonts lack, which aborts the snapshot instead of saving it.
+                    ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
+                    app.draw(ui)
+                });
+            for _ in 0..4 {
+                harness.step();
+            }
+            let img = harness.render().expect("render");
+            let path = dir.join(name);
+            img.save(&path).expect("save");
+            eprintln!("wrote {}", path.display());
+        };
+        // 1. Live dashboard, the standard fixture. The fixture time carries
+        //    +60 s of headroom: the age/stale math compares draw-time now_ms
+        //    against the fixture stamp, and a software-rendered frame takes
+        //    seconds to lay out, which would otherwise cross the 2 s STALE
+        //    threshold and render a stale shot on a slow machine. With the
+        //    offset the frame reads LIVE age 0.0s on any machine; the
+        //    sampled-at clock in the shot reads a minute ahead of wall time,
+        //    which is consistent with the fictional fixture data.
+        {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            fake_state(&app, client::now_ms() + 60_000);
+            shot("ebbtop-store-1366x768-dashboard.png", app);
+        }
+        // 2. Processes with real workload groups (workload_rows fixture),
+        //    same age headroom as the dashboard shot.
+        {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            let now = client::now_ms() + 60_000;
+            fake_state(&app, now);
+            workload_rows(&app, now);
+            shot("ebbtop-store-1366x768-processes.png", app);
+        }
+        // 3. First-run wizard with a finished discovery scan.
+        {
+            let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+            {
+                let ob = app.onboard.as_mut().expect("wizard open");
+                ob.discovery.agents = vec![
+                    agent("k-server", "0.2.9", "192.168.1.20", 45976),
+                    agent("build-box", "0.2.9", "192.168.1.31", 45976),
+                ];
+                ob.discovery.finished = true;
+            }
+            shot("ebbtop-store-1366x768-pairing-discovered.png", app);
+        }
+        // 4. The pairing-code step on the wizard's manual path. A fixture
+        //    value, not a real code: no host minted it.
+        {
+            let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
+            {
+                let ob = app.onboard.as_mut().expect("wizard open");
+                ob.name = "k-server".into();
+                ob.url = "ws://192.168.1.20:45976/ws".into();
+                let mut p = Pairing::for_address("k-server", "ws://192.168.1.20:45976/ws");
+                p.code = "123456".into();
+                ob.pair = Some(p);
+            }
+            shot("ebbtop-store-1366x768-pairing-code.png", app);
+        }
+    }
+
     /// CPU cost of one UI frame (layout + tessellation input, no GPU), 400 procs.
     /// cargo test --release -p ebbtop-gui frame_cost -- --ignored --nocapture
     #[test]
