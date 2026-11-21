@@ -1,99 +1,72 @@
-# EbbTop Code Signing Policy
+# EbbTop Windows distribution and signing
 
-This document describes how EbbTop release artifacts are signed, how a signed
-binary can be traced back to its source code, and what remains unsigned. It is
-published to satisfy the code signing policy requirement of the
-[SignPath Foundation](https://signpath.org) open source signing program.
+This document describes how the EbbTop Windows build reaches users, what is
+signed and what is not, and how to check a download. It describes the route as
+it stands and does not claim a signature that does not exist yet.
 
-## Signed artifacts
+## Where the Windows build ships
 
-Windows release artifacts are signed with a code signing certificate issued to
-**SignPath Foundation**:
+EbbTop for Windows is moving to the Microsoft Store. The listing is created in
+Partner Center, which holds the app's publisher identity, and that identity is
+what a package declares.
 
-- `ebbtop.exe` (desktop client)
-- `ebbtop-probe.exe` (connection diagnostics tool)
-- `EbbTop-Setup-x64.exe` (installer, when published)
-- the Windows executables inside `EbbTop-Windows-x64.zip`
+A Store install is signed by Microsoft during submission when the app ships as
+an **MSIX** package. An MSI or EXE submitted to the Store does not receive Store
+signing and would need a publisher code signing certificate of its own, so the
+package is prepared as MSIX. Until the listing is live, the direct download is
+how the app is installed.
 
-The certificate's private key is generated and held by SignPath on their
-hardware security module. The EbbTop project never possesses private key
-material and cannot sign artifacts outside the SignPath pipeline.
+## What is signed today
 
-Signatures are timestamped (RFC 3161) so they remain valid after certificate
-expiry.
+Nothing. The current Windows build is a per-user ZIP
+(`EbbTop-Windows-x64.zip`) holding unsigned executables, so Windows may show a
+SmartScreen warning on first run. When the Store listing ships, installs from
+the Store carry a Microsoft issued signature, and this document names the
+submission that first carries it.
 
 ## Build provenance
 
-Every signed Windows binary is built by the project's public GitHub Actions
-workflow from the tagged release commit in
-[github.com/Ebbwater/ebbtop](https://github.com/Ebbwater/ebbtop):
+Every Windows artifact is built by the public workflow in
+[`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml)
+from the tagged release commit in
+[github.com/Ebbwater/ebbtop](https://github.com/Ebbwater/ebbtop). The workflow
+runs on GitHub hosted runners, uses a pinned cross compiler, and is triggered by
+`v*` tags or manual dispatch only. The packaged executables carry a
+`VERSIONINFO` block with product name `EbbTop` and the release version, which is
+also what Store packaging expects. Locally built binaries are never published as
+a release.
 
-- All workflow jobs that lead to a signing request run on GitHub-hosted
-  runners (`ubuntu-latest` in
-  [`.github/workflows/windows-build.yml`](../.github/workflows/windows-build.yml),
-  triggered by `v*` tags and manual dispatch only).
-- The workflow configuration and build scripts are part of the repository.
-  They are reviewed like any other change.
-- SignPath verifies that the submitted artifact was produced by that workflow
-  for that commit before signing.
-- A signature therefore means: this binary is an automated build of the
-  public source at the stated commit. It does not identify the maintainer
-  personally; the publisher shown on the certificate is SignPath Foundation.
+## What stays unsigned
 
-Locally built binaries are never signed.
+- `ebbtop-agent-linux-x86_64.tar.gz`, the prebuilt Linux agent, is built from
+  the same tagged commit and is not code signed on any platform. Integrity comes
+  from the digest the release reports, which `ebbtop-install.sh` checks before
+  running anything, plus the archive's own `SHA256SUMS`.
+- The macOS bundle is ad-hoc signed only. It moves to Apple Developer ID
+  signing and notarization when that identity exists.
+- Any artifact not named above is unsigned.
 
-## Release approval
+## Checking a download
 
-Every signing request requires manual approval by the project maintainer
-before SignPath executes it. Unsigned builds can be produced at any time, but
-nothing is signed and published as a release without that approval step.
+The release publishes `SHA256SUMS` beside the artifacts, and the Windows ZIP
+carries a copy inside it:
 
-## Artifact metadata
+    sha256sum -c SHA256SUMS                        # Linux
+    Get-FileHash .\ebbtop.exe -Algorithm SHA256    # Windows PowerShell
 
-Signed binaries carry product name `EbbTop` and a file and product version
-matching the release tag, enforced through SignPath's artifact metadata
-restrictions.
-
-## Unsigned artifacts, stated plainly
-
-- `ebbtop-agent-linux-x86_64.tar.gz` (the prebuilt Linux agent) is built from
-  the same tagged release commit but not Windows-code-signed. Integrity is
-  provided by the release checksums (`SHA256SUMS` and the archive's internal
-  manifest) over the HTTPS download.
-- The macOS application bundle is currently unsigned. It will move to Apple
-  Developer ID signing and notarization when that identity is procured.
-- Any artifact not listed above is unsigned.
-
-## Verification
-
-Users can verify a signature on Windows with PowerShell:
-
-    Get-AuthenticodeSignature .\ebbtop.exe
-
-A valid signature shows `SignPath Foundation` as the signer and `Valid` as
-the status.
+A checksum confirms the bytes you received match the bytes that were published.
+It does not prove who published them, which is what a signature does. Until a
+signed package exists, the HTTPS download from the project's release page is the
+trust anchor.
 
 ## Team and account requirements
 
-- The repository and all project accounts require multi-factor
-  authentication.
-- Team roles, with the group each one maps to:
-
-  | Role | Who | Group |
-  |---|---|---|
-  | Author: may commit to the repository without additional review | Kyler Nunan (`@kylernunan`) | [Members team](https://github.com/orgs/Ebbwater/teams/members) |
-  | Reviewer: reviews every change proposed by anyone outside the committers | Kyler Nunan (`@kylernunan`) | [Members team](https://github.com/orgs/Ebbwater/teams/members) |
-  | Approver: approves each signing request before SignPath executes it | Kyler Nunan (`@kylernunan`) | [Owners](https://github.com/orgs/Ebbwater/people?query=role%3Aowner) |
-
-  The people holding these roles are listed publicly on
-  [the organization people page](https://github.com/orgs/Ebbwater/people).
-  Members team pages require an organization sign-in, so the membership is
-  stated here rather than left to a link alone. There is currently one
-  person in each role, because the project has one maintainer.
-- The maintainer holds the Author, Reviewer, and Approver roles defined by
-  the SignPath Foundation conditions; signing approval is not delegated.
-  Every signing request needs that manual approval before SignPath executes
-  it.
-- Reports about a signed artifact (suspected malicious behavior, policy
-  violations) can be raised as a GitHub issue or via the SignPath Foundation
-  report path; the project team will assist in investigation.
+- The repository and all project accounts require multi-factor authentication.
+- The maintainer holds the Author, Reviewer, and Approver roles used by the
+  store submission and release process; none of them is delegated. The people in
+  those roles are public on
+  [the organization people page](https://github.com/orgs/Ebbwater/people), and
+  the repository grants write access through the Ebbwater Members team.
+- Reports about a release artifact, suspected malicious behavior, or a policy
+  violation can be raised as a GitHub issue; the project team will assist in
+  investigation.

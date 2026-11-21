@@ -11,10 +11,9 @@
 # *-gnullvm targets, so PATH with $LM first is load-bearing, and WINDRES/AR are
 # pinned to llvm-mingw below so the resources embed even if a stale windres/ar
 # shadows PATH. EBBTOP_REQUIRE_VERSIONINFO=1 turns a failed rc step into a hard
-# build error, and the readback gate below re-parses the built PE: SignPath's
-# artifact metadata restrictions require ProductName/ProductVersion on every
-# binary that enters a signing request, so a metadata-less exe must never be
-# packaged. If llvm-windres ever stops accepting winresource's .rc (or the .o
+# build error, and the readback gate below re-parses the built PE: a packaged
+# Windows build requires ProductName/ProductVersion on every binary, so a
+# metadata-less exe must never be packaged. If llvm-windres ever stops accepting winresource's .rc (or the .o
 # it emits), build fails here; retry with `llvm-windres --version` +
 # `cargo build -v` in this environment and read the cargo:warning line.
 set -euo pipefail

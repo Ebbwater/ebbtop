@@ -4,15 +4,13 @@
 //! metadata block. Same mark as the window icon in `src/main.rs`
 //! (`assets/ebbtop.rgba`, 64x64 RGBA, top-down).
 //!
-//! VERSIONINFO is not cosmetic here: SignPath's artifact metadata restrictions
-//! require a product name and product version on every binary that enters a
-//! signing request, so `ProductName`/`ProductVersion` are pinned to "EbbTop"
+//! VERSIONINFO is not cosmetic here: a packaged Windows build needs a product
+//! name and product version on every binary, which is what the Microsoft Store
+//! packaging expects, so `ProductName`/`ProductVersion` are pinned to "EbbTop"
 //! and the crate version instead of winresource's defaults (the package name
 //! is `ebbtop-gui`, which is not the shipped product name). `CompanyName` is
 //! the project's own author identity (Ebbwater, as in the repository URL and
-//! LICENSE), not the certificate publisher: the Authenticode publisher on a
-//! signed build is SignPath Foundation, and Windows shows the two in separate
-//! places (Details tab vs. Digital Signatures).
+//! LICENSE), which is what Windows shows on the Details tab.
 //!
 //! Build-only: `winresource` links the `.ico` and the version block via
 //! `llvm-windres`/`windres`. No runtime code changes and no image-decoding
@@ -37,11 +35,10 @@
 use std::env;
 use std::path::PathBuf;
 
-/// Product name on every release binary. SignPath rejects a signing request
-/// whose artifact lacks the product name or product version attributes.
+/// Product name on every release binary. Windows packaging rejects a package
+/// whose binaries lack a product name or product version attribute.
 const PRODUCT_NAME: &str = "EbbTop";
-/// Author identity for the Details tab. The certificate publisher on a signed
-/// build is SignPath Foundation and is shown by Windows separately.
+/// Author identity for the Details tab.
 const COMPANY_NAME: &str = "Ebbwater";
 const FILE_DESCRIPTION: &str = "EbbTop desktop client";
 const ORIGINAL_FILENAME: &str = "ebbtop.exe";
