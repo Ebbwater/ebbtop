@@ -144,6 +144,18 @@ def main(argv: list[str]) -> int:
         put(f"SmallTile.scale-{q}.png", b.png_tile(px(71, q)))
         put(f"LargeTile.scale-{q}.png", b.png_tile(px(310, q)))
 
+    # Base-name copies of the five logos the manifest references
+    # (Assets\StoreLogo.png etc.). Windows resolves the qualified scale
+    # variants through the naming convention, but the literal files ride
+    # along too, so a direct manifest-asset check (verify-msix.py) and any
+    # tooling that looks the referenced path up verbatim both find them.
+    # Same pixels as the scale-100 variants.
+    put("StoreLogo.png", b.png_tile(50))
+    put("Square44x44Logo.png", b.png_tile(44))
+    put("Square150x150Logo.png", b.png_tile(150))
+    put("Wide310x150Logo.png", comper_wide(b, 310, 150))
+    put("SplashScreen.png", comper_wide(b, 620, 300))
+
     for name, w, h in written:
         print(f"{w}x{h}\t{name}")
     print(f"{len(written)} assets written under {assets}")
