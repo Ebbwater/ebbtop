@@ -77,8 +77,23 @@ the status.
 
 - The repository and all project accounts require multi-factor
   authentication.
+- Team roles, with the group each one maps to:
+
+  | Role | Who | Group |
+  |---|---|---|
+  | Author: may commit to the repository without additional review | Kyler Nunan (`@kylernunan`) | [Members team](https://github.com/orgs/Ebbwater/teams/members) |
+  | Reviewer: reviews every change proposed by anyone outside the committers | Kyler Nunan (`@kylernunan`) | [Members team](https://github.com/orgs/Ebbwater/teams/members) |
+  | Approver: approves each signing request before SignPath executes it | Kyler Nunan (`@kylernunan`) | [Owners](https://github.com/orgs/Ebbwater/people?query=role%3Aowner) |
+
+  The people holding these roles are listed publicly on
+  [the organization people page](https://github.com/orgs/Ebbwater/people).
+  Members team pages require an organization sign-in, so the membership is
+  stated here rather than left to a link alone. There is currently one
+  person in each role, because the project has one maintainer.
 - The maintainer holds the Author, Reviewer, and Approver roles defined by
   the SignPath Foundation conditions; signing approval is not delegated.
+  Every signing request needs that manual approval before SignPath executes
+  it.
 - Reports about a signed artifact (suspected malicious behavior, policy
   violations) can be raised as a GitHub issue or via the SignPath Foundation
   report path; the project team will assist in investigation.
