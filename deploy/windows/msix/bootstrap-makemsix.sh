@@ -19,7 +19,11 @@ MSIX_SDK_COMMIT="25a65f5c1690930813bcc10cdf1d59fa865f2bb1"
 #   find . -path ./.git -prune -o -type f -print0 | sort -z \
 #     | xargs -0 sha256sum | sha256sum
 # Override only when deliberately bumping MSIX_SDK_COMMIT.
-MSIX_SDK_SHA256="${EBBTOP_MSIX_SDK_SHA256:-fe9f94d3058f5a4993d2f0e889ae04efc44fe93066216866cf33b9b3de3123ec}"
+# Pinned to the PRISTINE checkout of the pinned commit. The original pin
+# (fe9f94d3...) was taken over a worktree that also carried unfetchable
+# vendored-openssl test fixtures, so no clean environment could reproduce
+# the build; this one is exactly what the fetch above produces.
+MSIX_SDK_SHA256="${EBBTOP_MSIX_SDK_SHA256:-49c286124d14307acfc643b1a0163fe0df625767de14b5a2ce364b07ddb02a82}"
 INSTALL_DIR="${1:-${RUNNER_TEMP:-/tmp}/ebbtop-msix-sdk}"
 
 command -v cmake >/dev/null || { echo "cmake is required (>= 3.29)" >&2; exit 1; }
@@ -33,6 +37,15 @@ git -C "$WORK" init -q sdk
 git -C "$WORK/sdk" remote add origin https://github.com/microsoft/msix-packaging.git
 git -C "$WORK/sdk" fetch -q --depth 1 origin "$MSIX_SDK_COMMIT"
 git -C "$WORK/sdk" checkout -q FETCH_HEAD
+# The pinned commit carries four vendored-openssl test gitlinks (boringssl,
+# krb5, pyca-cryptography, wycheproof) with no .gitmodules entries for them,
+# so a plain `submodule update` dies with "No url found". They are OpenSSL's
+# own test fixtures and makemsix does not use them: drop the stale gitlinks
+# before updating submodules. `git rm --cached` touches only the index, so
+# the worktree digest below is unaffected.
+git -C "$WORK/sdk" rm -q --cached \
+  lib/openssl/boringssl lib/openssl/krb5 \
+  lib/openssl/pyca-cryptography lib/openssl/wycheproof 2>/dev/null || true
 git -C "$WORK/sdk" submodule update --init --recursive --depth 1 -q
 
 if [[ -n "$MSIX_SDK_SHA256" ]]; then
