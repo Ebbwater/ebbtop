@@ -17,6 +17,7 @@ use ebbtop_core::wire::{KillJob, KillSignal};
 use tokio::sync::mpsc;
 
 use crate::discovery::{self, PairAction, PairOutcome, Pairing};
+use crate::l10n::{self, Key, Locale};
 use crate::store::{self, Config, TokenSource};
 #[cfg(not(feature = "store"))]
 use crate::update::{self, UpdateCheck, UpdateStatus};
@@ -213,6 +214,11 @@ pub struct App {
     pair_new: Option<discovery::Pairing>,
     pair_addr_edit: String,
     pair_msg: Option<String>,
+    /// Locale the installed `FontDefinitions` were built for. `None` until the
+    /// first frame installs them, so a test-built app (no `App::new`) still
+    /// gets the bundled CJK faces. A locale switch reinstalls on the next
+    /// frame; widget ids are positional, so nothing else has to move.
+    fonts_locale: Option<Locale>,
 }
 
 fn local_time(ms: u64) -> String {
@@ -235,6 +241,26 @@ fn local_datetime(s: u64) -> String {
     }
 }
 
+/// A classified connection failure, drawn in `locale`. Same shapes, colours and
+/// wrapping as `widgets::error_block` (which stays for the out-of-scope
+/// discovery pane): the headline and next action are chosen by the
+/// `ProbeFailure` variant through `l10n` — never by matching English prose —
+/// and `Diagnosis.detail`, the scrubbed raw error chain, is painted verbatim.
+/// A free function rather than a method so the wizard can call it while it
+/// holds the mutable borrow of its own state.
+fn draw_failure(ui: &mut Ui, locale: Locale, d: &client::Diagnosis) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(l10n::failure_headline(locale, d)).strong().color(w::BAD));
+    ui.add(
+        egui::Label::new(
+            RichText::new(l10n::failure_next_action(locale, d)).small().color(w::TEXT),
+        )
+        .wrap(),
+    );
+    let detail = l10n::fmt(locale, Key::DetailPrefix, &[&d.detail]);
+    ui.add(egui::Label::new(RichText::new(detail).small().monospace().color(w::DIM)).wrap());
+}
+
 impl App {
     pub fn new(ctx: egui::Context) -> Self {
         let cfg = store::load_config();
@@ -253,6 +279,11 @@ impl App {
         };
         let mut app = Self::with(cfg, token, token_src, rt);
         style_with(&ctx, app.cfg.compact);
+        // Install the bundled CJK faces before the first frame, so a Chinese
+        // locale never paints a single frame of tofu at launch.
+        let loc = app.cfg.locale();
+        l10n::install_fonts(&ctx, loc);
+        app.fonts_locale = Some(loc);
         app.settings_open = app.token.is_none() && app.onboard.is_none();
         app.start_client(&ctx);
         // Launch release check on its own thread; never blocks startup.
@@ -321,12 +352,29 @@ impl App {
             pair_new: None,
             pair_addr_edit: String::new(),
             pair_msg: None,
+            fonts_locale: None,
         }
     }
 
     #[cfg(test)]
     pub fn shared(&self) -> Arc<Mutex<State>> {
         self.shared.clone()
+    }
+
+    /// The active UI language (resolved from the persisted setting).
+    fn loc(&self) -> Locale {
+        self.cfg.locale()
+    }
+
+    /// Switch language: store the canonical id in the config, persist it
+    /// through the existing atomic `save_config` path, and let the next frame
+    /// reinstall the fonts. Nothing else about the window's state changes.
+    fn set_language(&mut self, loc: Locale) {
+        if self.cfg.locale() == loc {
+            return;
+        }
+        self.cfg.language = loc.id().to_string();
+        let _ = store::save_config(&self.cfg);
     }
 
     fn build_rt() -> Option<tokio::runtime::Runtime> {
@@ -404,6 +452,14 @@ impl App {
     }
 
     pub fn draw(&mut self, ui: &mut Ui) {
+        // Fonts follow the language setting: install on the first frame (a
+        // test-built app has no `App::new`) and again after a locale switch.
+        // Widget ids are positional, so this rebuilds the glyph atlas only.
+        let loc = self.loc();
+        if self.fonts_locale != Some(loc) {
+            l10n::install_fonts(ui.ctx(), loc);
+            self.fonts_locale = Some(loc);
+        }
         // Release check bookkeeping: drain a finished check (logging the
         // outcome), re-check at the interval, and pop the dialog for a
         // version the user has not seen yet. The fetch runs on its own
@@ -706,6 +762,10 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut Ui, st: &State, now: u64) {
+        // The connection-state word is part of the localized slice; the rest of
+        // this bar (chrome, counters, tooltips) stays English for now and is
+        // inventoried in `docs/l10n-scope.md`.
+        let loc = self.loc();
         ui.horizontal(|ui| {
             // Half-screen (640px) has no room for every status chip.
             // Age + hover summary stay; sample/tick move to the tooltip.
@@ -738,10 +798,12 @@ impl App {
             ui.add_space(1.0);
             let age = st.since_new_sample_ms(now);
             let (label, color) = match (&st.conn, age) {
-                (Conn::Connected, Some(a)) if a < STALE_MS => ("LIVE", w::OK),
-                (Conn::Connected, Some(_)) => ("STALE", w::WARN),
-                (Conn::Connected, None) | (Conn::Connecting { .. }, _) => ("CONNECTING", w::WARN),
-                (Conn::Down { .. }, _) => ("DOWN", w::BAD),
+                (Conn::Connected, Some(a)) if a < STALE_MS => (l10n::text(loc, Key::ConnLive), w::OK),
+                (Conn::Connected, Some(_)) => (l10n::text(loc, Key::ConnStale), w::WARN),
+                (Conn::Connected, None) | (Conn::Connecting { .. }, _) => {
+                    (l10n::text(loc, Key::ConnConnecting), w::WARN)
+                }
+                (Conn::Down { .. }, _) => (l10n::text(loc, Key::ConnDown), w::BAD),
             };
             // Dot + text (phase 1): no background fill, so no contrast hack.
             // Dot is painted as a circle — no glyph dependency.
@@ -1139,6 +1201,7 @@ impl App {
     /// reflows when the selection changes.
     fn proc_detail_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
         let Some(pid) = self.selected else { return };
+        let loc = self.loc();
         let mut open = !self.cfg.collapsed_proc_detail;
         w::panel(ui, "proc-detail", &mut open, |ui| {
             let row = st.procs.as_ref().and_then(|pp| pp.rows.iter().find(|r| r.pid == pid));
@@ -1188,18 +1251,18 @@ impl App {
                     // 0 = agent did not report a start time (unpatched): no
                     // PID-reuse guard, so no kill.
                     let no_start = r.start_time_ms == 0;
-                    let host = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_else(|| "this host".into());
+                    let host = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_else(|| l10n::text(loc, Key::ThisHost).to_string());
                     let hint = if root {
-                        "root-owned processes cannot be killed".to_string()
+                        l10n::text(loc, Key::KillRootOwned).to_string()
                     } else if no_start {
-                        "agent does not report process start times".to_string()
+                        l10n::text(loc, Key::KillNoStartTimes).to_string()
                     } else {
-                        format!("terminate this process on {host}")
+                        l10n::fmt(loc, Key::KillHintOnHost, &[&host])
                     };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add_enabled(!root && !no_start, egui::Button::new("Kill"))
-                            .on_hover_text(format!("{hint} (pid {})", r.pid))
+                            .add_enabled(!root && !no_start, egui::Button::new(l10n::text(loc, Key::BtnKill)))
+                            .on_hover_text(l10n::fmt(loc, Key::KillHover, &[&hint, &r.pid.to_string()]))
                             .clicked()
                         {
                             self.kill_confirm = Some(KillConfirm {
@@ -1222,38 +1285,38 @@ impl App {
                             let cmd: String = p.command.chars().take(120).collect();
                             let cmd = if p.command.chars().count() > 120 { format!("{cmd}…") } else { cmd };
                             ui.label(RichText::new(cmd).monospace().color(w::DIM));
-                            if ui.button("Copy").on_hover_text("copy full command").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnCopy)).on_hover_text(l10n::text(loc, Key::HoverCopyCommand)).clicked() {
                                 ui.ctx().copy_text(p.command.clone());
                             }
                         });
                     }
                     // Facts row 1: counts + CPU time. The threads/fds/ppid
                     // order is asserted by the exe test.
-                    let mut facts = vec![format!("threads {}", p.thread_count)];
+                    let mut facts = vec![l10n::fmt(loc, Key::FactsThreads, &[&p.thread_count.to_string()])];
                     if let Some(fds) = p.fd_count {
-                        facts.push(format!("fds {fds}"));
+                        facts.push(l10n::fmt(loc, Key::FactsFds, &[&fds.to_string()]));
                     }
                     if let Some(ppid) = p.parent_pid {
-                        facts.push(format!("ppid {ppid}"));
+                        facts.push(l10n::fmt(loc, Key::FactsPpid, &[&ppid.to_string()]));
                     }
-                    facts.push(format!("cpu {}", view::cpu_time(p.cpu_time_user.saturating_add(p.cpu_time_system))));
+                    facts.push(l10n::fmt(loc, Key::FactsCpu, &[&view::cpu_time(p.cpu_time_user.saturating_add(p.cpu_time_system))]));
                     ui.label(RichText::new(facts.join(" · ")).monospace().color(w::DIM));
                     // Facts row 2: memory + I/O. r/w stay adjacent (exe test).
-                    let mut mem = vec![format!("vmem {}", view::bytes(p.virtual_mem_bytes))];
+                    let mut mem = vec![l10n::fmt(loc, Key::FactsVmem, &[&view::bytes(p.virtual_mem_bytes)])];
                     if let Some(s) = p.shared_mem_bytes {
-                        mem.push(format!("shared {}", view::bytes(s)));
+                        mem.push(l10n::fmt(loc, Key::FactsShared, &[&view::bytes(s)]));
                     }
                     match (p.read_bytes, p.write_bytes) {
-                        (Some(r), Some(wr)) => mem.push(format!("r {} · w {}", view::bytes(r), view::bytes(wr))),
-                        (Some(r), None) => mem.push(format!("read {}", view::bytes(r))),
-                        (None, Some(wr)) => mem.push(format!("written {}", view::bytes(wr))),
+                        (Some(r), Some(wr)) => mem.push(l10n::fmt(loc, Key::FactsReadWrite, &[&view::bytes(r), &view::bytes(wr)])),
+                        (Some(r), None) => mem.push(l10n::fmt(loc, Key::FactsRead, &[&view::bytes(r)])),
+                        (None, Some(wr)) => mem.push(l10n::fmt(loc, Key::FactsWritten, &[&view::bytes(wr)])),
                         (None, None) => {}
                     }
                     ui.label(RichText::new(mem.join(" · ")).monospace().color(w::DIM));
                     // Facts row 3: origin.
-                    let mut origin = vec![format!("started {}", local_datetime(p.start_time))];
+                    let mut origin = vec![l10n::fmt(loc, Key::FactsStarted, &[&local_datetime(p.start_time)])];
                     if let Some(cwd) = p.working_directory.as_ref().filter(|c| !c.is_empty()) {
-                        origin.push(format!("cwd {cwd}"));
+                        origin.push(l10n::fmt(loc, Key::FactsCwd, &[cwd]));
                     }
                     ui.label(RichText::new(origin.join(" · ")).monospace().color(w::DIM));
                     if let Some(exe) = p.executable_path.as_ref().filter(|e| !e.is_empty()) {
@@ -1262,14 +1325,14 @@ impl App {
                     // Children on one row; click jumps the selection there.
                     if !p.child_processes.is_empty() {
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("children:").monospace().color(w::DIM));
+                            ui.label(RichText::new(l10n::text(loc, Key::ChildrenHeader)).monospace().color(w::DIM));
                             for c in p.child_processes.iter().take(4) {
                                 if ui.selectable_label(false, format!("{} {}", c.pid, c.name)).clicked() {
                                     self.selected = Some(c.pid);
                                 }
                             }
                             if p.child_processes.len() > 4 {
-                                ui.label(RichText::new(format!("+{} more", p.child_processes.len() - 4)).monospace().color(w::DIM));
+                                ui.label(RichText::new(l10n::fmt(loc, Key::MoreCount, &[&(p.child_processes.len() - 4).to_string()])).monospace().color(w::DIM));
                             }
                         });
                     }
@@ -1281,7 +1344,7 @@ impl App {
                             let tb = b.cpu_time_user.saturating_add(b.cpu_time_system);
                             tb.cmp(&ta).then(a.tid.cmp(&b.tid))
                         });
-                        ui.label(RichText::new("TID Name S CPU").monospace().color(w::DIM));
+                        ui.label(RichText::new(l10n::text(loc, Key::ThreadHeader)).monospace().color(w::DIM));
                         for t in th.iter().take(5) {
                             let cpu = view::cpu_time(t.cpu_time_user.saturating_add(t.cpu_time_system));
                             let row = if t.name.is_empty() {
@@ -1292,13 +1355,13 @@ impl App {
                             ui.label(RichText::new(row).monospace().color(w::DIM));
                         }
                         if th.len() > 5 {
-                            ui.label(RichText::new(format!("+{} more", th.len() - 5)).monospace().color(w::DIM));
+                            ui.label(RichText::new(l10n::fmt(loc, Key::MoreCount, &[&(th.len() - 5).to_string()])).monospace().color(w::DIM));
                         }
                     }
                     // CPU + RSS graphs side by side: no added height.
                     let cpu_vals: Vec<f64> = st.proc_detail_cpu.iter().map(|pt| pt.1).collect();
                     if cpu_vals.is_empty() {
-                        ui.label(RichText::new("no detail").monospace().color(w::DIM));
+                        ui.label(RichText::new(l10n::text(loc, Key::NoDetail)).monospace().color(w::DIM));
                     } else {
                         let mem_vals: Vec<f64> = st.proc_detail_mem.iter().map(|pt| pt.1).collect();
                         let mem_peak = mem_vals.iter().copied().fold(0.0, f64::max);
@@ -1309,10 +1372,10 @@ impl App {
                     }
                 }
                 None if st.proc_detail.is_none() => {
-                    ui.label(RichText::new("waiting for data").color(w::DIM));
+                    ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
                 }
                 None => {
-                    ui.label(RichText::new("no detail").monospace().color(w::DIM));
+                    ui.label(RichText::new(l10n::text(loc, Key::NoDetail)).monospace().color(w::DIM));
                 }
             }
         });
@@ -1404,11 +1467,12 @@ impl App {
     }
 
     fn proc_box(&mut self, ui: &mut Ui, st: &State, max_h: f32) -> LinkedTable {
+        let loc = self.loc();
         let mut open = !self.cfg.collapsed_proc;
         let mut scroll = LinkedTable::NONE;
         w::panel(ui, "proc", &mut open, |ui| {
             let Some(p) = &st.procs else {
-                ui.label(RichText::new("waiting for data").color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
                 return;
             };
             let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
@@ -1424,19 +1488,20 @@ impl App {
             ui.horizontal(|ui| {
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text("filter name / user / pid (/)")
+                        .hint_text(l10n::text(loc, Key::FilterHint))
                         .desired_width(220.0)
                 )
-                .accessible_name("Filter processes");
+                .accessible_name(l10n::text(loc, Key::AccessFilterProcesses));
                 if want_focus {
                     r.request_focus();
                 }
                 if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.filter.clear();
                 }
-                ui.label(RichText::new(format!("{} of {}", idx.len(), p.rows.len())).monospace().color(w::DIM));
+                ui.label(RichText::new(l10n::fmt(loc, Key::CountOf, &[&idx.len().to_string(), &p.rows.len().to_string()])).monospace().color(w::DIM));
                 if let Some(wk) = &self.workload_filter {
-                    let chip = format!("workload: {} ✕", view::workload_label(wk));
+                    let label = view::workload_label(wk);
+                    let chip = l10n::fmt(loc, Key::WorkloadChip, &[&label]);
                     let resp = ui
                         .add(egui::Label::new(RichText::new(chip).monospace().color(w::ACCENT)).sense(egui::Sense::click()))
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1445,7 +1510,7 @@ impl App {
                     }
                 }
                 if p.sampled_at_ms > 0 {
-                    ui.label(RichText::new(format!("at {}", local_time(p.sampled_at_ms))).monospace().color(w::DIM));
+                    ui.label(RichText::new(l10n::fmt(loc, Key::AtTime, &[&local_time(p.sampled_at_ms)])).monospace().color(w::DIM));
                 }
             });
             if clear_workload {
@@ -1486,13 +1551,13 @@ impl App {
                 // Workload: display only (click a workloads row to filter).
                 tb = tb.column(Column::exact(120.0).clip(true));
             }
-            let mut cols: Vec<(&str, SortKey)> = vec![("PID", SortKey::Pid), ("Name", SortKey::Name)];
+            let mut cols: Vec<(&str, SortKey)> = vec![(l10n::text(loc, Key::ColPid), SortKey::Pid), (l10n::text(loc, Key::ColName), SortKey::Name)];
             if !narrow {
-                cols.push(("User", SortKey::User));
+                cols.push((l10n::text(loc, Key::ColUser), SortKey::User));
             }
-            cols.extend([("S", SortKey::State), ("CPU%", SortKey::Cpu), ("MEM%", SortKey::Mem)]);
+            cols.extend([(l10n::text(loc, Key::ColState), SortKey::State), (l10n::text(loc, Key::ColCpuPct), SortKey::Cpu), (l10n::text(loc, Key::ColMemPct), SortKey::Mem)]);
             if !narrow {
-                cols.push(("MEM", SortKey::Mem));
+                cols.push((l10n::text(loc, Key::ColMem), SortKey::Mem));
             }
             let out = tb.header(row_h + 2.0, |mut h| {
                 for (name, key) in &cols {
@@ -1517,7 +1582,7 @@ impl App {
                 }
                 if !narrow {
                     h.col(|ui| {
-                        ui.label(RichText::new("Workload").monospace().strong().color(w::TEXT));
+                        ui.label(RichText::new(l10n::text(loc, Key::ColWorkload)).monospace().strong().color(w::TEXT));
                     });
                 }
             })
@@ -1561,14 +1626,15 @@ impl App {
     /// Returns the normalized URL (`ws(s)://host:port/path` with the agent
     /// port and `/ws` assumed) so callers store and probe one value.
     fn validate_source(&self, name: &str, url: &str) -> Result<String, String> {
+        let loc = self.loc();
         let name = name.trim();
         if name.is_empty() {
-            return Err("name is empty".to_string());
+            return Err(l10n::text(loc, Key::NameEmpty).to_string());
         }
         if self.cfg.sources.iter().any(|s| s.name == name) {
-            return Err(format!("source \"{name}\" already exists"));
+            return Err(l10n::fmt(loc, Key::SourceExists, &[name]));
         }
-        client::normalize_base_url(url).map_err(|e| format!("bad URL: {e}"))
+        client::normalize_base_url(url).map_err(|e| l10n::fmt(loc, Key::BadUrl, &[&e.to_string()]))
     }
 
     /// Validate and append a source. Pure cfg mutation; the caller saves.
@@ -1644,7 +1710,7 @@ impl App {
         self.ensure_rt();
         let Some(s) = self.cfg.sources.get(idx) else { return };
         let Some(rt) = &self.rt else {
-            self.source_msg = Some("test unavailable (no runtime)".to_string());
+            self.source_msg = Some(l10n::text(self.loc(), Key::TestUnavailable).to_string());
             return;
         };
         let token = if idx == self.cfg.active {
@@ -1681,17 +1747,17 @@ impl App {
             }
         };
         if tok.is_empty() {
+            let msg = l10n::text(self.loc(), Key::NoteNoCredential).to_string();
             if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some(
-                    "no credential yet: pair with a 6-digit code from `ebbtop-agent --pair` on the host, or paste the agent token (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`)".to_string(),
-                );
+                ob.msg = Some(msg);
             }
             return;
         }
         self.ensure_rt();
         let Some(rt) = &self.rt else {
+            let msg = l10n::text(self.loc(), Key::TestUnavailable).to_string();
             if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some("test unavailable (no runtime)".to_string());
+                ob.msg = Some(msg);
             }
             return;
         };
@@ -1725,19 +1791,19 @@ impl App {
     /// stores the source + token and connects. A keyring failure keeps the
     /// token for this session (as in Settings) rather than blocking first run.
     fn onboard_save(&mut self, ctx: &egui::Context) {
+        let loc = self.loc();
         if !self.onboard_save_gate() {
             if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some("Test the connection first — Save unlocks after a green Test for these exact values".to_string());
+                ob.msg = Some(l10n::text(loc, Key::NoteTestFirst).to_string());
             }
             return;
         }
         let current = self.onboard_current();
         let (name, _, tok) = current;
         if tok.is_empty() {
+            let msg = l10n::text(loc, Key::NoteNoCredential).to_string();
             if let Some(ob) = self.onboard.as_mut() {
-                ob.msg = Some(
-                    "no credential yet: pair with a 6-digit code from `ebbtop-agent --pair` on the host, or paste the agent token (`ssh user@host cat ~/services/ebbtop-agent/ebbtop.token`)".to_string(),
-                );
+                ob.msg = Some(msg);
             }
             return;
         }
@@ -1808,6 +1874,7 @@ impl App {
     /// the issued token becomes the effective credential, but Save stays
     /// locked until the existing Test passes for these exact values.
     fn onboard_paired(&mut self, name: &str, url: &str, out: PairOutcome) {
+        let loc = self.loc();
         let taken: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
         let base = if out.host.trim().is_empty() { name } else { out.host.as_str() };
         let name = ebbtop_core::pairing::unique_source_name(base, &taken);
@@ -1827,14 +1894,9 @@ impl App {
             ob.probe_for = None;
             ob.failure = None;
             ob.msg = Some(if stored {
-                format!(
-                    "paired with {name}: token saved in the OS credential store. Test to unlock Save."
-                )
+                l10n::fmt(loc, Key::PairedSavedOnboarding, &[&name])
             } else {
-                format!(
-                    "paired with {name}: the OS credential store is unavailable, so the token is kept \
-                     for this session only. Test to unlock Save."
-                )
+                l10n::fmt(loc, Key::PairedSessionOnlyOnboarding, &[&name])
             });
         }
     }
@@ -1863,13 +1925,14 @@ impl App {
     /// under a free name and stores the token beside it; a first source then
     /// becomes active, exactly like the wizard's save.
     fn settings_paired(&mut self, ctx: &egui::Context, url: &str, out: PairOutcome) {
+        let loc = self.loc();
         let taken: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
         let name = ebbtop_core::pairing::unique_source_name(&out.host, &taken);
         let normalized = match self.validate_source(&name, url) {
             Ok(u) => u,
             Err(e) => {
                 self.pair_new = None;
-                self.pair_msg = Some(format!("paired, but the source was not added: {e}"));
+                self.pair_msg = Some(l10n::fmt(loc, Key::PairedNotAdded, &[&e]));
                 return;
             }
         };
@@ -1883,15 +1946,9 @@ impl App {
         store::append_log(&format!("pairing ok host={name} scope={}", out.scope));
         self.pair_new = None;
         self.pair_msg = Some(if stored {
-            format!(
-                "paired {name}: token saved in the OS credential store — Test it in the list above, \
-                 then set it active."
-            )
+            l10n::fmt(loc, Key::PairedSavedSettings, &[&name])
         } else {
-            format!(
-                "paired {name}: the OS credential store is unavailable, so the token is kept for \
-                 this session only."
-            )
+            l10n::fmt(loc, Key::PairedSessionOnlySettings, &[&name])
         });
         if first {
             self.use_active_source(ctx);
@@ -1908,6 +1965,8 @@ impl App {
     }
 
     /// Connection state in one word, the same words the status bar uses.
+    /// Canonical English on purpose: this feeds `support_summary_text`, which
+    /// stays English/canonical in every locale (see `docs/l10n-scope.md`).
     fn connection_word(&self) -> String {
         let st = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         let now = client::now_ms();
@@ -1964,6 +2023,7 @@ impl App {
     }
 
     fn onboarding(&mut self, ctx: &egui::Context) {
+        let loc = self.loc();
         // Poll the in-flight probe, if any.
         if let Some(ob) = self.onboard.as_mut()
             && ob.testing
@@ -1976,7 +2036,7 @@ impl App {
                         Ok(host) => {
                             ob.tested = ob.probe_for.clone();
                             ob.failure = None;
-                            ob.msg = Some(format!("connected: {host}"));
+                            ob.msg = Some(l10n::fmt(loc, Key::ConnectedTo, &[&host]));
                             store::append_log("onboarding test ok");
                         }
                         Err(e) => {
@@ -2007,7 +2067,11 @@ impl App {
         let mut save = false;
         let mut open_logs = false;
         let mut copy_summary = false;
-        egui::Window::new("Welcome to EbbTop")
+        // Fixed window id: the title is localized, and widget identity must not
+        // depend on the locale (position, open state and scroll stay put when
+        // the language changes).
+        egui::Window::new(l10n::text(loc, Key::OnbTitle))
+            .id(egui::Id::unique("onboarding-window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2020,7 +2084,7 @@ impl App {
                     return;
                 }
                 ui.set_max_width(560.0);
-                ui.label("Add your first host. The token is stored in the OS credential store.");
+                ui.label(l10n::text(loc, Key::OnbIntro));
                 ui.add_space(4.0);
 
                 // (1) Discovery: find an agent on this segment, or skip it.
@@ -2052,10 +2116,10 @@ impl App {
 
                 ui.add_space(6.0);
                 ui.separator();
-                ui.label(RichText::new("Or enter the address yourself").strong().color(w::TEXT));
-                ui.label(RichText::new("Agent port 45976; token file ~/services/ebbtop-agent/ebbtop.token on the agent host.").small().color(w::DIM));
-                ui.label(RichText::new("Fetch it with: ssh user@host cat services/ebbtop-agent/ebbtop.token (| pbcopy / | Set-Clipboard)").small().color(w::DIM));
-                ui.label(RichText::new("Tip: a bare hostname works — ws://, :45976 and /ws are added.").small().color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::OnbManualHeader)).strong().color(w::TEXT));
+                ui.label(RichText::new(l10n::text(loc, Key::OnbPortHint)).small().color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::OnbFetchHint)).small().color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::OnbBareHostTip)).small().color(w::DIM));
                 ui.add_space(6.0);
 
                 // Snapshot for the gated Save button; computed before the
@@ -2067,19 +2131,19 @@ impl App {
                 // still locked, and the note says exactly why.
                 let stale_test = tested.is_some() && !can_save;
                 let assumed = if current.1.is_empty() { None } else { Some(current.1.clone()) };
-                let tok_warn = client::token_warning(&current.2);
+                let tok_warn = client::token_warning(&current.2).is_some();
                 {
                     let ob = self.onboard.as_mut().expect("wizard open");
                     let mut token_edited = false;
                     egui::Grid::new("onboard").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                        ui.label("Name");
-                        ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver")).accessible_name("Name");
+                        ui.label(l10n::text(loc, Key::LabelName));
+                        ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver")).accessible_name(l10n::text(loc, Key::LabelName));
                         ui.end_row();
-                        ui.label("URL");
-                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text("myserver or ws://host:45976/ws")).accessible_name("URL");
+                        ui.label(l10n::text(loc, Key::LabelUrl));
+                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text(l10n::text(loc, Key::HintUrlLong))).accessible_name(l10n::text(loc, Key::LabelUrl));
                         ui.end_row();
-                        ui.label("Token");
-                        let tok = ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text("paste the agent token")).accessible_name("Agent token");
+                        ui.label(l10n::text(loc, Key::LabelToken));
+                        let tok = ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text(l10n::text(loc, Key::HintPasteToken))).accessible_name(l10n::text(loc, Key::AccessAgentToken));
                         token_edited = tok.changed();
                         ui.end_row();
                     });
@@ -2088,53 +2152,56 @@ impl App {
                     if token_edited && ob.issued.is_some() {
                         ob.issued = None;
                         ob.issued_name = None;
-                        ob.msg = Some("using the token you typed instead of the paired credential".to_string());
+                        ob.msg = Some(l10n::text(loc, Key::NoteTypedTokenOverride).to_string());
                     }
                     if ob.issued.is_some() {
                         ui.add(egui::Label::new(
-                            RichText::new("credential: issued by pairing and stored in the OS credential store (not shown)")
+                            RichText::new(l10n::text(loc, Key::NotePairedCredential))
                                 .small()
                                 .color(w::OK),
                         ).wrap());
                     }
                     if let Some(u) = assumed {
-                        ui.label(RichText::new(format!("will connect to {u}")).small().color(w::DIM));
+                        ui.label(RichText::new(l10n::fmt(loc, Key::WillConnectTo, &[&u])).small().color(w::DIM));
                     }
-                    if let Some(w) = tok_warn {
-                        ui.label(RichText::new(w).small().color(w::WARN));
+                    if tok_warn {
+                        // One fixed advisory from core (`token_warning`); the
+                        // text shown is the localized equivalent, and English
+                        // stays byte-identical to the core wording.
+                        ui.label(RichText::new(l10n::text(loc, Key::TokenUnusual)).small().color(w::WARN));
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Test").clicked() {
+                        if ui.button(l10n::text(loc, Key::BtnTest)).clicked() {
                             test = true;
                         }
-                        let save_btn = ui.add_enabled(can_save, egui::Button::new("Save and connect"));
+                        let save_btn = ui.add_enabled(can_save, egui::Button::new(l10n::text(loc, Key::BtnSaveConnect)));
                         if save_btn.clicked() {
                             save = true;
                         }
                         if ui
-                            .button("Use a pairing code")
-                            .on_hover_text("probe the address above and exchange a 6-digit code for a token")
+                            .button(l10n::text(loc, Key::BtnUsePairingCode))
+                            .on_hover_text(l10n::text(loc, Key::HoverUsePairingCode))
                             .clicked()
                         {
                             begin_pair = true;
                         }
-                        if ui.button("Skip").clicked() {
+                        if ui.button(l10n::text(loc, Key::BtnSkip)).clicked() {
                             skip = true;
                         }
                     });
                     if !can_save {
-                        ui.label(RichText::new("Save unlocks after a green Test for these exact values.").small().color(w::DIM));
+                        ui.label(RichText::new(l10n::text(loc, Key::NoteSaveUnlock)).small().color(w::DIM));
                     }
                     if stale_test {
                         ui.add(egui::Label::new(
-                            RichText::new("fields changed since the last green Test — Test again to unlock Save")
+                            RichText::new(l10n::text(loc, Key::NoteFieldsChanged))
                                 .small()
                                 .color(w::WARN),
                         ).wrap());
                     }
                     if ob.testing {
-                        ui.label(RichText::new("testing…").color(w::DIM));
+                        ui.label(RichText::new(l10n::text(loc, Key::Testing)).color(w::DIM));
                     }
                     if let Some(m) = &ob.msg {
                         ui.add(egui::Label::new(RichText::new(m).color(w::WARN)).wrap());
@@ -2143,17 +2210,17 @@ impl App {
                     // scrubbed detail, and the way to the logs. Same window,
                     // same style, one extra block (E4 surfaces, shared).
                     if let Some(d) = &ob.failure {
-                        w::error_block(ui, d.headline(), d.next_action(), &d.detail);
+                        draw_failure(ui, loc, d);
                         if let Some(p) = store::log_path() {
                             ui.add(egui::Label::new(
-                                RichText::new(format!("log: {}", p.display())).small().monospace().color(w::DIM),
+                                RichText::new(l10n::fmt(loc, Key::LogLine, &[&p.display().to_string()])).small().monospace().color(w::DIM),
                             ).wrap());
                         }
                         ui.horizontal(|ui| {
-                            if ui.button("Open logs").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnOpenLogs)).clicked() {
                                 open_logs = true;
                             }
-                            if ui.button("Copy support summary").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnCopySupportSummary)).clicked() {
                                 copy_summary = true;
                             }
                         });
@@ -2223,7 +2290,7 @@ impl App {
                     match r {
                         Ok(host) => {
                             self.source_failure = None;
-                            self.source_msg = Some(format!("connected: {host}"));
+                            self.source_msg = Some(l10n::fmt(self.loc(), Key::ConnectedTo, &[&host]));
                         }
                         Err(e) => {
                             let d = client::Diagnosis::from_error(&client::redact(e, self.token.as_deref()));
@@ -2237,7 +2304,9 @@ impl App {
                 None => {}
             }
         }
-        egui::Window::new("Settings")
+        let loc = self.loc();
+        egui::Window::new(l10n::text(loc, Key::SettingsTitle))
+            .id(egui::Id::unique("settings-window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2245,11 +2314,11 @@ impl App {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     for (tab, label) in [
-                        (SettingsTab::Sources, "Sources"),
-                        (SettingsTab::Display, "Display"),
-                        (SettingsTab::Connection, "Connection"),
+                        (SettingsTab::Sources, l10n::text(loc, Key::TabSources)),
+                        (SettingsTab::Display, l10n::text(loc, Key::TabDisplay)),
+                        (SettingsTab::Connection, l10n::text(loc, Key::TabConnection)),
                         #[cfg(not(feature = "store"))]
-                        (SettingsTab::Updates, "Updates"),
+                        (SettingsTab::Updates, l10n::text(loc, Key::TabUpdates)),
                     ] {
                         if ui.selectable_label(self.settings_tab == tab, label).clicked() {
                             self.settings_tab = tab;
@@ -2280,8 +2349,9 @@ impl App {
     }
 
     fn settings_sources(&mut self, ctx: &egui::Context, ui: &mut Ui) {
+        let loc = self.loc();
         if self.cfg.sources.is_empty() {
-            ui.label(RichText::new("no sources yet; add one below").color(w::DIM));
+            ui.label(RichText::new(l10n::text(loc, Key::NoSourcesAddBelow)).color(w::DIM));
         }
         let n = self.cfg.sources.len();
         for i in 0..n {
@@ -2293,7 +2363,7 @@ impl App {
             // fixed range never indexes past the end.
             let mut removed = false;
             ui.horizontal(|ui| {
-                if ui.selectable_label(is_active, &name).on_hover_text("set active source").clicked()
+                if ui.selectable_label(is_active, &name).on_hover_text(l10n::text(loc, Key::HoverSetActiveSource)).clicked()
                     && !is_active
                 {
                     self.cfg.active = i;
@@ -2301,10 +2371,10 @@ impl App {
                     self.use_active_source(ctx);
                 }
                 ui.label(RichText::new(&url).monospace().small().color(w::DIM));
-                if ui.button("Test").on_hover_text(format!("connect once to {name}")).clicked() {
+                if ui.button(l10n::text(loc, Key::BtnTest)).on_hover_text(l10n::fmt(loc, Key::HoverConnectOnce, &[&name])).clicked() {
                     self.start_probe(i);
                 }
-                if ui.button("Remove").clicked() {
+                if ui.button(l10n::text(loc, Key::BtnRemove)).clicked() {
                     self.remove_source(i);
                     store::delete_token_for(&name);
                     let _ = store::save_config(&self.cfg);
@@ -2317,15 +2387,15 @@ impl App {
             }
         }
         if self.testing {
-            ui.label(RichText::new("testing…").color(w::DIM));
+            ui.label(RichText::new(l10n::text(loc, Key::Testing)).color(w::DIM));
         }
         if let Some(m) = &self.source_msg {
             ui.label(RichText::new(m).color(w::WARN));
         }
         let mut open_logs = false;
         if let Some(d) = &self.source_failure {
-            w::error_block(ui, d.headline(), d.next_action(), &d.detail);
-            if ui.button("Open logs").clicked() {
+            draw_failure(ui, loc, d);
+            if ui.button(l10n::text(loc, Key::BtnOpenLogs)).clicked() {
                 open_logs = true;
             }
         }
@@ -2336,18 +2406,18 @@ impl App {
         }
         ui.separator();
         ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.add(egui::TextEdit::singleline(&mut self.source_name_edit).desired_width(110.0).hint_text("myserver")).accessible_name("New source name");
-            ui.label("URL");
-            ui.add(egui::TextEdit::singleline(&mut self.source_url_edit).desired_width(220.0).hint_text("ws://host:port/ws")).accessible_name("New source URL");
-            if ui.button("Add").clicked() {
+            ui.label(l10n::text(loc, Key::LabelName));
+            ui.add(egui::TextEdit::singleline(&mut self.source_name_edit).desired_width(110.0).hint_text(l10n::text(loc, Key::HintServerName))).accessible_name(l10n::text(loc, Key::AccessNewSourceName));
+            ui.label(l10n::text(loc, Key::LabelUrl));
+            ui.add(egui::TextEdit::singleline(&mut self.source_url_edit).desired_width(220.0).hint_text(l10n::text(loc, Key::HintUrlShort))).accessible_name(l10n::text(loc, Key::AccessNewSourceUrl));
+            if ui.button(l10n::text(loc, Key::BtnAdd)).clicked() {
                 let name = self.source_name_edit.clone();
                 let url = self.source_url_edit.clone();
                 match self.add_source(&name, &url) {
                     Ok(()) => {
                         self.source_name_edit.clear();
                         self.source_url_edit.clear();
-                        self.source_msg = Some(format!("added {name}"));
+                        self.source_msg = Some(l10n::fmt(loc, Key::AddedSource, &[&name]));
                         let _ = store::save_config(&self.cfg);
                     }
                     Err(e) => self.source_msg = Some(e),
@@ -2358,13 +2428,10 @@ impl App {
         // ---- Pair a new host (the wizard's flow, from Settings) ----------
         ui.add_space(6.0);
         ui.separator();
-        ui.label(RichText::new("Pair a new host").strong().color(w::TEXT));
+        ui.label(RichText::new(l10n::text(loc, Key::PairNewHost)).strong().color(w::TEXT));
         ui.add(
             egui::Label::new(
-                RichText::new(
-                    "Run `ebbtop-agent --pair` on the host for a 6-digit code (about 5 minutes, one \
-                     use), then pick it below or type its address. No token copying needed.",
-                )
+                RichText::new(l10n::text(loc, Key::PairRunHint))
                 .small()
                 .color(w::DIM),
             )
@@ -2380,16 +2447,16 @@ impl App {
         }
         let mut manual_pair = false;
         ui.horizontal(|ui| {
-            ui.label("Address");
+            ui.label(l10n::text(loc, Key::LabelAddress));
             ui.add(
                 egui::TextEdit::singleline(&mut self.pair_addr_edit)
                     .desired_width(220.0)
-                    .hint_text("host or ws://host:45976/ws"),
+                    .hint_text(l10n::text(loc, Key::HintHostOrWs)),
             )
-            .accessible_name("Address to pair with");
+            .accessible_name(l10n::text(loc, Key::AccessAddressToPair));
             if ui
-                .button("Pair with code")
-                .on_hover_text("pair with the address you typed, using a 6-digit code")
+                .button(l10n::text(loc, Key::BtnPairWithCode))
+                .on_hover_text(l10n::text(loc, Key::HoverPairWithCode))
                 .clicked()
             {
                 manual_pair = true;
@@ -2416,7 +2483,7 @@ impl App {
                         Some(Pairing::for_address(if name.is_empty() { "host" } else { &name }, &url));
                     self.pair_msg = None;
                 }
-                Err(e) => self.pair_msg = Some(format!("bad URL: {e}")),
+                Err(e) => self.pair_msg = Some(l10n::fmt(loc, Key::BadUrl, &[&e.to_string()])),
             }
         }
         if pair_start
@@ -2430,27 +2497,28 @@ impl App {
     }
 
     fn settings_display(&mut self, ui: &mut Ui) {
-        ui.label(RichText::new("Panels").strong().color(w::TEXT));
+        let loc = self.loc();
+        ui.label(RichText::new(l10n::text(loc, Key::PanelsHeader)).strong().color(w::TEXT));
         egui::Grid::new("panels").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
-            let changed_cpu = ui.checkbox(&mut self.cfg.show_cpu, "CPU").changed();
-            let changed_gpu = ui.checkbox(&mut self.cfg.show_gpu, "GPU").changed();
-            let changed_mem = ui.checkbox(&mut self.cfg.show_mem, "Mem").changed();
+            let changed_cpu = ui.checkbox(&mut self.cfg.show_cpu, l10n::text(loc, Key::PanelCpu)).changed();
+            let changed_gpu = ui.checkbox(&mut self.cfg.show_gpu, l10n::text(loc, Key::PanelGpu)).changed();
+            let changed_mem = ui.checkbox(&mut self.cfg.show_mem, l10n::text(loc, Key::PanelMem)).changed();
             ui.end_row();
-            let changed_net = ui.checkbox(&mut self.cfg.show_net, "Net").changed();
-            let changed_disk = ui.checkbox(&mut self.cfg.show_disk, "Disk").changed();
+            let changed_net = ui.checkbox(&mut self.cfg.show_net, l10n::text(loc, Key::PanelNet)).changed();
+            let changed_disk = ui.checkbox(&mut self.cfg.show_disk, l10n::text(loc, Key::PanelDisk)).changed();
             if changed_cpu || changed_gpu || changed_mem || changed_net || changed_disk {
                 let _ = store::save_config(&self.cfg);
             }
         });
         let top_height = ui
-            .add(egui::Slider::new(&mut self.cfg.top_frac, 0.25..=0.75).text("Top height"))
-            .accessible_name("Top height");
+            .add(egui::Slider::new(&mut self.cfg.top_frac, 0.25..=0.75).text(l10n::text(loc, Key::TopHeight)))
+            .accessible_name(l10n::text(loc, Key::TopHeight));
         if top_height.changed() {
             let _ = store::save_config(&self.cfg);
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.selectable_label(self.cfg.compact, "Dense").on_hover_text("tighter spacing").clicked() {
+            if ui.selectable_label(self.cfg.compact, l10n::text(loc, Key::Dense)).on_hover_text(l10n::text(loc, Key::HoverDense)).clicked() {
                 self.cfg.compact = !self.cfg.compact;
                 let _ = store::save_config(&self.cfg);
                 style_with(ui.ctx(), self.cfg.compact);
@@ -2461,52 +2529,74 @@ impl App {
                     let _ = store::save_config(&self.cfg);
                 }
             }
-            if ui.checkbox(&mut self.cfg.log_scale, "log scale").changed() {
+            if ui.checkbox(&mut self.cfg.log_scale, l10n::text(loc, Key::LogScale)).changed() {
                 let _ = store::save_config(&self.cfg);
+            }
+        });
+        ui.separator();
+        // Language: each option is named in its own language, never translated,
+        // so a user who cannot read the current UI language can still find it.
+        // A pick is persisted through the same atomic config save as every
+        // other display setting; the next frame repaints in the new language.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(l10n::text(loc, Key::LanguageLabel)).strong().color(w::TEXT));
+            let mut chosen = None;
+            for opt in Locale::ALL {
+                let picked = ui
+                    .selectable_label(self.cfg.locale() == opt, opt.native_name())
+                    .on_hover_text(l10n::text(loc, Key::LanguageHover))
+                    .clicked();
+                if picked && self.cfg.locale() != opt {
+                    chosen = Some(opt);
+                }
+            }
+            if let Some(opt) = chosen {
+                self.set_language(opt);
             }
         });
     }
 
     /// Connection tab for the active source. True when Save was pressed.
     fn settings_connection(&mut self, ui: &mut Ui) -> bool {
+        let loc = self.loc();
         let mut save = false;
         if let Some(s) = self.cfg.active_source() {
-            ui.label(RichText::new(format!("source: {}", s.name)).strong().color(w::TEXT));
+            ui.label(RichText::new(l10n::fmt(loc, Key::SourceLine, &[&s.name])).strong().color(w::TEXT));
         } else {
-            ui.label(RichText::new("no sources yet; add one under Sources").color(w::WARN));
+            ui.label(RichText::new(l10n::text(loc, Key::NoSourcesAddUnder)).color(w::WARN));
         }
         egui::Grid::new("conn").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Agent URL");
-            ui.add(egui::TextEdit::singleline(&mut self.url_edit).desired_width(300.0).hint_text("ws://host:port/ws")).accessible_name("Agent URL");
+            ui.label(l10n::text(loc, Key::LabelAgentUrl));
+            ui.add(egui::TextEdit::singleline(&mut self.url_edit).desired_width(300.0).hint_text(l10n::text(loc, Key::HintUrlShort))).accessible_name(l10n::text(loc, Key::LabelAgentUrl));
             ui.end_row();
-            ui.label("Token");
+            ui.label(l10n::text(loc, Key::LabelToken));
             ui.add(egui::TextEdit::singleline(&mut self.token_edit).password(true).desired_width(300.0)
-                .hint_text("leave empty to keep the saved token"))
-                .accessible_name("Agent token");
+                .hint_text(l10n::text(loc, Key::HintKeepSavedToken)))
+                .accessible_name(l10n::text(loc, Key::AccessAgentToken));
             ui.end_row();
-            ui.label("Stored");
+            ui.label(l10n::text(loc, Key::LabelStored));
             ui.label(match &self.token_src {
-                TokenSource::Env => "from environment variable".to_string(),
-                TokenSource::Keyring => "in OS credential store".to_string(),
-                TokenSource::Missing => "no token saved".to_string(),
-                TokenSource::Error(e) => format!("credential store error: {e}"),
+                TokenSource::Env => l10n::text(loc, Key::StoredEnv).to_string(),
+                TokenSource::Keyring => l10n::text(loc, Key::StoredKeyring).to_string(),
+                TokenSource::Missing => l10n::text(loc, Key::StoredMissing).to_string(),
+                TokenSource::Error(e) => l10n::fmt(loc, Key::StoredError, &[e]),
             });
             ui.end_row();
         });
         ui.add_space(6.0);
         if let Some(p) = store::config_path() {
-            ui.label(RichText::new(format!("config: {}", p.display())).small().color(w::DIM));
+            ui.label(RichText::new(l10n::fmt(loc, Key::ConfigPath, &[&p.display().to_string()])).small().color(w::DIM));
         }
         if let Some(p) = store::log_path() {
-            ui.label(RichText::new(format!("log: {}", p.display())).small().color(w::DIM));
+            ui.label(RichText::new(l10n::fmt(loc, Key::LogLine, &[&p.display().to_string()])).small().color(w::DIM));
         }
         ui.horizontal(|ui| {
-            if ui.button("Open logs").clicked()
+            if ui.button(l10n::text(loc, Key::BtnOpenLogs)).clicked()
                 && let Err(e) = store::open_logs()
             {
                 self.settings_msg = Some(e);
             }
-            if ui.button("Copy support summary").clicked() {
+            if ui.button(l10n::text(loc, Key::BtnCopySupportSummary)).clicked() {
                 let m = self.support_summary_action(ui.ctx());
                 self.settings_msg = Some(m);
             }
@@ -2514,17 +2604,18 @@ impl App {
         if let Some(m) = &self.settings_msg {
             ui.label(RichText::new(m).color(w::WARN));
         }
-        if ui.button("Save and reconnect").clicked() {
+        if ui.button(l10n::text(loc, Key::BtnSaveReconnect)).clicked() {
             save = true;
         }
         save
     }
 
     fn save_settings(&mut self, ctx: &egui::Context) {
+        let loc = self.loc();
         self.settings_msg = None;
         let url = self.url_edit.trim().to_string();
         if let Err(e) = client::connect_url(&url, None) {
-            self.settings_msg = Some(format!("bad URL: {e}"));
+            self.settings_msg = Some(l10n::fmt(loc, Key::BadUrl, &[&e.to_string()]));
             return;
         }
         match self.cfg.sources.get_mut(self.cfg.active) {
@@ -2536,7 +2627,7 @@ impl App {
             }
         }
         if let Err(e) = store::save_config(&self.cfg) {
-            self.settings_msg = Some(format!("config not saved: {e}"));
+            self.settings_msg = Some(l10n::fmt(loc, Key::ConfigNotSaved, &[&e.to_string()]));
         }
         let t = std::mem::take(&mut self.token_edit);
         let t = t.trim();
@@ -2548,7 +2639,8 @@ impl App {
                 Err(e) => {
                     // Keep it for this session; say so instead of failing silently.
                     self.token_src = TokenSource::Error(e.to_string());
-                    self.settings_msg = Some(format!("token used for this session only, store failed: {e}"));
+                    self.settings_msg =
+                        Some(l10n::fmt(loc, Key::TokenSessionOnly, &[&e.to_string()]));
                 }
             }
         }
@@ -2559,22 +2651,31 @@ impl App {
     /// Compiled out of Store builds (no updater, no check state).
     #[cfg(not(feature = "store"))]
     fn settings_updates(&mut self, ui: &mut Ui) {
+        let loc = self.loc();
         ui.label(RichText::new(format!("EbbTop {}", version::current_version())).strong().color(w::TEXT));
         let status = match self.update.status() {
-            UpdateStatus::Idle => "never checked".to_string(),
-            UpdateStatus::Checking => "checking…".to_string(),
-            UpdateStatus::Available { version, .. } => format!("{version} available"),
-            UpdateStatus::UpToDate { version } => format!("up to date ({version})"),
-            UpdateStatus::Failed(e) => format!("update failed: {e}"),
-            UpdateStatus::Accepted { version, .. } => format!("{version} approved"),
-            UpdateStatus::Downloading { version, done } => {
-                format!("downloading {version} ({} MB)", done / 1_000_000)
+            UpdateStatus::Idle => l10n::text(loc, Key::UpdatesNeverChecked).to_string(),
+            UpdateStatus::Checking => l10n::text(loc, Key::UpdatesChecking).to_string(),
+            UpdateStatus::Available { version, .. } => {
+                l10n::fmt(loc, Key::UpdatesAvailable, &[&version])
             }
-            UpdateStatus::Ready { version, .. } => format!("{version} ready to restart"),
+            UpdateStatus::UpToDate { version } => l10n::fmt(loc, Key::UpdatesUpToDate, &[&version]),
+            UpdateStatus::Failed(e) => l10n::fmt(loc, Key::UpdatesFailed, &[&e]),
+            UpdateStatus::Accepted { version, .. } => {
+                l10n::fmt(loc, Key::UpdatesApproved, &[&version])
+            }
+            UpdateStatus::Downloading { version, done } => l10n::fmt(
+                loc,
+                Key::UpdatesDownloading,
+                &[&version, &(done / 1_000_000).to_string()],
+            ),
+            UpdateStatus::Ready { version, .. } => {
+                l10n::fmt(loc, Key::UpdatesReadyRestart, &[&version])
+            }
         };
         ui.label(RichText::new(status).monospace().color(w::DIM));
         ui.add_space(6.0);
-        if ui.button("Check for updates").clicked() {
+        if ui.button(l10n::text(loc, Key::BtnCheckUpdates)).clicked() {
             self.update.start(update::fetch_latest_release);
         }
         // Re-offer a declined-but-still-available release without
@@ -2582,7 +2683,7 @@ impl App {
         if let UpdateStatus::Available { version, .. } = self.update.status() {
             let version = version.clone();
             ui.add_space(6.0);
-            if ui.button(format!("Download update {version}")).clicked() {
+            if ui.button(l10n::fmt(loc, Key::BtnDownloadUpdate, &[&version])).clicked() {
                 self.update_open = true;
                 self.update.mark_notified();
             }
@@ -2855,6 +2956,7 @@ mod tests {
     use ebbtop_core::wire::{DiskInfo, DiskIo, GpuMetrics, Metrics, NetworkInfo, Process, Processes};
 
     mod a11y;
+    mod l10n;
 
     fn fake_state(app: &App, now: u64) {
         let mut s = app.shared().lock().unwrap().clone();

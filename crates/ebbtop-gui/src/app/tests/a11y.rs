@@ -16,18 +16,21 @@ use super::*;
 use egui::accesskit::{Action, NodeId, TreeUpdate};
 
 /// One node of the AccessKit tree, flattened for assertions.
+///
+/// `pub(super)` so the localization tests in the sibling `l10n` module can make
+/// the same assertions against a Chinese frame.
 #[derive(Clone, Debug)]
-struct NodeInfo {
-    role: egui::Role,
-    label: Option<String>,
-    value: Option<String>,
-    description: Option<String>,
-    placeholder: Option<String>,
-    disabled: bool,
-    focused: bool,
-    click: bool,
-    focus: bool,
-    rect: Option<[f32; 4]>,
+pub(super) struct NodeInfo {
+    pub(super) role: egui::Role,
+    pub(super) label: Option<String>,
+    pub(super) value: Option<String>,
+    pub(super) description: Option<String>,
+    pub(super) placeholder: Option<String>,
+    pub(super) disabled: bool,
+    pub(super) focused: bool,
+    pub(super) click: bool,
+    pub(super) focus: bool,
+    pub(super) rect: Option<[f32; 4]>,
 }
 
 impl NodeInfo {
@@ -35,44 +38,44 @@ impl NodeInfo {
     /// (egui reports `Role::Label` and `Role::TextRun` text there), else the
     /// description. A placeholder is not a name — see
     /// `named_by_placeholder_only`.
-    fn name(&self) -> Option<&str> {
+    pub(super) fn name(&self) -> Option<&str> {
         [self.label.as_deref(), self.value.as_deref(), self.description.as_deref()]
             .into_iter()
             .flatten()
             .find(|s| !s.trim().is_empty())
     }
 
-    fn named_by_placeholder_only(&self) -> bool {
+    pub(super) fn named_by_placeholder_only(&self) -> bool {
         self.name().is_none() && self.placeholder.as_deref().is_some_and(|p| !p.trim().is_empty())
     }
 
-    fn role_name(&self) -> String {
+    pub(super) fn role_name(&self) -> String {
         format!("{:?}", self.role)
     }
 
     /// A `egui_extras` table row: the row `Ui` senses clicks, so it is
     /// focusable, but `TableRow` never reports a role or a name (finding A-2).
-    fn is_table_row(&self) -> bool {
+    pub(super) fn is_table_row(&self) -> bool {
         self.role == egui::Role::GenericContainer && self.name().is_none()
     }
 
     /// The drag handle between the top panes and the tables: `Sense::drag()`,
     /// no role, no name, no keyboard operation (finding A-8).
-    fn is_splitter(&self) -> bool {
+    pub(super) fn is_splitter(&self) -> bool {
         self.role == egui::Role::Unknown
     }
 }
 
 /// What one frame produced.
-struct Frame {
-    nodes: Vec<NodeInfo>,
-    texts: Vec<String>,
-    shapes: Vec<egui::epaint::ClippedShape>,
+pub(super) struct Frame {
+    pub(super) nodes: Vec<NodeInfo>,
+    pub(super) texts: Vec<String>,
+    pub(super) shapes: Vec<egui::epaint::ClippedShape>,
 }
 
 impl Frame {
     /// Every string the tree exposes.
-    fn tree_text(&self) -> Vec<String> {
+    pub(super) fn tree_text(&self) -> Vec<String> {
         self.nodes
             .iter()
             .flat_map(|n| [n.label.clone(), n.value.clone(), n.description.clone()])
@@ -80,17 +83,17 @@ impl Frame {
             .collect()
     }
 
-    fn focus(&self) -> Option<&NodeInfo> {
+    pub(super) fn focus(&self) -> Option<&NodeInfo> {
         self.nodes.iter().find(|n| n.focused)
     }
 
-    fn by_name(&self, name: &str) -> Option<&NodeInfo> {
+    pub(super) fn by_name(&self, name: &str) -> Option<&NodeInfo> {
         self.nodes.iter().find(|n| n.name() == Some(name))
     }
 
     /// Inputs a screen reader must be able to name, that have no name at all
     /// (a hint text is tracked separately by `named_by_placeholder_only`).
-    fn nameless_inputs(&self) -> Vec<&NodeInfo> {
+    pub(super) fn nameless_inputs(&self) -> Vec<&NodeInfo> {
         self.nodes
             .iter()
             .filter(|n| egui::accessibility::is_input(n.role))
@@ -99,7 +102,7 @@ impl Frame {
     }
 
     /// Focusable controls a reader reaches with Tab, minus the pinned gaps.
-    fn unnamed_focusables(&self) -> Vec<&NodeInfo> {
+    pub(super) fn unnamed_focusables(&self) -> Vec<&NodeInfo> {
         self.nodes
             .iter()
             .filter(|n| n.focus || n.click)
@@ -113,7 +116,7 @@ impl Frame {
     }
 
     /// Painted text that survives its clip rect (what the user can see).
-    fn visible_texts(&self) -> Vec<(egui::Rect, String)> {
+    pub(super) fn visible_texts(&self) -> Vec<(egui::Rect, String)> {
         let mut out = vec![];
         for c in &self.shapes {
             if let egui::Shape::Text(t) = &c.shape {
@@ -134,7 +137,7 @@ impl Frame {
     /// and how many are painted entirely outside it. This is the evidence for
     /// the report's zoom table (A-5); the numbers are pinned in
     /// `a11y_zoom_paints_no_overlapping_text_and_keeps_panes_reachable`.
-    fn text_census(&self) -> (usize, usize) {
+    pub(super) fn text_census(&self) -> (usize, usize) {
         let mut visible = 0;
         let mut clipped = 0;
         for c in &self.shapes {
@@ -154,7 +157,7 @@ impl Frame {
     }
 
     /// Visible text runs that overlap another visible run.
-    fn visible_text_overlaps(&self) -> Vec<String> {
+    pub(super) fn visible_text_overlaps(&self) -> Vec<String> {
         let texts = self.visible_texts();
         let mut out = vec![];
         for i in 0..texts.len() {
@@ -171,16 +174,16 @@ impl Frame {
 
 /// A persistent headless context with AccessKit on, so focus, scroll offsets
 /// and the tree survive between frames like they do in a running app.
-struct Walk {
-    ctx: egui::Context,
+pub(super) struct Walk {
+    pub(super) ctx: egui::Context,
 }
 
 impl Walk {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::at_zoom(1.0)
     }
 
-    fn at_zoom(zoom: f32) -> Self {
+    pub(super) fn at_zoom(zoom: f32) -> Self {
         let ctx = egui::Context::default();
         style(&ctx);
         ctx.enable_accesskit();
@@ -190,11 +193,11 @@ impl Walk {
 
     /// One frame. `screen` is the physical window size; the points handed to
     /// egui shrink as the zoom factor grows, exactly like a real window.
-    fn frame(&mut self, app: &mut App, screen: (f32, f32), events: Vec<egui::Event>) -> Frame {
+    pub(super) fn frame(&mut self, app: &mut App, screen: (f32, f32), events: Vec<egui::Event>) -> Frame {
         self.frame_age(app, screen, events, Some(0))
     }
 
-    fn frame_age(
+    pub(super) fn frame_age(
         &mut self,
         app: &mut App,
         screen: (f32, f32),
@@ -228,7 +231,7 @@ impl Walk {
     }
 
     /// Three settled frames, like the existing render helpers.
-    fn settle(&mut self, app: &mut App, screen: (f32, f32)) -> Frame {
+    pub(super) fn settle(&mut self, app: &mut App, screen: (f32, f32)) -> Frame {
         let mut last = self.frame(app, screen, vec![]);
         for _ in 0..2 {
             last = self.frame(app, screen, vec![]);
@@ -236,14 +239,14 @@ impl Walk {
         last
     }
 
-    fn tab(&mut self, app: &mut App, screen: (f32, f32)) -> Frame {
+    pub(super) fn tab(&mut self, app: &mut App, screen: (f32, f32)) -> Frame {
         self.frame(app, screen, vec![key(egui::Key::Tab)])
     }
 
     /// Tab until the focused node matches `want`. Returns the stop index and
     /// the frame of the *following* frame, because egui paints focus one frame
     /// after the key press (the tree already reports it in the press frame).
-    fn focus_matching(
+    pub(super) fn focus_matching(
         &mut self,
         app: &mut App,
         screen: (f32, f32),
@@ -318,7 +321,7 @@ fn paint_in(shapes: &[egui::epaint::ClippedShape], rect: egui::Rect) -> Vec<Stri
 
 /// Dashboard with the fixture sample: 401 processes, a hottest pid with detail
 /// history, one disk. `onboard` cleared so the wizard does not cover it.
-fn dashboard() -> App {
+pub(super) fn dashboard() -> App {
     let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
     app.onboard = None;
     fake_state(&app, client::now_ms());

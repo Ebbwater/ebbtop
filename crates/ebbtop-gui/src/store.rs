@@ -20,6 +20,13 @@ fn default_top_frac() -> f32 {
     0.55
 }
 
+/// UI language default: English. Stored as a canonical id string so a future
+/// build can add locales without a schema change; any value this build does
+/// not know resolves to English (see `l10n::Locale::from_config`).
+fn default_language() -> String {
+    "en".to_string()
+}
+
 /// One monitored host. Each source keeps its own token in the OS
 /// credential store under its name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,6 +93,12 @@ pub struct Config {
     /// a newer one still does. Empty means none skipped.
     #[serde(default)]
     pub update_skipped: String,
+    /// UI language, as a canonical id: `en` (default), `zh-Hans-CN` or
+    /// `zh-Hant-TW`. Missing in old files and unknown values both resolve to
+    /// English; the raw string is kept as written so a hand edit or a value
+    /// from a newer build is never rewritten behind the user's back.
+    #[serde(default = "default_language")]
+    pub language: String,
 }
 
 impl Default for Config {
@@ -114,6 +127,7 @@ impl Default for Config {
             collapsed_workloads: false,
             update_last_check_ms: 0,
             update_skipped: String::new(),
+            language: default_language(),
         }
     }
 }
@@ -140,6 +154,11 @@ impl Config {
     /// Currently selected source, if any.
     pub fn active_source(&self) -> Option<&Source> {
         self.sources.get(self.active)
+    }
+
+    /// Resolved UI language. Unknown, blank or missing values are English.
+    pub fn locale(&self) -> crate::l10n::Locale {
+        crate::l10n::Locale::from_config(&self.language)
     }
 
     fn clamp_active(&mut self) {
@@ -618,6 +637,32 @@ mod tests {
         let c = parse_config(r#"{"sources":[]}"#);
         assert_eq!(c.update_last_check_ms, 0);
         assert!(c.update_skipped.is_empty());
+    }
+
+    #[test]
+    fn old_config_gets_english_language() {
+        let c = parse_config(r#"{"sources":[]}"#);
+        assert_eq!(c.language, "en");
+        assert_eq!(c.locale(), crate::l10n::Locale::English);
+        assert_eq!(Config::default().language, "en");
+    }
+
+    #[test]
+    fn known_and_unknown_language_values() {
+        let c = parse_config(r#"{"sources":[],"language":"zh-Hant-TW"}"#);
+        assert_eq!(c.locale(), crate::l10n::Locale::ZhHantTw);
+        // An unknown value (hand edit, future build, Hong Kong tag) resolves
+        // to English without dropping the rest of the config, and the raw
+        // string is kept as written.
+        let c = parse_config(
+            r#"{"sources":[{"name":"a","url":"ws://h:1/ws"}],"language":"zh-Hant-HK"}"#,
+        );
+        assert_eq!(c.locale(), crate::l10n::Locale::English);
+        assert_eq!(c.sources.len(), 1);
+        assert_eq!(c.language, "zh-Hant-HK");
+        // Nothing localized is ever written into the config.
+        let c = Config { language: "zh-Hans-CN".into(), ..Config::default() };
+        assert!(!serde_json::to_string(&c).expect("serialize").contains('中'));
     }
 
     #[test]

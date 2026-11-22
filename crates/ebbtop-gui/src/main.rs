@@ -5,6 +5,7 @@
 
 mod app;
 mod discovery;
+mod l10n;
 mod store;
 // The updater (release check, verified download, install.ps1/macOS apply) is
 // compiled out of Store builds: the MSIX is sealed and Microsoft delivers
