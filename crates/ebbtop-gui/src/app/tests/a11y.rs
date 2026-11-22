@@ -348,12 +348,20 @@ fn screens() -> Vec<(&'static str, App)> {
     });
     out.push(("onboarding + pairing code", paired));
 
-    for (name, tab) in [
-        ("settings sources", SettingsTab::Sources),
-        ("settings display", SettingsTab::Display),
-        ("settings connection", SettingsTab::Connection),
-        ("settings updates", SettingsTab::Updates),
-    ] {
+    let tabs: Vec<(&str, SettingsTab)> = {
+        let mut v = vec![
+            ("settings sources", SettingsTab::Sources),
+            ("settings display", SettingsTab::Display),
+            ("settings connection", SettingsTab::Connection),
+        ];
+        // The Updates tab exists only in updater builds: the Store package
+        // compiles the updater out, and SettingsTab::Updates is cfg-gated in
+        // app.rs, so this scene is absent from store-feature test runs.
+        #[cfg(not(feature = "store"))]
+        v.push(("settings updates", SettingsTab::Updates));
+        v
+    };
+    for (name, tab) in tabs {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         app.onboard = None;
         app.settings_open = true;
@@ -366,11 +374,16 @@ fn screens() -> Vec<(&'static str, App)> {
     kill.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1 });
     out.push(("kill confirm", kill));
 
-    let mut upd = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
-    upd.onboard = None;
-    upd.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
-    settle_update(&mut upd);
-    out.push(("update dialog", upd));
+    // The update dialog is an updater-build scene: the App::update field it
+    // drives is cfg-gated out of store builds.
+    #[cfg(not(feature = "store"))]
+    {
+        let mut upd = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        upd.onboard = None;
+        upd.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+        settle_update(&mut upd);
+        out.push(("update dialog", upd));
+    }
 
     out
 }
