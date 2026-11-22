@@ -234,6 +234,20 @@ if ! msix_sdk_check_digest "$WORK/sdk" "$actual"; then
 fi
 
 echo "== configuring (pack support on, samples/tests off)"
+# Xerces picks its transcoder and message loader at configure time
+# (lib/xerces/cmake/XercesTranscoderSelection.cmake: ICU first when the tree's
+# own find_package(ICU) succeeds, else GNU iconv, else the portable iconv).
+# On an image with ICU development headers the default therefore becomes
+# transcoder=icu, and src/xercesc/util/regx/RangeToken.cpp then includes
+# <unicode/uchar.h>: modern ICU headers use C++17 library facilities
+# (std::is_same_v, std::u16string_view), which this C++14 tree cannot compile
+# (hosted run 45076924984, job 137376128159). Select the tree's own GNU iconv
+# transcoder and in-memory message loader explicitly: both are cache options
+# the pinned tree reads before it configures lib/xerces, and neither pulls in
+# an ICU header. A -DCMAKE_CXX_STANDARD=17 cache entry is not an alternative:
+# the root and Xerces CMakeLists set CMAKE_CXX_STANDARD 14 as a normal
+# variable, so such an entry never reaches the compiler (proved by
+# deploy/windows/msix/test-sdk-config.sh).
 # The upstream makelinux.sh hardcodes clang via cmake/linux.cmake. The hosted
 # image has clang, so use the upstream script's own toolchain file there;
 # fall back to the default compiler when clang is absent (documented in
@@ -252,6 +266,7 @@ mkdir -p "$WORK/build"
     "${TOOLCHAIN[@]}" \
     -DSKIP_BUNDLES=on -DUSE_VALIDATION_PARSER=on \
     -DMSIX_PACK=on -DMSIX_SAMPLES=off -DMSIX_TESTS=off -DLINUX=on \
+    -Dtranscoder=gnuiconv -Dmessage-loader=inmemory \
     "$WORK/sdk" >/dev/null
   make -j"$(nproc)" makemsix >/dev/null
 )
