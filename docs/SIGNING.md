@@ -84,7 +84,30 @@ tagged release commit in
   packaged files, and that the package is unsigned.
 - The MSIX SDK used to pack is pinned by commit
   (`deploy/windows/msix/bootstrap-makemsix.sh`) and its source worktree digest
-  is checked before compiling.
+  is checked before compiling; a mismatch aborts before `cmake`/`make`. The
+  digest is computed under a forced `C` collation, with `LC_ALL=C` exported for
+  the whole pipeline and `sort -z` ordering the file list, because `sort`
+  otherwise collates in the caller's locale: `en_US.UTF-8` orders the same
+  paths differently from `C`, so identical bytes would have produced a
+  different digest and the gate would refuse a pristine tree. Reproduce the
+  pinned value with:
+
+      ( cd <sdk-tree> && export LC_ALL=C LANG=C LC_COLLATE=C
+        find . -path ./.git -prune -o -type f -print0 | sort -z \
+          | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 )
+
+  The `49c28612…` value that preceded the current pin came from that
+  locale-dependent collation, not from different source bytes: the same
+  21117-file worktree yields `5b850191…` under `C` and `49c28612…` under an
+  `en_US.UTF-8` request. Filesystem readdir order and the four dropped
+  vendored-openssl gitlinks are not involved (the file list is sorted before
+  hashing, and `git rm --cached` leaves worktree bytes alone), and this commit
+  has no root `.gitmodules`, so the recursive submodule step cannot change the
+  file list; where the old pin was first computed is not recorded and remains
+  a hypothesis. `deploy/windows/msix/test-sdk-digest.sh` proves, offline and
+  with no network, that a matching tree is accepted, a one-byte change is
+  refused with both digests printed, a wrong pin is refused, and the value is
+  the same under `LANG`/`LC_ALL` changes and a stripped environment.
 
 Locally built binaries are never signed and are never published.
 
