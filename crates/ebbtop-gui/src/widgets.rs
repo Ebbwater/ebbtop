@@ -344,7 +344,7 @@ mod tests {
     // Contrast is measured, not eyeballed: these tests compute the WCAG 2.2
     // relative-luminance ratio for every foreground/background pair the app
     // actually paints, and pin the numbers so a palette edit cannot slip a
-    // pair below AA unnoticed. Findings A-11/A-12 in
+    // pair below AA unnoticed. Findings A-6/A-4 in
     // `docs/accessibility-audit.md` are the pairs that fail today; they are
     // asserted as failures on purpose and flip when the palette is fixed.
 
@@ -416,7 +416,7 @@ mod tests {
         }
     }
 
-    /// Findings A-11 (minor) and A-12 (major): the pairs that fail AA today.
+    /// Findings A-6 (minor) and A-4 (major): the pairs that fail AA today.
     /// Pinned as failures so the fixing slice inverts them instead of the gate
     /// quietly going green.
     #[test]
@@ -430,25 +430,25 @@ mod tests {
         // Secondary text on the two surfaces that sit behind it.
         let dim_on_bar = contrast(DIM, BAR);
         pin("secondary text in the status bar", dim_on_bar, 4.32);
-        assert!(dim_on_bar < 4.5, "A-11: the stale age / kill note is below AA on the bar");
+        assert!(dim_on_bar < 4.5, "A-6: the stale age / kill note is below AA on the bar");
 
         let dim_on_row = contrast(DIM, faint);
         pin("secondary text in a striped row", dim_on_row, 4.43);
-        assert!(dim_on_row < 4.5, "A-11: PID, state, MEM and workload cells are below AA at 4.43:1");
+        assert!(dim_on_row < 4.5, "A-6: PID, state, MEM and workload cells are below AA at 4.43:1");
 
         // The selected-row surface is where contrast is worst.
         let dim_on_sel = contrast(DIM, sel);
         pin("secondary text on a selected row", dim_on_sel, 1.98);
-        assert!(dim_on_sel < 4.5, "A-12: a selected row's secondary cells are unreadable at 1.98:1");
+        assert!(dim_on_sel < 4.5, "A-4: a selected row's secondary cells are unreadable at 1.98:1");
 
         let accent_on_sel = contrast(ACCENT, sel);
         pin("selected workload row label", accent_on_sel, 3.19);
-        assert!(accent_on_sel < 4.5, "A-12: the active workload label is below AA on the selection fill");
+        assert!(accent_on_sel < 4.5, "A-4: the active workload label is below AA on the selection fill");
 
         // 1.4.11 non-text: the selection fill is the only cue a row is selected.
         let sel_on_box = contrast(sel, BOX);
         pin("selection fill against a panel", sel_on_box, 2.38);
-        assert!(sel_on_box < 3.0, "A-12: the selection fill is below the 3:1 component minimum");
+        assert!(sel_on_box < 3.0, "A-4: the selection fill is below the 3:1 component minimum");
     }
 
     /// 1.4.11 non-text contrast for the load bars: every stop of `heat()` is a

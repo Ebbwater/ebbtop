@@ -130,6 +130,29 @@ impl Frame {
         out
     }
 
+    /// Per-shape census of painted text: how many runs survive their clip rect
+    /// and how many are painted entirely outside it. This is the evidence for
+    /// the report's zoom table (A-5); the numbers are pinned in
+    /// `a11y_zoom_paints_no_overlapping_text_and_keeps_panes_reachable`.
+    fn text_census(&self) -> (usize, usize) {
+        let mut visible = 0;
+        let mut clipped = 0;
+        for c in &self.shapes {
+            if let egui::Shape::Text(t) = &c.shape {
+                if t.galley.text().trim().is_empty() {
+                    continue;
+                }
+                let vis = t.visual_bounding_rect().intersect(c.clip_rect);
+                if vis.width() > 0.5 && vis.height() > 0.5 {
+                    visible += 1;
+                } else {
+                    clipped += 1;
+                }
+            }
+        }
+        (visible, clipped)
+    }
+
     /// Visible text runs that overlap another visible run.
     fn visible_text_overlaps(&self) -> Vec<String> {
         let texts = self.visible_texts();
@@ -522,26 +545,54 @@ fn a11y_keyboard_selects_a_row_and_reaches_kill() {
 
 /// Invariant (passes): the tab order starts at the status bar, visits every
 /// pane title once, and wraps — no keyboard trap.
+///
+/// This test also owns the tab census behind finding A-2: of 400 presses, 337
+/// land on anonymous nodes and 332 of those are `egui_extras` table rows. The
+/// counts are pinned exactly; a change in the row/tab model must update the
+/// finding, not widen it.
 #[test]
 fn a11y_tab_order_starts_in_the_status_bar_and_wraps() {
     const SCREEN: (f32, f32) = (960.0, 1000.0);
     let mut w = Walk::new();
     let mut app = dashboard();
     w.settle(&mut app, SCREEN);
-    let mut stops = vec![];
+    let mut stops: Vec<String> = vec![];
+    let mut wrap_at = None;
+    let mut unnamed_stops = 0usize;
+    let mut row_stops = 0usize;
     for i in 0..400 {
         let f = w.tab(&mut app, SCREEN);
         let what = f
             .focus()
             .map(|n| format!("{} {:?}", n.role_name(), n.name()))
             .unwrap_or_else(|| "NONE".into());
-        if i > 0 && what == stops[0] {
-            assert_eq!(what, "Button Some(\"Settings\")", "first stop changed");
-            return;
+        if f.focus().is_some_and(|n| n.name().is_none()) {
+            unnamed_stops += 1;
+        }
+        if f.focus().is_some_and(NodeInfo::is_table_row) {
+            row_stops += 1;
+        }
+        if i > 0 && wrap_at.is_none() && what == stops[0] {
+            wrap_at = Some(i);
         }
         stops.push(what);
     }
-    panic!("Tab never wrapped inside 400 presses ({} stops): focus order may be trapped", stops.len());
+    let wrap_at = wrap_at.unwrap_or_else(|| {
+        panic!("Tab never wrapped inside 400 presses ({} stops): focus order may be trapped", stops.len())
+    });
+    assert_eq!(stops[0], "Button Some(\"Settings\")", "first stop changed");
+    assert_eq!(stops[wrap_at], stops[0], "the wrap must return to the first stop");
+    eprintln!(
+        "tab census: {unnamed_stops}/400 unnamed stops, {row_stops} of them table rows (wrap at press {wrap_at})"
+    );
+    assert_eq!(
+        unnamed_stops, 337,
+        "the unnamed-stop census moved; update A-2's numbers instead of widening the finding"
+    );
+    assert_eq!(
+        row_stops, 332,
+        "the table-row stop census moved; update A-2's numbers instead of widening the finding"
+    );
 }
 
 /// Finding A-7 (pinned gap): focus is visibly indicated on buttons —
@@ -648,15 +699,19 @@ fn a11y_status_state_is_not_colour_only() {
 /// Invariant (passes) with one pinned fact: at 150% and 200% zoom no visible
 /// text overlaps and the panes stay reachable. Measured: at 200% the
 /// memory/disk meters start clipped (painted outside the top pane's clip
-/// rect) and scrolling that pane reveals them — no content is lost (WCAG 1.4.4
-/// by scrolling), but the first paint hides data, which the report records as
-/// a major usability finding.
+/// rect). The wheel scroll that reveals them is pointer-only — the keyboard
+/// path is pinned separately by
+/// `a11y_keyboard_cannot_reveal_the_values_clipped_at_200_percent`, so the
+/// audit does not claim WCAG 1.4.4 for keyboard users. The per-shape census
+/// is pinned here: it is the evidence for A-5's table.
 #[test]
 fn a11y_zoom_paints_no_overlapping_text_and_keeps_panes_reachable() {
+    let mut census = vec![];
     for zoom in [1.0f32, 1.5, 2.0] {
         let mut w = Walk::at_zoom(zoom);
         let mut app = dashboard();
         let f = w.settle(&mut app, (960.0, 1000.0));
+        census.push((zoom, f.text_census()));
         let overlaps = f.visible_text_overlaps();
         assert!(overlaps.is_empty(), "zoom {zoom}: overlapping text {overlaps:?}");
         let visible: Vec<String> = f.visible_texts().into_iter().map(|(_, t)| t).collect();
@@ -698,6 +753,93 @@ fn a11y_zoom_paints_no_overlapping_text_and_keeps_panes_reachable() {
         visible(&f).iter().any(|t| t == "Used"),
         "scrolling the top pane must reveal the clipped mem values: {:?}",
         visible(&f)
+    );
+
+    // The census behind the report's zoom table (visible, fully clipped).
+    eprintln!("zoom census (visible, clipped): {census:?}");
+    assert_eq!(
+        census,
+        vec![(1.0, (174, 1)), (1.5, (88, 9)), (2.0, (66, 17))],
+        "the zoom text census moved; update A-5's table instead of widening the finding"
+    );
+}
+
+/// Finding A-5 / A-8 (pinned gap): the values clipped at 150-200% zoom are
+/// recoverable with the mouse wheel — and with nothing else. Focus the pane
+/// titles and the log-scale box and press every scrolling key, then press the
+/// global keys: none of them reveals `Used`. The splitter is drag-only
+/// (`Sense::drag()`, app.rs), so a keyboard-only user cannot scroll the top
+/// pane either. The fixing slice adds per-pane keyboard scrolling (or reflow)
+/// and the arrow-key splitter, then inverts these assertions.
+#[test]
+fn a11y_keyboard_cannot_reveal_the_values_clipped_at_200_percent() {
+    const SCREEN: (f32, f32) = (960.0, 1000.0);
+    const KEYS: [egui::Key; 6] = [
+        egui::Key::ArrowDown,
+        egui::Key::PageDown,
+        egui::Key::End,
+        egui::Key::Space,
+        egui::Key::ArrowUp,
+        egui::Key::PageUp,
+    ];
+    let visible = |f: &Frame| -> Vec<String> { f.visible_texts().into_iter().map(|(_, t)| t).collect() };
+
+    for target in ["v mem", "v disk", "log scale"] {
+        let mut w = Walk::at_zoom(2.0);
+        let mut app = dashboard();
+        let f = w.settle(&mut app, SCREEN);
+        assert!(!visible(&f).iter().any(|t| t == "Used"), "setup: Used must start clipped at 200%");
+        let (stop, _) = w
+            .focus_matching(&mut app, SCREEN, 16, |n| match n.name() {
+                Some(name) if target.starts_with("v ") => name.starts_with(target),
+                Some(name) => name == target,
+                None => false,
+            })
+            .unwrap_or_else(|| panic!("{target} must be focusable with Tab"));
+        for k in KEYS {
+            w.frame(&mut app, SCREEN, vec![key(k)]);
+            let f = w.frame(&mut app, SCREEN, vec![]);
+            assert!(
+                !visible(&f).iter().any(|t| t == "Used"),
+                "pinned gap A-5: {target} + {k:?} revealed the clipped values — add keyboard recovery and flip this"
+            );
+        }
+        eprintln!(
+            "keyboard-scroll probe: Tab stop {} = {target}; {} keys never reveal Used",
+            stop + 1,
+            KEYS.len()
+        );
+    }
+
+    // Global keys with nothing but the default focus.
+    let mut w = Walk::at_zoom(2.0);
+    let mut app = dashboard();
+    w.settle(&mut app, SCREEN);
+    for k in [egui::Key::PageDown, egui::Key::End, egui::Key::ArrowDown] {
+        w.frame(&mut app, SCREEN, vec![key(k)]);
+        let f = w.frame(&mut app, SCREEN, vec![]);
+        assert!(
+            !visible(&f).iter().any(|t| t == "Used"),
+            "pinned gap A-5: the global {k:?} shortcut revealed the clipped values — flip this"
+        );
+    }
+
+    // The splitter between the panes is focusable but drag-only (A-8): arrow
+    // keys do not move the ratio and do not scroll anything.
+    let mut w = Walk::at_zoom(2.0);
+    let mut app = dashboard();
+    w.settle(&mut app, SCREEN);
+    let before = app.cfg.top_frac;
+    w.focus_matching(&mut app, SCREEN, 20, |n| n.role == egui::Role::Unknown)
+        .expect("the splitter must be focusable");
+    for k in [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::PageDown] {
+        w.frame(&mut app, SCREEN, vec![key(k)]);
+    }
+    assert_eq!(app.cfg.top_frac, before, "pinned gap A-8: the splitter gained keyboard operation — flip this");
+    let f = w.frame(&mut app, SCREEN, vec![]);
+    assert!(
+        !visible(&f).iter().any(|t| t == "Used"),
+        "pinned gap A-8: a focused splitter cannot scroll the panes"
     );
 }
 

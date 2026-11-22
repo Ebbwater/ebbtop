@@ -4250,29 +4250,35 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("lab will terminate")), "{t:?}");
     }
 
-    #[test]
-    fn kill_result_shows_in_status_bar() {
-        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+    /// Re-arm a kill reply immediately before a render.
+    ///
+    /// The status bar retires a *successful* kill result after `KILL_OK_TTL_MS`
+    /// of wall clock (`ebbtop-core` history), so a test that applies the reply
+    /// once and then renders can assert on a note that expired while a loaded
+    /// suite delayed the frame. Re-applying it right before the render is a
+    /// harness fix only: every assertion still checks the same product
+    /// behaviour. Same class as the pinned sample age in `render_age`.
+    fn kill_reply(app: &App, ok: bool, error: Option<&str>) {
         let now = client::now_ms();
-        fake_state(&app, now);
-        app.shared().lock().unwrap().apply(
-            Event::KillResult {
-                r: ebbtop_core::wire::KillResult { ok: true, pid: 4242, signal: "TERM".into(), error: None },
-                recv_ms: now,
-            },
-            now,
-        );
-        let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("kill 4242 TERM sent")), "{t:?}");
         app.shared().lock().unwrap().apply(
             Event::KillResult {
                 r: ebbtop_core::wire::KillResult {
-                    ok: false, pid: 4242, signal: "TERM".into(), error: Some("stale start_time".into()),
+                    ok, pid: 4242, signal: "TERM".into(), error: error.map(str::to_string),
                 },
                 recv_ms: now,
             },
             now,
         );
+    }
+
+    #[test]
+    fn kill_result_shows_in_status_bar() {
+        let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+        fake_state(&app, client::now_ms());
+        kill_reply(&app, true, None);
+        let t = render(&mut app, 960.0, 1000.0);
+        assert!(t.iter().any(|x| x.contains("kill 4242 TERM sent")), "{t:?}");
+        kill_reply(&app, false, Some("stale start_time"));
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("kill 4242 refused: stale start_time")), "{t:?}");
     }
@@ -4469,23 +4475,9 @@ mod tests {
     fn narrow_bar_keeps_refusal_but_hides_success() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
-        // Re-arm the reply before every render: the status bar retires a
-        // successful kill after KILL_OK_TTL_MS of wall clock, so a frame that
-        // lands late under a loaded suite would otherwise assert on a reply
-        // that has already expired. Same class of harness fix as the pinned
-        // sample age in `render_age`, and the assertions are unchanged.
-        fn kill_reply(app: &App, ok: bool, error: Option<&str>) {
-            let now = client::now_ms();
-            app.shared().lock().unwrap().apply(
-                Event::KillResult {
-                    r: ebbtop_core::wire::KillResult {
-                        ok, pid: 4242, signal: "TERM".into(), error: error.map(str::to_string),
-                    },
-                    recv_ms: now,
-                },
-                now,
-            );
-        }
+        // Re-arm the reply before every render (see `kill_reply`): a frame that
+        // lands late under a loaded suite would otherwise assert on a success
+        // reply the bar has already retired. Assertions are unchanged.
         // Refusal stays visible at 640 px.
         kill_reply(&app, false, Some("pid 1"));
         let t = render(&mut app, 640.0, 520.0);
