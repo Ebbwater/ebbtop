@@ -339,4 +339,153 @@ mod tests {
         assert_eq!(BAR_RULE, 1.0, "the bottom rule is one pixel");
         assert!(!BRAND.is_empty() && BRAND.len() <= 8, "wordmark stays short: {BRAND}");
     }
+
+    // ---------------------------------------------------------- WCAG 2.2 ---
+    // Contrast is measured, not eyeballed: these tests compute the WCAG 2.2
+    // relative-luminance ratio for every foreground/background pair the app
+    // actually paints, and pin the numbers so a palette edit cannot slip a
+    // pair below AA unnoticed. Findings A-6/A-4 in
+    // `docs/accessibility-audit.md` are the pairs that fail today; they are
+    // asserted as failures on purpose and flip when the palette is fixed.
+
+    /// WCAG 2.2 relative luminance (sRGB, per channel de-gamma).
+    fn luminance(c: Color32) -> f64 {
+        fn channel(v: u8) -> f64 {
+            let c = v as f64 / 255.0;
+            if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        }
+        0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+    }
+
+    /// WCAG 2.2 contrast ratio, 1.0 .. 21.0.
+    fn contrast(a: Color32, b: Color32) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// `fg` at `alpha` over an opaque `bg`, the way egui's `disabled_alpha`
+    /// and the translucent meter washes composite.
+    fn over(fg: Color32, bg: Color32, alpha: f32) -> Color32 {
+        let mix = |f: u8, b: u8| (f as f32 * alpha + b as f32 * (1.0 - alpha)).round() as u8;
+        Color32::from_rgb(mix(fg.r(), bg.r()), mix(fg.g(), bg.g()), mix(fg.b(), bg.b()))
+    }
+
+    /// Assert a measured ratio equals the audited value (2 decimal places).
+    fn pin(what: &str, got: f64, want: f64) {
+        assert!(
+            (got - want).abs() < 0.02,
+            "{what}: measured {got:.2}:1, the audit recorded {want:.2}:1 — re-measure and update the report"
+        );
+    }
+
+    /// Text the app paints, at the AA threshold for its size: 4.5:1 for body
+    /// and table text (13 pt monospace), 3:1 for the 15 pt panel titles.
+    #[test]
+    fn wcag_aa_text_contrast_holds_for_every_passing_pair() {
+        let ctx = egui::Context::default();
+        crate::app::style(&ctx);
+        let v = ctx.global_style().visuals.clone();
+        let faint = v.faint_bg_color;
+
+        // (what, fg, bg, minimum, recorded ratio)
+        let cases: &[(&str, Color32, Color32, f64, f64)] = &[
+            ("body text on the page", TEXT, BG, 4.5, 13.62),
+            ("body text in a panel", TEXT, BOX, 4.5, 12.79),
+            ("body text in the status bar", TEXT, BAR, 4.5, 11.70),
+            ("body text in a table row", TEXT, faint, 4.5, 12.01),
+            ("secondary text on the page", DIM, BG, 4.5, 5.03),
+            ("secondary text in a panel", DIM, BOX, 4.5, 4.72),
+            ("pane titles and the wordmark in panels", ACCENT, BOX, 3.0, 7.61),
+            ("pane titles in the status bar", ACCENT, BAR, 3.0, 6.96),
+            ("LIVE badge", OK, BAR, 4.5, 7.63),
+            ("STALE / CONNECTING badge", WARN, BAR, 4.5, 8.45),
+            ("DOWN badge", BAD, BAR, 4.5, 4.64),
+            ("warnings in a panel", WARN, BOX, 4.5, 9.23),
+            ("errors in a panel", BAD, BOX, 4.5, 5.07),
+            ("errors on the page", BAD, BG, 4.5, 5.40),
+            ("primary text on a selected row", TEXT, v.selection.bg_fill, 4.5, 5.37),
+            ("button label", v.widgets.inactive.fg_stroke.color, v.widgets.inactive.weak_bg_fill, 4.5, 8.91),
+            ("hovered button label", v.widgets.hovered.fg_stroke.color, v.widgets.hovered.weak_bg_fill, 4.5, 9.51),
+            ("focused/active button label", v.widgets.active.fg_stroke.color, v.widgets.active.weak_bg_fill, 4.5, 14.74),
+            ("non-interactive label in a window", v.widgets.noninteractive.fg_stroke.color, BOX, 4.5, 5.23),
+        ];
+        for (what, fg, bg, min, recorded) in cases {
+            let got = contrast(*fg, *bg);
+            pin(what, got, *recorded);
+            assert!(got >= *min, "{what}: {got:.2}:1 is below AA {min}:1");
+        }
+    }
+
+    /// Findings A-6 (minor) and A-4 (major): the pairs that fail AA today.
+    /// Pinned as failures so the fixing slice inverts them instead of the gate
+    /// quietly going green.
+    #[test]
+    fn wcag_aa_contrast_gaps_are_pinned() {
+        let ctx = egui::Context::default();
+        crate::app::style(&ctx);
+        let v = ctx.global_style().visuals.clone();
+        let faint = v.faint_bg_color;
+        let sel = v.selection.bg_fill;
+
+        // Secondary text on the two surfaces that sit behind it.
+        let dim_on_bar = contrast(DIM, BAR);
+        pin("secondary text in the status bar", dim_on_bar, 4.32);
+        assert!(dim_on_bar < 4.5, "A-6: the stale age / kill note is below AA on the bar");
+
+        let dim_on_row = contrast(DIM, faint);
+        pin("secondary text in a striped row", dim_on_row, 4.43);
+        assert!(dim_on_row < 4.5, "A-6: PID, state, MEM and workload cells are below AA at 4.43:1");
+
+        // The selected-row surface is where contrast is worst.
+        let dim_on_sel = contrast(DIM, sel);
+        pin("secondary text on a selected row", dim_on_sel, 1.98);
+        assert!(dim_on_sel < 4.5, "A-4: a selected row's secondary cells are unreadable at 1.98:1");
+
+        let accent_on_sel = contrast(ACCENT, sel);
+        pin("selected workload row label", accent_on_sel, 3.19);
+        assert!(accent_on_sel < 4.5, "A-4: the active workload label is below AA on the selection fill");
+
+        // 1.4.11 non-text: the selection fill is the only cue a row is selected.
+        let sel_on_box = contrast(sel, BOX);
+        pin("selection fill against a panel", sel_on_box, 2.38);
+        assert!(sel_on_box < 3.0, "A-4: the selection fill is below the 3:1 component minimum");
+    }
+
+    /// 1.4.11 non-text contrast for the load bars: every stop of `heat()` is a
+    /// graphical object the user must read against the page or a panel, and the
+    /// value text on a CPU cell keeps AA over its translucent wash.
+    #[test]
+    fn wcag_non_text_contrast_for_load_bars() {
+        for (frac, name) in [(0.0, "green"), (0.25, "green-amber"), (0.5, "amber"), (0.75, "amber-red"), (1.0, "red")] {
+            let c = heat(frac);
+            for (surface, bg) in [("page", BG), ("panel", BOX)] {
+                let r = contrast(c, bg);
+                assert!(r >= 3.0, "load bar {name} on {surface}: {r:.2}:1 is below 3:1");
+            }
+        }
+        // The CPU cell paints `TEXT` over a 42/255 wash of `heat()` on `BG`.
+        for frac in [0.0f32, 0.3, 0.6, 1.0] {
+            let wash = over(heat(frac), BG, 42.0 / 255.0);
+            let r = contrast(TEXT, wash);
+            assert!(r >= 4.5, "CPU cell text over a {frac} wash: {r:.2}:1 is below AA");
+        }
+        // Decorative separators are exempt from 1.4.11, and stay decorative.
+        assert!(contrast(LINE, BG) < 3.0, "panel borders must stay quiet, not become UI indicators");
+    }
+
+    /// Disabled controls are exempt from 1.4.3 (WCAG: "inactive user interface
+    /// components have no contrast requirement"), and egui halves their alpha.
+    /// Measured so the report can state the number instead of the exemption
+    /// doing hidden work.
+    #[test]
+    fn wcag_disabled_text_is_exempt_but_measured() {
+        let ctx = egui::Context::default();
+        crate::app::style(&ctx);
+        let v = ctx.global_style().visuals.clone();
+        let alpha = v.disabled_alpha;
+        let fg = v.widgets.noninteractive.fg_stroke.color;
+        let got = contrast(over(fg, BOX, alpha), BOX);
+        pin("disabled label over a panel", got, 2.28);
+        assert!(got < 4.5, "disabled text is exempt, not readable: {got:.2}:1");
+    }
 }

@@ -491,7 +491,8 @@ impl Pairing {
                     .desired_width(88.0)
                     .hint_text("6 digits")
                     .char_limit(12),
-            );
+            )
+            .accessible_name("Pairing code");
             let pair = ui
                 .add_enabled(!self.busy, egui::Button::new("Pair"))
                 .on_hover_text("exchange the code for a read-only token on that host");
