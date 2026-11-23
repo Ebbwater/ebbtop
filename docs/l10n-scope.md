@@ -96,8 +96,11 @@ connection dot). The painted close target carries its own AccessKit name
 (`Clear workload filter` / `清除工作负载筛选` / `清除工作負載篩選`), is
 keyboard-operable like any focused button, and the chip label itself stays
 clickable, so click-to-clear behaves as before. The glyph-gap test still pins the
-font fact (U+2715 has no glyph in these faces) and now also asserts that no UI
-string types that codepoint, so the gap cannot come back through text.
+font fact (U+2715 has no glyph in these faces) and the chip test now also asserts
+that the chip text never types that codepoint, so the gap cannot come back
+through the chip's label. (That guard is chip-only by design: `missing_glyphs`
+still lists U+2715 as a known-missing glyph, so a different key that typed it
+would be caught by the font-coverage test, not by this assertion.)
 
 ## Not claimed
 

@@ -293,6 +293,18 @@ fn workload_close(ui: &mut Ui, locale: Locale) -> bool {
     activated
 }
 
+/// The age chip's tooltip: the localized "time since a new sample" line, the
+/// localized lag fragment when the agent sample time is known, the localized
+/// sample diagnostics and the canonical English support summary. An absent lag
+/// contributes nothing at all, so a Chinese tooltip never falls back to the
+/// English `(lag N ms)` parenthetical.
+fn age_tooltip(locale: Locale, lag_ms: Option<i64>, diag: &str) -> String {
+    let lag = lag_ms
+        .map(|l| l10n::fmt(locale, Key::Lag, &[&l.to_string()]))
+        .unwrap_or_default();
+    l10n::fmt(locale, Key::AgeHover, &[&lag, diag])
+}
+
 /// The visible note for a failed "Open logs": localized sentence, verbatim
 /// handler name and OS error text.
 fn open_logs_note(locale: Locale, e: store::OpenLogsError) -> String {
@@ -890,10 +902,6 @@ impl App {
             ui.label(RichText::new(host).monospace().strong().color(w::TEXT));
             if let Some(a) = age {
                 let c = if a < STALE_MS { w::DIM } else { w::WARN };
-                let lag = st
-                    .sample_age_ms(now)
-                    .map(|l| format!(" (lag {l} ms)"))
-                    .unwrap_or_default();
                 // Diagnostics live here, not in the bar: sample time, tick
                 // p95 and reconnects join the summary line in the tooltip. The
                 // summary line itself is the canonical English support text.
@@ -911,16 +919,17 @@ impl App {
                     (Some(m), None) => l10n::fmt(loc, Key::DiagSample, &[&local_time(m.sampled_at_ms)]),
                     _ => String::new(),
                 };
+                // The whole tooltip is composed from the key table — the lag
+                // fragment included — so neither Chinese locale can paint an
+                // English label inside a localized sentence.
+                let tooltip =
+                    age_tooltip(loc, st.sample_age_ms(now), &format!("{diag}\n{}", st.summary_line(now)));
                 ui.label(
                     RichText::new(l10n::fmt(loc, Key::Age, &[&view::age(a)]))
                         .monospace()
                         .color(c),
                 )
-                .on_hover_text(l10n::fmt(
-                    loc,
-                    Key::AgeHover,
-                    &[&lag, &format!("{diag}\n{}", st.summary_line(now))],
-                ));
+                .on_hover_text(tooltip);
             }
             match &st.conn {
                 Conn::Down { reason, retry_in, .. } => {

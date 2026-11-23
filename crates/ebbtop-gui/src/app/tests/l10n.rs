@@ -1354,3 +1354,203 @@ fn l10n_screenshots() {
         shot(&format!("{tag}-wizard-pairing-960x1040.png"), wiz, (960.0, 1040.0));
     }
 }
+
+// --------------------------------------------------------------------- //
+// The age chip's tooltip is composed entirely from the key table          //
+// --------------------------------------------------------------------- //
+//
+// F1 of the round-1 review: the tooltip's lag parenthetical was built with
+// `format!(" (lag {l} ms)")` in `status_bar()`, so both Chinese locales painted
+// an English label inside a localized sentence. The assertions below paint the
+// real status bar, hover the age chip and read the tooltip egui actually
+// painted — not the source template — so the regression cannot come back.
+
+/// Every painted text of one frame, with its rectangle, so the test can hover
+/// the age chip it just painted.
+fn text_shapes(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
+    fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match s {
+            egui::Shape::Text(t) => out.push((
+                t.galley.text().to_string(),
+                egui::Rect::from_min_size(t.pos, t.galley.size()),
+            )),
+            egui::Shape::Vec(v) => {
+                for s in v {
+                    walk(s, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for c in shapes {
+        walk(&c.shape, &mut out);
+    }
+    out
+}
+
+/// The tooltip a real hover paints, plus the clock reads that bound the frame.
+///
+/// One persistent context (the bundled fonts stay installed), tooltips forced
+/// to show at once instead of after the 0.5 s still-time delay, and the pointer
+/// parked on the age chip the app itself painted. The sample time is stamped
+/// 5 ms back immediately before the tooltip frame, so the painted lag is the
+/// nominal 5 ms plus at most this frame's own drawing time.
+fn painted_age_tooltip(app: &mut App, loc: Locale) -> (String, u64, u64) {
+    let ctx = egui::Context::default();
+    style(&ctx);
+    ctx.all_styles_mut(|s| {
+        s.interaction.tooltip_delay = 0.0;
+        s.interaction.show_tooltips_only_when_still = false;
+    });
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 1000.0));
+    let run = |app: &mut App, events: Vec<egui::Event>| -> Vec<(String, egui::Rect)> {
+        let mut input =
+            egui::RawInput { screen_rect: Some(screen), focused: true, ..Default::default() };
+        input.events = events;
+        let mut out = ctx.run_ui(input, |ui| app.draw(ui));
+        out.textures_delta.clear(); // no renderer in tests
+        text_shapes(&out.shapes)
+    };
+    // Settle, then find the chip in the frame the app painted.
+    let _ = run(app, vec![]);
+    let age_prefix = l10n::text(loc, Key::Age).split("{}").next().unwrap_or("age").to_string();
+    let chip = run(app, vec![])
+        .into_iter()
+        .find(|(t, _)| t.starts_with(&age_prefix))
+        .unwrap_or_else(|| panic!("{loc}: no age chip was painted"));
+    let pos = chip.1.center();
+    // The hover frame establishes the tooltip; the frame after it paints the
+    // tooltip egui composed, reading the sample time stamped here.
+    let _ = run(app, vec![egui::Event::PointerMoved(pos)]);
+    let set_at = client::now_ms();
+    {
+        let shared = app.shared();
+        let mut s = shared.lock().unwrap();
+        s.metrics.as_mut().expect("dashboard fixture has metrics").sampled_at_ms = set_at - 5;
+    }
+    let painted = run(app, vec![egui::Event::PointerMoved(pos)]);
+    let hover_prefix =
+        l10n::text(loc, Key::AgeHover).split("{}").next().unwrap_or("").to_string();
+    let tooltip = painted
+        .iter()
+        .map(|(t, _)| t.clone())
+        .find(|t| t.starts_with(&hover_prefix))
+        .unwrap_or_else(|| {
+            panic!(
+                "{loc}: hovering the age chip painted no tooltip: {:?}",
+                painted.iter().map(|p| &p.0).collect::<Vec<_>>()
+            )
+        });
+    (tooltip, set_at, client::now_ms())
+}
+
+/// The lag fragment is localized, the number and `ms` unit are unchanged data,
+/// the adjacent sample/tick/reconnect labels stay localized, and English keeps
+/// its base tooltip byte for byte.
+#[test]
+fn l10n_age_tooltip_lag_localized_both_scripts() {
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        // A nominal 5 ms lag is stamped inside the paint helper immediately
+        // before the tooltip frame; the exact painted value is read back from
+        // the tooltip and checked against that frame's clock window, so a
+        // millisecond boundary can neither flake nor weaken the assertion.
+        {
+            let shared = app.shared();
+            let mut s = shared.lock().unwrap();
+            s.reconnects = 3;
+        }
+        let (tooltip, set_at, t1) = painted_age_tooltip(&mut app, loc);
+
+        // The painted lag fragment is the localized one.
+        let tmpl = l10n::text(loc, Key::Lag);
+        let (pre, post) = tmpl.split_once("{}").expect("lag template has one value");
+        let rest = tooltip
+            .split_once(pre)
+            .unwrap_or_else(|| panic!("{loc}: tooltip has no lag fragment {pre:?}: {tooltip:?}"))
+            .1;
+        let (num, _) = rest
+            .split_once(post)
+            .unwrap_or_else(|| panic!("{loc}: lag fragment lost its unit {post:?}: {tooltip:?}"));
+        let n: i64 = num.parse().unwrap_or_else(|_| panic!("{loc}: lag value {num:?} is not a number"));
+        // The value is the real sample age at paint time: at least the nominal
+        // 5 ms, and never beyond the window between the stamp and the read-back.
+        assert!(
+            n >= 5 && n <= 5 + (t1 - set_at) as i64,
+            "{loc}: painted lag {n} ms is outside the 5 ms + frame-time window"
+        );
+        // The first tooltip line is the localized summary followed by the
+        // localized lag fragment — nothing English in between.
+        let first_line = l10n::fmt(loc, Key::AgeHover, &["", ""]);
+        let first_line = first_line.split('\n').next().unwrap_or("");
+        let want = format!("{first_line}{}", l10n::fmt(loc, Key::Lag, &[&n.to_string()]));
+        assert_eq!(
+            tooltip.split('\n').next().unwrap_or(""),
+            want,
+            "{loc}: first tooltip line is not the localized summary + lag"
+        );
+        if loc != Locale::English {
+            // The base English parenthetical must not be painted in a Chinese
+            // tooltip. (The canonical support summary keeps its `lag_p50=`
+            // field names: those are raw diagnostic keys, not this label.)
+            assert!(
+                !tooltip.contains(" (lag "),
+                "{loc}: the English lag label is still painted: {tooltip:?}"
+            );
+            assert!(
+                has_cjk(&tooltip),
+                "{loc}: the tooltip carries no Chinese text at all: {tooltip:?}"
+            );
+        }
+
+        // Adjacent diagnostics stay localized around verbatim data.
+        let diag = l10n::text(loc, Key::DiagSampleTick);
+        let mid = diag.split("{}").nth(1).expect("tick-p95 template has a middle part");
+        assert!(tooltip.contains(mid), "{loc}: tick p95 label is not localized: {tooltip:?}");
+        assert!(
+            tooltip.contains(&l10n::fmt(loc, Key::DiagReconnects, &["3"])),
+            "{loc}: reconnects label is not localized: {tooltip:?}"
+        );
+        assert!(
+            tooltip.contains(&local_time(set_at - 5)),
+            "{loc}: the sample time is not painted verbatim"
+        );
+        // Adjacent diagnostics stay localized around verbatim data. Only the
+        // localized head is asserted: the last line is the canonical English
+        // support summary (documented by design), which keeps field names like
+        // `reconnects=` and is not a UI label.
+        let head: String = tooltip.lines().take(3).collect::<Vec<_>>().join("\n");
+        if loc != Locale::English {
+            assert!(
+                !head.contains("reconnects"),
+                "{loc}: English 'reconnects' in the localized head: {head:?}"
+            );
+            assert!(!head.contains("tick p95"), "{loc}: English 'tick p95': {head:?}");
+            assert!(!head.contains("sample "), "{loc}: English 'sample': {head:?}");
+        }
+    }
+
+    // English control: the base tooltip, byte for byte.
+    assert_eq!(l10n::text(Locale::English, Key::Lag), " (lag {} ms)");
+    assert_eq!(
+        age_tooltip(Locale::English, Some(5), "D"),
+        "time since a new sample arrived, local clock (lag 5 ms)\nD"
+    );
+
+    // No lag value: the fragment contributes nothing at all, so no locale can
+    // paint an empty parenthetical. (`sample_age_ms` is `None` only when there
+    // are no metrics, and then the age chip itself is not painted — this is the
+    // composition contract the chip's `Option` feeds.)
+    for loc in Locale::ALL {
+        let none = age_tooltip(loc, None, "D");
+        assert_eq!(
+            none,
+            l10n::fmt(loc, Key::AgeHover, &["", "D"]),
+            "{loc}: empty lag changed the line"
+        );
+        for token in ["lag", "延迟", "延遲", "()", "（）"] {
+            assert!(!none.contains(token), "{loc}: absent lag painted {token:?}: {none:?}");
+        }
+    }
+}

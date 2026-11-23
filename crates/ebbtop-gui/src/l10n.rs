@@ -449,6 +449,11 @@ strings! {
     // ---- Status-bar chrome ------------------------------------------------
     NoSource => ("no source", "无来源", "沒有來源"),
     Age => ("age {}", "已过 {}", "已過 {}"),
+    // The age tooltip's lag fragment. English keeps the base `(lag N ms)`
+    // parenthetical byte-for-byte; the translations keep the `ms` unit and the
+    // number as data, and use the fullwidth parens the rest of the Chinese
+    // tooltip uses.
+    Lag => (" (lag {} ms)", "（延迟 {} ms）", "（延遲 {} ms）"),
     AgeHover => (
         "time since a new sample arrived, local clock{}\n{}",
         "距上次收到新采样的时间（本机时钟）{}\n{}",
