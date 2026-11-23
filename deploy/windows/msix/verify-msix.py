@@ -12,12 +12,21 @@ Checks, all from the package bytes (no Windows tooling):
   * every block-map hash matches the uncompressed file bytes, and every
     packaged file except the block map itself has a block-map entry (an
     unpacked or altered byte would install-fail on Windows);
-  * the package is not signed (the Store re-signs it).
+  * the package is not signed (the Store re-signs it);
+  * the package identity is exactly the Partner Center identity;
+  * the declared languages are the three the desktop ships, as valid BCP-47
+    tags, and nothing else;
+  * `LICENSE-OFL.txt` ships beside `ebbtop.exe` and its bytes are exactly the
+    checked-in license for the embedded Noto Sans CJK faces.
 
 Exit 0 when every check holds, 1 on the first failure with the reason.
 
-  python3 deploy/windows/msix/verify-msix.py dist/msix/EbbTop-0.2.9-x64.msix \
-      --expect-version 0.2.9.0
+  python3 deploy/windows/msix/verify-msix.py dist/msix/EbbTop-0.3.0-x64.msix
+  python3 deploy/windows/msix/verify-msix.py dist/msix/EbbTop-0.3.0-x64.msix \
+      --expect-version 0.3.0.0
+
+Without --expect-version the expected value is the workspace `Cargo.toml`
+version plus a fourth `.0` component, which is the form the manifest carries.
 """
 
 from __future__ import annotations
@@ -25,7 +34,9 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import pathlib
 import posixpath
+import re
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -37,6 +48,29 @@ NS = {
 }
 BLOCK = 64 * 1024  # MSIX block size
 
+REPO = pathlib.Path(__file__).resolve().parents[3]
+CARGO_TOML = REPO / "Cargo.toml"
+# The OFL notice that must accompany the embedded Noto Sans CJK faces. It is
+# the checked-in file, byte for byte, staged beside ebbtop.exe by
+# package-msix.sh.
+LICENSE_FILE = REPO / "crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt"
+LICENSE_MEMBER = "LICENSE-OFL.txt"
+
+# Partner Center issued these when the app name was reserved. They are public
+# distribution identities, not secrets, and must match byte for byte or the
+# upload is rejected.
+IDENTITY_NAME = "Ebbwater.EbbTop"
+IDENTITY_PUBLISHER = "CN=32700780-5AAE-4D15-A591-B49543B86C16"
+PUBLISHER_DISPLAY_NAME = "Ebbwater"
+
+# The desktop client ships English, Simplified Chinese (Mainland) and
+# Traditional Chinese (Taiwan). The manifest declares them as BCP-47 tags; the
+# in-app setting stores the Chinese ones script-tagged (zh-Hans-CN,
+# zh-Hant-TW). A declared language without matching content is as wrong as a
+# missing one, so the set must match exactly.
+SUPPORTED_LANGUAGES = ("en-US", "zh-CN", "zh-TW")
+BCP47 = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$")
+
 
 class Fail(Exception):
     pass
@@ -45,6 +79,27 @@ class Fail(Exception):
 def check(cond: bool, msg: str) -> None:
     if not cond:
         raise Fail(msg)
+
+
+def workspace_version() -> str:
+    """The workspace release version from Cargo.toml `[workspace.package]`."""
+    in_section = False
+    for line in CARGO_TOML.read_text(encoding="utf-8").splitlines():
+        if line.strip() == "[workspace.package]":
+            in_section = True
+            continue
+        if in_section:
+            if line.startswith("["):
+                break
+            if line.startswith("version = "):
+                return line.split('"')[1]
+    raise KeyError(f"no [workspace.package] version in {CARGO_TOML}")
+
+
+def manifest_languages(manifest: ET.Element) -> list[str]:
+    resources = manifest.find("f:Resources", NS)
+    check(resources is not None, "manifest has no Resources (no declared language)")
+    return [r.get("Language", "") for r in resources.findall("f:Resource", NS)]
 
 
 def manifest_assets(manifest: ET.Element) -> list[str]:
@@ -78,8 +133,20 @@ def manifest_assets(manifest: ET.Element) -> list[str]:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("msix")
-    ap.add_argument("--expect-version", required=True, help="four-part Identity Version")
+    ap.add_argument(
+        "--expect-version",
+        help="four-part Identity Version (default: the Cargo.toml version + .0)",
+    )
     args = ap.parse_args(argv[1:])
+
+    if args.expect_version:
+        expect_version = args.expect_version
+    else:
+        try:
+            expect_version = workspace_version() + ".0"
+        except (OSError, KeyError, IndexError) as e:
+            print(f"FAIL {args.msix}: cannot resolve the expected version: {e}", file=sys.stderr)
+            return 1
 
     try:
         z = zipfile.ZipFile(args.msix)
@@ -102,11 +169,22 @@ def main(argv: list[str]) -> int:
             f"architecture is {ident.get('ProcessorArchitecture')!r}, expected x64",
         )
         check(
-            ident.get("Version") == args.expect_version,
-            f"Identity/Version is {ident.get('Version')!r}, expected {args.expect_version!r}",
+            ident.get("Version") == expect_version,
+            f"Identity/Version is {ident.get('Version')!r}, expected {expect_version!r}",
         )
-        check(bool(ident.get("Name")), "Identity/Name is empty")
-        check(bool(ident.get("Publisher")), "Identity/Publisher is empty")
+        check(
+            ident.get("Name") == IDENTITY_NAME,
+            f"Identity/Name is {ident.get('Name')!r}, expected {IDENTITY_NAME!r}",
+        )
+        check(
+            ident.get("Publisher") == IDENTITY_PUBLISHER,
+            f"Identity/Publisher is {ident.get('Publisher')!r}, expected {IDENTITY_PUBLISHER!r}",
+        )
+        check(
+            manifest.findtext("f:Properties/f:PublisherDisplayName", "", NS)
+            == PUBLISHER_DISPLAY_NAME,
+            f"Properties/PublisherDisplayName must be {PUBLISHER_DISPLAY_NAME!r}",
+        )
         app = manifest.find("f:Applications/f:Application", NS)
         check(app is not None, "manifest has no Application")
         check(
@@ -126,6 +204,42 @@ def main(argv: list[str]) -> int:
         for asset in manifest_assets(manifest):
             check(asset in names, f"manifest references {asset!r}, which is not in the package")
         check("ebbtop.exe" in names, "ebbtop.exe is not in the package")
+
+        # --- declared languages -------------------------------------------
+        declared = manifest_languages(manifest)
+        check(declared, "manifest declares no Resource Language")
+        for lang in declared:
+            check(
+                bool(BCP47.match(lang)),
+                f"declared language {lang!r} is not a well-formed BCP-47 tag",
+            )
+        check(
+            {lang.lower() for lang in declared}
+            == {lang.lower() for lang in SUPPORTED_LANGUAGES},
+            f"declared languages {declared!r} are not exactly {list(SUPPORTED_LANGUAGES)!r}",
+        )
+
+        # --- the OFL notice beside the executable --------------------------
+        check(
+            LICENSE_MEMBER in names,
+            f"{LICENSE_MEMBER} is not in the package (the embedded fonts' license "
+            "must ship beside ebbtop.exe)",
+        )
+        try:
+            expected_license = LICENSE_FILE.read_bytes()
+        except OSError as e:
+            print(f"FAIL {args.msix}: cannot read {LICENSE_FILE}: {e}", file=sys.stderr)
+            return 1
+        check(bool(expected_license), f"{LICENSE_FILE} is empty")
+        check(
+            b"SIL OPEN FONT LICENSE" in expected_license,
+            f"{LICENSE_FILE} does not look like the SIL OFL text",
+        )
+        packaged_license = z.read(LICENSE_MEMBER)
+        check(
+            packaged_license == expected_license,
+            f"{LICENSE_MEMBER} in the package is not byte-identical to {LICENSE_FILE}",
+        )
 
         # --- block map ---------------------------------------------------
         blockmap = ET.fromstring(z.read("AppxBlockMap.xml"))
@@ -174,7 +288,9 @@ def main(argv: list[str]) -> int:
             check(name in mapped, f"packaged file {name!r} has no block-map entry")
 
         print(f"OK {posixpath.basename(args.msix)}: {len(names)} parts, "
-              f"{len(blocks)} block-map files, version {args.expect_version}, unsigned")
+              f"{len(blocks)} block-map files, version {expect_version}, "
+              f"languages {','.join(declared)}, "
+              f"{LICENSE_MEMBER} {len(packaged_license)} bytes == checked-in, unsigned")
         return 0
     except Fail as e:
         print(f"FAIL {args.msix}: {e}", file=sys.stderr)

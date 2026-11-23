@@ -69,6 +69,10 @@ echo "== staging $STAGE"
 rm -rf "$STAGE"
 mkdir -p "$STAGE/Assets"
 cp dist/ebbtop.exe "$STAGE/ebbtop.exe"
+# The bundled CJK fonts are redistributed under the SIL OFL 1.1: the exact
+# checked-in license text ships beside the executable, and verify-msix.py
+# reads it back out of the packed bytes.
+cp crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt "$STAGE/LICENSE-OFL.txt"
 cp "$HERE/AppxManifest.xml" "$STAGE/AppxManifest.xml"
 python3 "$HERE/make-assets.py" "$STAGE" >/dev/null
 

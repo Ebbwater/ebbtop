@@ -15,6 +15,28 @@ issued when the app name was reserved, and are the same ones in
 
 These are public distribution identities, not secrets.
 
+## Languages
+
+`deploy/windows/msix/AppxManifest.xml` declares three resource languages,
+matching the three UI languages the desktop client ships:
+
+| Manifest tag (BCP-47) | UI language | Stored in-app setting (`language`) |
+|---|---|---|
+| `en-US` | English (default and fallback) | `en` |
+| `zh-CN` | Simplified Chinese (Mainland) | `zh-Hans-CN` |
+| `zh-TW` | Traditional Chinese (Taiwan) | `zh-Hant-TW` |
+
+The UI language is chosen inside the app (Settings -> Display), not from the OS
+locale: the translations are compiled into `ebbtop.exe` and the package carries
+no PRI resource, so the declared languages describe the client's capability to
+the Store rather than switching the app by system language.
+
+**The listing text in this document is English only.** Product name, short
+description, description, feature list and screenshot captions have not been
+translated, and translated Store listing copy (including any Chinese listing)
+is out of scope for v0.3.0. Submit the English listing; the extra package
+languages add language coverage, not translated storefront text.
+
 ## Product name
 
 `EbbTop`

@@ -1082,7 +1082,10 @@ mod tests {
     #[test]
     fn prompt_once_per_version_until_newer() {
         let mut c = UpdateCheck::with_interval(Duration::from_secs(60));
-        c.start(|| Ok(r#"{"tag_name": "v0.3.0"}"#.into()));
+        // Tags well above this build's own version: the point of the test is the
+        // once-per-version prompt, and a tag equal to the release version (as
+        // v0.3.0 became when the workspace was bumped to 0.3.0) is not newer.
+        c.start(|| Ok(r#"{"tag_name": "v99.9.8"}"#.into()));
         assert!(poll_settled(&mut c));
         assert!(c.should_prompt(), "fresh available version prompts");
         c.mark_notified();
@@ -1090,7 +1093,7 @@ mod tests {
         c.decline();
         assert!(!c.should_prompt(), "declined version stays quiet");
         // A newer tag re-prompts even after a decline.
-        c.start(|| Ok(r#"{"tag_name": "v0.4.0"}"#.into()));
+        c.start(|| Ok(r#"{"tag_name": "v99.9.9"}"#.into()));
         assert!(poll_settled(&mut c));
         assert!(c.should_prompt(), "newer version re-prompts");
     }

@@ -13,7 +13,7 @@
     Store ID (for reference)            9PJJXH1SBQ23
 
   Package/Identity/@Version is the four-part form of the workspace version
-  (Cargo.toml: 0.2.9 -> 0.2.9.0). deploy/windows/msix/package-msix.sh reads
+  (Cargo.toml: 0.3.0 -> 0.3.0.0). deploy/windows/msix/package-msix.sh reads
   this file as-is and refuses to pack when the version here does not match
   Cargo.toml, so a release bump is a two-line, reviewable change (version
   here plus Cargo.toml) rather than a template substitution at build time.
@@ -37,7 +37,7 @@
   <Identity
       Name="Ebbwater.EbbTop"
       Publisher="CN=32700780-5AAE-4D15-A591-B49543B86C16"
-      Version="0.2.9.0"
+      Version="0.3.0.0"
       ProcessorArchitecture="x64" />
 
   <Properties>
@@ -48,7 +48,18 @@
   </Properties>
 
   <Resources>
-    <Resource Language="en-us" />
+    <!-- The desktop client ships three UI languages: English (default),
+         Simplified Chinese (Mainland) and Traditional Chinese (Taiwan). These
+         are the BCP-47 tags the Store and Windows read; the in-app setting
+         stores the same languages script-tagged (`zh-Hans-CN`, `zh-Hant-TW`).
+         The UI language comes from that in-app setting, never from the OS
+         locale: the strings are compiled into the exe and the package carries
+         no PRI resource, so this list declares supported languages to the
+         Store, it does not switch the app's language. The listing text itself
+         is English only (docs/store-listing.md states that). -->
+    <Resource Language="en-US" />
+    <Resource Language="zh-CN" />
+    <Resource Language="zh-TW" />
   </Resources>
 
   <Dependencies>

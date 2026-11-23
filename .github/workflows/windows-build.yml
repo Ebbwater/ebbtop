@@ -102,6 +102,7 @@ jobs:
             dist/ebbtop-probe.exe
             dist/install.ps1
             dist/setup.ps1
+            dist/LICENSE-OFL.txt
             dist/SHA256SUMS
             dist/BUILD
             dist/VERSIONINFO.txt

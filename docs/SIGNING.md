@@ -81,7 +81,10 @@ tagged release commit in
   (`deploy/windows/versioninfo.py`) and refuses a mismatch with the manifest.
 - `deploy/windows/msix/verify-msix.py` validates the packed bytes: OPC parts,
   manifest shape, every referenced asset present, every block-map hash over the
-  packaged files, and that the package is unsigned.
+  packaged files, that the package is unsigned, that the identity is the Partner
+  Center identity, that the declared resource languages are exactly the three
+  the client ships, and that `LICENSE-OFL.txt` beside `ebbtop.exe` is
+  byte-identical to the checked-in OFL notice for the embedded fonts.
 - The MSIX SDK used to pack is pinned by commit
   (`deploy/windows/msix/bootstrap-makemsix.sh`) and its source worktree digest
   is checked before compiling; a mismatch aborts before `cmake`/`make`. The

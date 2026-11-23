@@ -74,12 +74,23 @@ both faces with their upstream copyright line and the exact checked-in
 the compiled constant to the file on disk byte for byte, so the displayed text
 cannot drift from the checked-in license.
 
-**Packaging note for the integration stage (not done in this card):** the notice
-makes the license readable inside the app, but the OFL also expects the license
-to accompany a redistribution of the font files. The MSIX staging step should
-copy `crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt` into the package directory
-that receives `ebbtop.exe`, and the release check should read it back from the
-installed package.
+**Packaging (v0.3.0):** the notice makes the license readable inside the app,
+and the OFL also expects the license to accompany a redistribution of the font
+files, so every artifact now ships the checked-in notice beside `ebbtop.exe`:
+
+- the MSIX staging step copies `crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt`
+  into the package directory next to the exe, and
+  `deploy/windows/msix/verify-msix.py` reads the member back out of the packed
+  bytes and requires it to be byte-identical to the checked-in file;
+- the non-Store ZIP (and the loose `dist/` assets) carry the same file and the
+  release `SHA256SUMS` covers it; `deploy/windows/test-bundle.sh` proves the
+  zip member is exactly the checked-in notice and refuses a dist directory that
+  lacks it.
+
+The package manifest declares the three supported UI languages (`en-US`,
+`zh-CN`, `zh-TW`) as BCP-47 resource languages; the UI language itself remains
+the in-app setting, never the OS locale. Reading the notice back from a package
+*installed* on Windows, and the Store listing itself, remain release work.
 
 ## Observed coverage limit: the workload chip (resolved here)
 

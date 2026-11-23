@@ -47,6 +47,11 @@ mkdir -p dist
 cp "target/$T/release/ebbtop.exe" "target/$T/release/ebbtop-probe.exe" dist/
 cp deploy/windows/install.ps1 dist/
 cp deploy/windows/setup.ps1 dist/
+# The desktop redistributes the bundled Noto Sans CJK faces under the SIL
+# OFL 1.1, so the exact checked-in license text ships beside the exe in
+# every non-Store artifact (loose assets and the ZIP), and the checksums
+# cover it.
+cp crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt dist/
 # Refuse to ship an exe that needs a non-system DLL. bcrypt.dll is inbox
 # since Vista (like the bcryptprimitives.dll already listed): rustls/ring
 # uses BCryptGenRandom on Windows, so the updater's verified-download stack
@@ -72,7 +77,7 @@ python3 deploy/windows/versioninfo.py \
   --require-file-description "EbbTop connection probe" \
   dist/ebbtop-probe.exe
 # Checksums cover the bytes as built, so they follow the metadata gate.
-(cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 > SHA256SUMS)
+(cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt > SHA256SUMS)
 {
   echo "version $VERSION"
   echo "commit $(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)"

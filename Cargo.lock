@@ -1207,7 +1207,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "ebbtop-agent"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "ebbtop-core"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1252,7 +1252,7 @@ dependencies = [
 
 [[package]]
 name = "ebbtop-gui"
-version = "0.2.9"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
