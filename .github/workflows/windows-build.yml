@@ -159,7 +159,12 @@ jobs:
         env:
           EBBTOP_LLVM_MINGW_BIN: ${{ runner.temp }}/llvm-mingw/bin
           EBBTOP_MAKEMSIX: ${{ runner.temp }}/ebbtop-msix-sdk/bin/makemsix
-        run: bash deploy/windows/msix/package-msix.sh
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/ebbtop-msix-python"
+          export PATH="$RUNNER_TEMP/ebbtop-msix-python/bin:$PATH"
+          python3 -m pip install --only-binary=:all: 'Pillow==13.0.0'
+          bash deploy/windows/msix/package-msix.sh
 
       - name: Record package identity
         run: |
