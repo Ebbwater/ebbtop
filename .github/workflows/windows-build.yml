@@ -252,8 +252,12 @@ jobs:
           Export-Certificate -Cert $cert -FilePath $pub | Out-Null
           Import-Certificate -FilePath $pub -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
           Import-Certificate -FilePath $pub -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople' | Out-Null
-          # signtool ships with the same SDK.
-          $signtool = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin\x64\signtool.exe'
+          # SignTool lives in a version-stamped directory,
+          # bin\<sdk-version>\x64\signtool.exe, and the unversioned bin\x64 alias
+          # is not guaranteed. The resolver walks the installed SDK versions
+          # newest-first, refuses a non-x64 PE image, and throws rather than
+          # returning an empty path.
+          $signtool = & ./deploy/windows/msix/resolve-signtool.ps1
           & $signtool sign /fd SHA256 /a /s My /n $env:MSIX_PUBLISHER wack-test.msix
           if ($LASTEXITCODE -ne 0) { throw "signtool failed with $LASTEXITCODE" }
           (Get-AuthenticodeSignature wack-test.msix).Status

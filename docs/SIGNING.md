@@ -58,6 +58,21 @@ install carries a trusted signature.
   package on a disposable runner and run Microsoft's Windows App Certification
   Kit. That certificate is created and discarded inside one job; it never
   signs a release artifact and is never published.
+  - SignTool is located by `deploy/windows/msix/resolve-signtool.ps1`, not by a
+    fixed path. The SDK installs it under a version-stamped directory,
+    `%ProgramFiles(x86)%\Windows Kits\10\bin\<sdk version>\x64\signtool.exe`,
+    and the unversioned `bin\x64` alias is not guaranteed: the
+    `windows-2025-vs2026` image `20261116.315` publishes exactly one installed
+    SDK (`10.0.26100.0`) and carries no `bin\x64\signtool.exe`, which is where
+    a hardcoded path failed before the gate could install anything. The
+    resolver walks the version directories newest-first by numeric version,
+    accepts only a readable PE image whose COFF machine field is AMD64
+    (`0x8664`), falls back to `bin\x64` last, and throws — naming every path it
+    examined — rather than returning an empty path.
+  - `deploy/windows/msix/test-resolve-signtool.ps1` is the fixture proof for
+    that resolver and for the workflow's sign-step shape. It runs on any host
+    with PowerShell; the real SDK resolution, the signing call, the install and
+    the WACK report remain hosted checks.
 
 What the Microsoft signature means: the bytes match the package we submitted
 and Microsoft vouches they have not been altered since. It is not an audit of
