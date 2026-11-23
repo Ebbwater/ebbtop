@@ -303,13 +303,16 @@ pub fn cpu_bar_cell(ui: &mut Ui, frac: f32, text: &str) {
 /// detail in monospace. Callers pass an already-classified, already-scrubbed
 /// triple (`client::Diagnosis`, `pairing::PairError`); this only draws, so a
 /// new failure source cannot invent its own styling or forget the action.
-pub fn error_block(ui: &mut Ui, headline: &str, next_action: &str, detail: &str) {
+pub fn error_block(ui: &mut Ui, locale: crate::l10n::Locale, headline: &str, next_action: &str, detail: &str) {
     ui.add_space(4.0);
     ui.label(RichText::new(headline).strong().color(BAD));
     ui.add(egui::Label::new(RichText::new(next_action).small().color(TEXT)).wrap());
     ui.add(
         egui::Label::new(
-            RichText::new(format!("detail: {detail}")).small().monospace().color(DIM),
+            RichText::new(crate::l10n::fmt(locale, crate::l10n::Key::DetailPrefix, &[detail]))
+                .small()
+                .monospace()
+                .color(DIM),
         )
         .wrap(),
     );

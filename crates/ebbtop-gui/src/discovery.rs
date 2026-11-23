@@ -27,6 +27,7 @@ use ebbtop_core::pairing::{
     self, DiscoveredAgent, PairError, PairRequest, DISCOVERY_PORT, DISCOVERY_REQUEST,
 };
 
+use crate::l10n::{self, Key, Locale};
 use crate::widgets as w;
 
 /// Where a scan sends its probes: this segment's limited broadcast (finds
@@ -181,6 +182,10 @@ pub struct Discovery {
     /// than the initial state.
     pub finished: bool,
     pub msg: Option<String>,
+    /// Template for `msg`: `None` paints the detail verbatim (a canonical
+    /// diagnostic string from the scan thread), `Some(key)` wraps it in the
+    /// localized sentence that names what failed.
+    pub msg_key: Option<Key>,
     rx: Option<Receiver<Result<Vec<DiscoveredAgent>, String>>>,
     cancel: Option<Arc<AtomicBool>>,
 }
@@ -207,6 +212,7 @@ impl Discovery {
                 self.finished = true;
                 self.agents = agents;
                 self.msg = None;
+                self.msg_key = None;
             }
             Ok(Err(e)) => {
                 self.rx = None;
@@ -215,6 +221,7 @@ impl Discovery {
                 self.finished = true;
                 self.agents.clear();
                 self.msg = Some(e);
+                self.msg_key = None;
             }
             Err(TryRecvError::Disconnected) => {
                 self.rx = None;
@@ -241,6 +248,7 @@ impl Discovery {
         self.finished = false;
         self.agents.clear();
         self.msg = None;
+        self.msg_key = None;
         let targets = default_targets(DISCOVERY_PORT);
         let spawned = std::thread::Builder::new()
             .name("ebbtop-discover".into())
@@ -257,7 +265,8 @@ impl Discovery {
             self.scanning = false;
             self.rx = None;
             self.cancel = None;
-            self.msg = Some(format!("could not start the scan: {e}"));
+            self.msg = Some(e.to_string());
+            self.msg_key = Some(Key::ScanStartFailed);
         }
     }
 
@@ -272,17 +281,17 @@ impl Discovery {
     /// Draw the scan controls, the honest limits, the empty state and the
     /// discovered rows. Returns the index of the row whose "Use this host"
     /// was clicked.
-    pub fn draw(&mut self, ui: &mut egui::Ui) -> Option<usize> {
+    pub fn draw(&mut self, ui: &mut egui::Ui, locale: Locale) -> Option<usize> {
         let mut picked = None;
         ui.horizontal(|ui| {
             if self.scanning {
-                if ui.button("Cancel scan").clicked() {
+                if ui.button(l10n::text(locale, Key::ScanCancel)).clicked() {
                     self.cancel();
                 }
-                ui.label(RichText::new("scanning this network segment…").color(w::DIM));
+                ui.label(RichText::new(l10n::text(locale, Key::ScanningSegment)).color(w::DIM));
             } else if ui
-                .button("Find agents on this network")
-                .on_hover_text("UDP broadcast probe, 1.4 s, cancellable")
+                .button(l10n::text(locale, Key::BtnFindAgents))
+                .on_hover_text(l10n::text(locale, Key::HoverFindAgents))
                 .clicked()
             {
                 self.start();
@@ -290,18 +299,19 @@ impl Discovery {
         });
         ui.add(
             egui::Label::new(
-                RichText::new(
-                    "Scans this network segment only: broadcast does not cross routers, VLANs or a \
-                     VPN/tailnet. Reachable over a tailnet or another subnet? Enter the address \
-                     yourself below.",
-                )
-                .small()
-                .color(w::DIM),
+                RichText::new(l10n::text(locale, Key::ScanScopeNote))
+                    .small()
+                    .color(w::DIM),
             )
             .wrap(),
         );
         if let Some(m) = &self.msg {
-            ui.add(egui::Label::new(RichText::new(m).color(w::BAD)).wrap());
+            let text = match self.msg_key {
+                Some(k) => l10n::fmt(locale, k, &[m]),
+                // A canonical diagnostic string: painted verbatim.
+                None => m.clone(),
+            };
+            ui.add(egui::Label::new(RichText::new(text).color(w::BAD)).wrap());
         }
         if !self.agents.is_empty() {
             egui::ScrollArea::vertical()
@@ -321,8 +331,8 @@ impl Discovery {
                                     .color(w::DIM),
                             );
                             if ui
-                                .button("Use this host")
-                                .on_hover_text("pick this agent and pair with a code")
+                                .button(l10n::text(locale, Key::BtnUseThisHost))
+                                .on_hover_text(l10n::text(locale, Key::HoverUseThisHost))
                                 .clicked()
                             {
                                 picked = Some(i);
@@ -333,13 +343,9 @@ impl Discovery {
         } else if self.finished && !self.scanning && self.msg.is_none() {
             ui.add(
                 egui::Label::new(
-                    RichText::new(
-                        "No agent answered. Check that the host runs the agent with discovery \
-                         enabled (EBBTOP_AGENT_DISCOVERY is on by default), that its firewall allows \
-                         UDP 45978, or enter the address yourself below.",
-                    )
-                    .small()
-                    .color(w::WARN),
+                    RichText::new(l10n::text(locale, Key::NoAgentAnswered))
+                        .small()
+                        .color(w::WARN),
                 )
                 .wrap(),
             );
@@ -365,6 +371,8 @@ pub struct Pairing {
     pub busy: bool,
     pub error: Option<PairError>,
     pub msg: Option<String>,
+    /// Template for `msg`, as on [`Discovery::msg_key`].
+    pub msg_key: Option<Key>,
     rx: Option<Receiver<Result<PairOutcome, PairError>>>,
 }
 
@@ -406,6 +414,7 @@ impl Pairing {
                 self.busy = false;
                 self.error = None;
                 self.msg = None;
+                self.msg_key = None;
                 Some(o)
             }
             Ok(Err(e)) => {
@@ -434,14 +443,17 @@ impl Pairing {
             Ok(c) => c,
             Err(e) => {
                 self.error = None;
+                // A canonical core message (no code in it): painted verbatim.
                 self.msg = Some(e);
+                self.msg_key = None;
                 return;
             }
         };
         let url = match pairing::pair_url(&self.url) {
             Ok(u) => u,
             Err(e) => {
-                self.msg = Some(format!("cannot pair with this address: {e}"));
+                self.msg = Some(e.to_string());
+                self.msg_key = Some(Key::PairAddrBad);
                 return;
             }
         };
@@ -450,6 +462,7 @@ impl Pairing {
         self.busy = true;
         self.error = None;
         self.msg = None;
+        self.msg_key = None;
         let label = Some(self.name.clone());
         let name = self.name.clone();
         let spawned = std::thread::Builder::new()
@@ -461,56 +474,69 @@ impl Pairing {
         if let Err(e) = spawned {
             self.busy = false;
             self.rx = None;
-            self.msg = Some(format!("could not start the exchange: {e}"));
+            self.msg = Some(e.to_string());
+            self.msg_key = Some(Key::PairStartFailed);
         }
     }
 
     /// Draw the prompt. The caller starts the exchange (or drops the prompt)
     /// from the returned action.
-    pub fn draw(&mut self, ui: &mut egui::Ui) -> PairAction {
+    pub fn draw(&mut self, ui: &mut egui::Ui, locale: Locale) -> PairAction {
         let mut action = PairAction::None;
         ui.add_space(4.0);
         ui.separator();
-        ui.label(RichText::new(format!("Pair with {}", self.name)).strong().color(w::TEXT));
+        ui.label(
+            RichText::new(l10n::fmt(locale, Key::PairWith, &[&self.name]))
+                .strong()
+                .color(w::TEXT),
+        );
         ui.add(
             egui::Label::new(
-                RichText::new(format!(
-                    "{} — run `ebbtop-agent --pair` on that host for a 6-digit code \
-                     (about 5 minutes, one use).",
-                    self.url
-                ))
-                .small()
-                .color(w::DIM),
+                RichText::new(l10n::fmt(locale, Key::PairCodeHint, &[&self.url]))
+                    .small()
+                    .color(w::DIM),
             )
             .wrap(),
         );
         ui.horizontal(|ui| {
-            ui.label("Pairing code");
+            ui.label(l10n::text(locale, Key::LabelPairingCode));
             ui.add(
                 egui::TextEdit::singleline(&mut self.code)
                     .desired_width(88.0)
-                    .hint_text("6 digits")
+                    .hint_text(l10n::text(locale, Key::HintSixDigits))
                     .char_limit(12),
             )
-            .accessible_name("Pairing code");
+            .accessible_name(l10n::text(locale, Key::LabelPairingCode));
             let pair = ui
-                .add_enabled(!self.busy, egui::Button::new("Pair"))
-                .on_hover_text("exchange the code for a read-only token on that host");
+                .add_enabled(!self.busy, egui::Button::new(l10n::text(locale, Key::BtnPair)))
+                .on_hover_text(l10n::text(locale, Key::HoverPairExchange));
             if pair.clicked() {
                 action = PairAction::Start;
             }
-            if ui.button("Cancel").clicked() {
+            if ui.button(l10n::text(locale, Key::BtnCancel)).clicked() {
                 action = PairAction::Cancel;
             }
         });
         if self.busy {
-            ui.label(RichText::new("asking the host for a token…").color(w::DIM));
+            ui.label(RichText::new(l10n::text(locale, Key::PairBusy)).color(w::DIM));
         }
         if let Some(e) = &self.error {
-            w::error_block(ui, e.headline(), e.next_action(), &e.detail);
+            // Classified by the stable `PairFailure` variant, never by English
+            // prose; the detail stays the scrubbed canonical text.
+            w::error_block(
+                ui,
+                locale,
+                l10n::pair_failure_headline(locale, e),
+                l10n::pair_failure_next_action(locale, e),
+                &e.detail,
+            );
         }
         if let Some(m) = &self.msg {
-            ui.add(egui::Label::new(RichText::new(m).color(w::WARN)).wrap());
+            let text = match self.msg_key {
+                Some(k) => l10n::fmt(locale, k, &[m]),
+                None => m.clone(),
+            };
+            ui.add(egui::Label::new(RichText::new(text).color(w::WARN)).wrap());
         }
         action
     }
@@ -525,6 +551,7 @@ impl Default for Pairing {
             busy: false,
             error: None,
             msg: None,
+            msg_key: None,
             rx: None,
         }
     }
@@ -775,7 +802,10 @@ mod tests {
         p.code = "123456".into();
         p.start();
         assert!(!p.busy);
-        assert!(p.msg.as_deref().unwrap_or("").contains("address"), "{:?}", p.msg);
+        // The sentence around the detail is composed at draw time in the active
+        // locale (`msg_key`); the stored detail stays the canonical core text.
+        assert_eq!(p.msg_key, Some(Key::PairAddrBad), "the refusal must name the address");
+        assert!(p.msg.as_deref().unwrap_or("").contains("bad URL"), "{:?}", p.msg);
     }
 
     #[test]

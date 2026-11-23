@@ -354,10 +354,21 @@ pub fn opener_command(target: &std::path::Path) -> (String, Vec<String>) {
     }
 }
 
+/// Why revealing the log failed, as a value the draw layer can localize.
+/// The variants carry only non-localized facts (the handler name and the OS
+/// error text), so nothing translated can leak into a log line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenLogsError {
+    /// No data directory is resolvable on this platform.
+    NoDataDir,
+    /// The OS handler could not be started.
+    Spawn { cmd: String, error: String },
+}
+
 /// Reveal the log with the OS handler. Best effort: the caller shows the
 /// error as a note. Never fails the app.
-pub fn open_logs() -> Result<(), String> {
-    let p = log_path().ok_or_else(|| "no data directory for the log".to_string())?;
+pub fn open_logs() -> Result<(), OpenLogsError> {
+    let p = log_path().ok_or(OpenLogsError::NoDataDir)?;
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
@@ -369,7 +380,7 @@ pub fn open_logs() -> Result<(), String> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("could not run {cmd}: {e}"))
+        .map_err(|e| OpenLogsError::Spawn { cmd, error: e.to_string() })
 }
 
 /// Write the support summary beside the log. Same no-secret rule as the

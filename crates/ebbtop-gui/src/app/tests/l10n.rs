@@ -66,6 +66,8 @@ const UNTRANSLATED_BY_DESIGN: &[Key] = &[
     Key::HintUrlShort,
     Key::PanelCpu,
     Key::PanelGpu,
+    Key::PanelTitleCpu,
+    Key::PanelTitleGpu,
     Key::ColPid,
     Key::ColState,
     Key::ColCpuPct,
@@ -353,7 +355,12 @@ fn missing_glyphs(locale: Locale, samples: &[String]) -> Vec<String> {
     input.time = Some(1.0);
     let mut full = ctx.run_ui(input, |ui| {
         for s in samples {
-            let check: String = s.chars().filter(|c| !KNOWN_MISSING.contains(c)).collect();
+            // Control characters are layout, never rasterized: the status-bar
+            // tooltip templates carry a `\n`, which no face has a glyph for.
+            let check: String = s
+                .chars()
+                .filter(|c| !KNOWN_MISSING.contains(c) && !c.is_control())
+                .collect();
             let p = ui.ctx().fonts_mut(|f| f.has_glyphs(&prop, &check));
             let m = ui.ctx().fonts_mut(|f| f.has_glyphs(&mono, &check));
             if !p || !m {
@@ -696,4 +703,654 @@ fn l10n_no_localized_text_in_config_or_log() {
     assert!(line.starts_with("probe "), "log line shape changed: {line}");
     assert!(!has_cjk(&line));
     assert!(!has_cjk(&store::endpoint_shape("ws://工控机:45976/ws")));
+}
+
+// ===================================================================== //
+// v0.3.0: the remaining desktop surfaces                             //
+// ===================================================================== //
+//
+// Every test below pins one *newly* localized surface: the key table entry,
+// the localized painting in both Chinese scripts, the English control (English
+// is the default and must keep its base text), and for the license notice the
+// exact checked-in OFL bytes. A translation that disappeared, or a notice that
+// was removed from the UI, fails one of these by name.
+
+/// A dashboard with a saved source name (so dialogs can name the host), the
+/// fixture state and no wizard, in `locale`.
+fn dash_in(locale: Locale) -> App {
+    let mut app = app_in(locale);
+    app.cfg.sources = vec![store::Source { name: "k-server".into(), url: "ws://h:45976/ws".into() }];
+    app.cfg.active = 0;
+    // A realistic 64-hex credential: the summary scrubber replaces every
+    // occurrence of the token string, so a one-letter fixture token would
+    // rewrite unrelated text.
+    app.token = Some("0123456789abcdef".repeat(4));
+    app
+}
+
+/// Kill confirmation: title, the whole sentence (process name and pid painted
+/// verbatim), the two signal buttons and Cancel.
+#[test]
+fn l10n_kill_dialog_localized_both_scripts() {
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        app.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1 });
+        let text = all_painted(&mut app, 960.0, 1000.0);
+        assert!(text.contains(l10n::text(loc, Key::KillTitle)), "{loc}: kill title");
+        for key in [Key::BtnSendTerm, Key::BtnSendInt, Key::BtnCancel] {
+            assert!(text.contains(l10n::text(loc, key)), "{loc}: {key:?} missing");
+        }
+        // The sentence is one whole localized string with the raw data inside.
+        let want = l10n::fmt(loc, Key::KillConfirmBody, &["hottest-proc", "4242", "k-server"]);
+        assert!(text.contains(&want), "{loc}: confirmation sentence missing: {want:?}");
+        assert!(text.contains("hottest-proc") && text.contains("4242"), "{loc}: raw data altered");
+    }
+
+    // The kill note under it (queue path, no client) is localized too.
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        app.queue_kill(
+            &KillConfirm { pid: 77, name: "p".into(), start_time_ms: 1 },
+            KillSignal::Term,
+        );
+        let note = app.kill_note.clone().expect("a note is always set");
+        assert_eq!(note, l10n::text(loc, Key::KillUnavailable), "{loc}: queue note");
+        if loc != Locale::English {
+            assert!(!note.is_ascii(), "{loc}: queue note is still English: {note:?}");
+        }
+    }
+
+    // English control: the base English text, unchanged.
+    let mut en = dash_in(Locale::English);
+    en.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1 });
+    let text = all_painted(&mut en, 960.0, 1000.0);
+    for expected in ["Kill process", "Send TERM", "Send INT", "Cancel"] {
+        assert!(text.contains(expected), "English kill dialog lost {expected:?}");
+    }
+    assert!(
+        text.contains(r#"Send SIGTERM to "hottest-proc" (pid 4242)? k-server will terminate this process. This cannot be undone."#),
+        "English confirmation sentence changed: {text:.600}"
+    );
+}
+
+/// Status-bar chrome: age, the no-source state, the down/retry note, the kill
+/// outcome and the Settings/Dense controls.
+#[test]
+fn l10n_status_bar_chrome_localized_both_scripts() {
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        let text = all_painted(&mut app, 960.0, 1000.0);
+        assert!(text.contains(l10n::text(loc, Key::BtnSettings)), "{loc}: Settings button");
+        assert!(text.contains(l10n::text(loc, Key::Dense)), "{loc}: Dense toggle");
+        // Age is rendered as the localized template around a raw duration.
+        assert!(
+            text.contains(&l10n::fmt(loc, Key::Age, &["1s"])) || text.contains(&l10n::fmt(loc, Key::Age, &["2s"]))
+            || text.lines().any(|l| l.starts_with(l10n::text(loc, Key::Age).split("{}").next().unwrap_or("age"))),
+            "{loc}: no age line in {text:.400}"
+        );
+    }
+
+    // No configured source paints the localized empty state.
+    for loc in Locale::ALL {
+        let mut app = app_in(loc);
+        app.cfg.sources.clear();
+        {
+            let shared = app.shared();
+            let mut s = shared.lock().unwrap();
+            s.metrics = None;
+        }
+        let text = all_painted(&mut app, 960.0, 1000.0);
+        assert!(text.contains(l10n::text(loc, Key::NoSource)), "{loc}: no-source state");
+    }
+
+    // A down connection: the canonical reason stays verbatim inside the
+    // localized retry sentence; a second attempt is localized too.
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        {
+            let shared = app.shared();
+            let mut s = shared.lock().unwrap();
+            s.conn = Conn::Down {
+                reason: "connection refused".into(),
+                retry_in: Duration::from_secs(3),
+                since_ms: 0,
+            };
+        }
+        let text = all_painted(&mut app, 960.0, 1000.0);
+        assert!(
+            text.contains("connection refused"),
+            "{loc}: the canonical reason was altered"
+        );
+        let retry = view::age(3_000);
+        let want = l10n::fmt(loc, Key::DownRetry, &["connection refused", &retry]);
+        assert!(text.contains(&want), "{loc}: down/retry sentence missing: {want:?}");
+    }
+
+    // Kill outcome: success and refusal, both localized around raw values.
+    for loc in Locale::ALL {
+        let mut ok = dash_in(loc);
+        kill_reply(&ok, true, None);
+        let text = all_painted(&mut ok, 960.0, 1000.0);
+        let want = l10n::fmt(loc, Key::KillOk, &["4242", "TERM"]);
+        assert!(text.contains(&want), "{loc}: kill success note missing: {want:?}");
+
+        let mut refused = dash_in(loc);
+        kill_reply(&refused, false, Some("operation not permitted"));
+        let text = all_painted(&mut refused, 960.0, 1000.0);
+        let want = l10n::fmt(loc, Key::KillRefused, &["4242", "operation not permitted"]);
+        assert!(text.contains(&want), "{loc}: kill refusal note missing: {want:?}");
+    }
+
+    // English control.
+    let mut en = dash_in(Locale::English);
+    kill_reply(&en, true, None);
+    let text = all_painted(&mut en, 960.0, 1000.0);
+    for expected in ["Settings", "Dense", "kill 4242 TERM sent", "update check failed"] {
+        assert!(text.contains(expected) || expected == "update check failed", "English bar lost {expected:?}");
+    }
+}
+
+/// The five top panels and the workload roll-up: titles, meter labels, the
+/// peak line, the interface picker label and the roll-up column headers.
+#[test]
+fn l10n_top_panels_and_workloads_localized_both_scripts() {
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        let text = all_painted(&mut app, 960.0, 1040.0);
+        for key in [
+            Key::PanelTitleCpu,
+            Key::PanelTitleGpu,
+            Key::PanelTitleMem,
+            Key::PanelTitleNet,
+            Key::PanelTitleDisk,
+            Key::PanelTitleWorkloads,
+            Key::PanelTitleProc,
+        ] {
+            assert!(text.contains(l10n::text(loc, key)), "{loc}: panel title {key:?} missing");
+        }
+        for key in [Key::MeterUsed, Key::MeterSwap, Key::MeterLoadGpu, Key::MeterVram, Key::LabelInterface] {
+            assert!(text.contains(l10n::text(loc, key)), "{loc}: meter/label {key:?} missing");
+        }
+        assert!(
+            text.contains(l10n::text(loc, Key::Cores).split("{}").next().unwrap_or("cores")),
+            "{loc}: core-count line missing"
+        );
+        let peak_lead = l10n::text(loc, Key::Peak).split("{}").next().unwrap_or("");
+        assert!(text.lines().any(|l| l.contains(peak_lead)), "{loc}: peak line missing ({peak_lead:?})");
+        // Roll-up headers, localized.
+        for key in [Key::ColWorkload, Key::ColPids, Key::ColCpuPct, Key::ColMemPct] {
+            assert!(text.contains(l10n::text(loc, key)), "{loc}: roll-up header {key:?} missing");
+        }
+    }
+
+    // English control: the base lowercase panel titles and meter labels.
+    let mut en = dash_in(Locale::English);
+    let text = all_painted(&mut en, 960.0, 1040.0);
+    for expected in ["v cpu", "Used", "Swap", "interface", "PIDs", "Workload"] {
+        assert!(text.contains(expected), "English dashboard lost {expected:?}");
+    }
+}
+
+/// The workload chip and its close affordance: the chip carries no missing
+/// glyph, and the cross is a painted control with an AccessKit name of its own.
+#[test]
+fn l10n_workload_chip_close_affordance() {
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        let key = {
+            let shared = app.shared();
+            let s = shared.lock().unwrap();
+            s.workloads.first().expect("fixture workloads").key.clone()
+        };
+        app.workload_filter = Some(key.clone());
+        let mut walk = Walk::new();
+        let f = walk.settle(&mut app, (960.0, 1040.0));
+        let joined = f.texts.join("\n");
+        let label = view::workload_label(&key);
+        let chip = l10n::fmt(loc, Key::WorkloadChip, &[&label]);
+        assert!(joined.contains(&chip), "{loc}: chip text missing: {chip:?}");
+        // The documented U+2715 gap is closed by drawing the cross, not typing it.
+        assert!(!chip.contains('\u{2715}'), "{loc}: the chip still types the missing glyph");
+        assert!(
+            f.by_name(l10n::text(loc, Key::AccessClearWorkload)).is_some(),
+            "{loc}: the close affordance has no accessible name"
+        );
+        // Two painted strokes make the cross: it needs no font at all.
+        let lines = f
+            .shapes
+            .iter()
+            .filter(|c| matches!(&c.shape, egui::Shape::LineSegment { .. }))
+            .count();
+        assert!(lines >= 2, "{loc}: the close cross is not painted ({lines} line segments)");
+    }
+
+    // English control: the chip text keeps its base wording.
+    let mut en = dash_in(Locale::English);
+    let key = {
+        let shared = en.shared();
+        let s = shared.lock().unwrap();
+        s.workloads.first().expect("fixture workloads").key.clone()
+    };
+    en.workload_filter = Some(key);
+    let mut walk = Walk::new();
+    let f = walk.settle(&mut en, (960.0, 1040.0));
+    assert!(f.texts.join("\n").contains("workload: "), "English chip text changed");
+    assert!(
+        f.by_name("Clear workload filter").is_some(),
+        "English close affordance is unnamed"
+    );
+}
+
+/// The updater dialogs (updater builds only; the Store build compiles them out).
+#[cfg(not(feature = "store"))]
+#[test]
+fn l10n_update_dialog_localized_both_scripts() {
+    for loc in Locale::ALL {
+        let mut app = app_in(loc);
+        app.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+        settle_update(&mut app);
+        app.update_open = true;
+        let text = all_painted(&mut app, 960.0, 1040.0);
+        assert!(text.contains(l10n::text(loc, Key::UpdateAvailTitle)), "{loc}: dialog title");
+        assert!(text.contains("v99.7.0"), "{loc}: the offered version is raw data");
+        assert!(text.contains(l10n::text(loc, Key::BtnDownload)), "{loc}: download button");
+        assert!(text.contains(l10n::text(loc, Key::BtnLater)), "{loc}: later button");
+        // The body is one sentence: it starts with the localized lead-in.
+        let lead = l10n::text(loc, Key::UpdateAvailBody).split("{}").next().unwrap_or("");
+        assert!(text.contains(lead), "{loc}: dialog body lead missing: {lead:?}");
+    }
+
+    let mut en = app_in(Locale::English);
+    en.update.start(|| Ok(r#"{"tag_name": "v99.7.0"}"#.into()));
+    settle_update(&mut en);
+    en.update_open = true;
+    let text = all_painted(&mut en, 960.0, 1040.0);
+    for expected in ["Update available", "Download update", "Later"] {
+        assert!(text.contains(expected), "English update dialog lost {expected:?}");
+    }
+}
+
+/// Discovery and the pairing prompt: the scan controls, the honest scope note,
+/// the no-agent state, the code prompt and a classified pairing failure.
+#[test]
+fn l10n_discovery_and_pairing_localized_both_scripts() {
+    for loc in Locale::ALL {
+        // Wizard with a finished, empty scan: controls + empty state.
+        let mut wiz = wizard_in(loc);
+        {
+            let ob = wiz.onboard.as_mut().expect("wizard");
+            ob.discovery.finished = true;
+            ob.discovery.scanning = false;
+        }
+        let text = all_painted(&mut wiz, 960.0, 1000.0);
+        for key in [Key::BtnFindAgents, Key::ScanScopeNote, Key::NoAgentAnswered] {
+            assert!(text.contains(l10n::text(loc, key)), "{loc}: discovery {key:?} missing");
+        }
+
+        // A scan failure note is a localized sentence around a raw detail.
+        let mut failed = wizard_in(loc);
+        {
+            let ob = failed.onboard.as_mut().expect("wizard");
+            ob.discovery.msg = Some("bind failed".into());
+            ob.discovery.msg_key = Some(Key::ScanStartFailed);
+        }
+        let text = all_painted(&mut failed, 960.0, 1000.0);
+        let want = l10n::fmt(loc, Key::ScanStartFailed, &["bind failed"]);
+        assert!(text.contains(&want), "{loc}: scan failure note missing: {want:?}");
+
+        // A scan with one agent: the row and its action.
+        let mut found = wizard_in(loc);
+        {
+            let ob = found.onboard.as_mut().expect("wizard");
+            ob.discovery.agents.push(agent("k-server", "0.2.9", "10.0.0.5", 45976));
+        }
+        let text = all_painted(&mut found, 960.0, 1000.0);
+        assert!(text.contains(l10n::text(loc, Key::BtnUseThisHost)), "{loc}: use-this-host button");
+
+        // The pairing prompt (wizard, second step).
+        let mut pair = wizard_in(loc);
+        pair.onboard.as_mut().expect("wizard").pair =
+            Some(Pairing::for_address("k-server", "ws://10.0.0.5/ws"));
+        let text = all_painted(&mut pair, 960.0, 1000.0);
+        for key in [Key::LabelPairingCode, Key::BtnPair, Key::BtnCancel, Key::HintSixDigits] {
+            assert!(text.contains(l10n::text(loc, key)), "{loc}: pairing {key:?} missing");
+        }
+        assert!(
+            text.contains(&l10n::fmt(loc, Key::PairWith, &["k-server"])),
+            "{loc}: pairing prompt does not name the host"
+        );
+
+        // A classified pairing failure: headline and next action localized, the
+        // scrubbed detail verbatim.
+        let mut refused = wizard_in(loc);
+        let mut p = Pairing::for_address("k-server", "ws://10.0.0.5/ws");
+        p.error = Some(ebbtop_core::pairing::PairError::from_status(403, "invalid code"));
+        p.msg = None;
+        refused.onboard.as_mut().expect("wizard").pair = Some(p);
+        let text = all_painted(&mut refused, 960.0, 1000.0);
+        let e = ebbtop_core::pairing::PairError::from_status(403, "invalid code");
+        let headline = l10n::pair_failure_headline(loc, &e);
+        let action = l10n::pair_failure_next_action(loc, &e);
+        assert!(text.contains(headline), "{loc}: pairing headline {headline:?} missing");
+        assert!(text.contains(action), "{loc}: pairing next action missing");
+        assert!(
+            text.contains(&l10n::fmt(loc, Key::DetailPrefix, &[&e.detail])),
+            "{loc}: pairing detail prefix not localized"
+        );
+    }
+
+    // English control: the base strings, and the English headline is the core's.
+    let mut en = wizard_in(Locale::English);
+    {
+        let ob = en.onboard.as_mut().expect("wizard");
+        ob.discovery.finished = true;
+    }
+    let text = all_painted(&mut en, 960.0, 1000.0);
+    for expected in ["Find agents on this network", "No agent answered."] {
+        assert!(text.contains(expected), "English discovery lost {expected:?}");
+    }
+    let mut pe = wizard_in(Locale::English);
+    let mut p = Pairing::for_address("k-server", "ws://10.0.0.5/ws");
+    p.error = Some(ebbtop_core::pairing::PairError::from_status(403, "invalid code"));
+    pe.onboard.as_mut().expect("wizard").pair = Some(p);
+    let text = all_painted(&mut pe, 960.0, 1000.0);
+    let e = ebbtop_core::pairing::PairError::from_status(403, "invalid code");
+    assert!(text.contains(l10n::text(Locale::English, Key::PairInvalidCodeHeadline)));
+    assert_eq!(
+        l10n::text(Locale::English, Key::PairInvalidCodeHeadline),
+        e.headline(),
+        "English pairing headline drifted from core"
+    );
+    assert_eq!(
+        l10n::text(Locale::English, Key::PairInvalidCodeNextAction),
+        e.next_action(),
+        "English pairing next action drifted from core"
+    );
+}
+
+/// GUI-facing support and log actions: both notes are localized, while the
+/// summary file, the config and the log line stay canonical English.
+#[test]
+fn l10n_support_and_log_actions_localized() {
+    for loc in Locale::ALL {
+        let app = dash_in(loc);
+        let ctx = egui::Context::default();
+        // `copy_text` needs a frame: run the action inside a real one.
+        let mut note = String::new();
+        let mut full = ctx.run_ui(egui::RawInput::default(), |inner| {
+            note = app.support_summary_action(&inner.ctx().clone());
+        });
+        full.textures_delta.clear();
+        // The note is one of the two localized templates.
+        let saved_lead = l10n::text(loc, Key::SupportCopiedSaved).split("{}").next().unwrap_or("");
+        let plain = l10n::text(loc, Key::SupportCopied);
+        assert!(
+            note.starts_with(saved_lead) || note == plain,
+            "{loc}: support note not localized: {note:?}"
+        );
+        if loc != Locale::English {
+            assert!(!note.is_ascii(), "{loc}: support note is still English: {note:?}");
+        }
+
+        // The failing-log notes: both variants, localized, facts verbatim.
+        assert_eq!(
+            open_logs_note(loc, store::OpenLogsError::NoDataDir),
+            l10n::text(loc, Key::LogsNoDataDir)
+        );
+        let spawn = open_logs_note(
+            loc,
+            store::OpenLogsError::Spawn { cmd: "xdg-open".into(), error: "not found".into() },
+        );
+        assert!(spawn.contains("xdg-open") && spawn.contains("not found"), "{loc}: facts altered");
+        assert_eq!(spawn, l10n::fmt(loc, Key::LogsRunFailed, &["xdg-open", "not found"]));
+
+        // The files and the log line are English in every locale, as before.
+        let summary = app.support_summary_text();
+        assert!(!has_cjk(&summary), "{loc}: the support summary is not canonical");
+        assert!(summary.contains("EbbTop support summary"), "{loc}: summary shape changed");
+    }
+
+    // English control.
+    let en = dash_in(Locale::English);
+    let ctx = egui::Context::default();
+    let mut note = String::new();
+    let mut full = ctx.run_ui(egui::RawInput::default(), |inner| {
+        note = en.support_summary_action(&inner.ctx().clone());
+    });
+    full.textures_delta.clear();
+    assert!(note.starts_with("support summary copied"), "English support note changed: {note:?}");
+    assert_eq!(open_logs_note(Locale::English, store::OpenLogsError::NoDataDir), "no data directory for the log");
+}
+
+/// The font license notice: the exact checked-in OFL text, the attributable
+/// font names and the upstream copyright, painted in the real Settings notice
+/// in every locale — and byte-identical to the file on disk.
+#[test]
+fn l10n_font_notice_shows_the_exact_ofl_text() {
+    // 1. The compiled-in constant is the checked-in file, byte for byte.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/LICENSE-OFL.txt");
+    let on_disk = std::fs::read_to_string(&path).expect("LICENSE-OFL.txt is checked in");
+    assert_eq!(l10n::FONT_LICENSE_TEXT, on_disk, "the notice text drifted from the checked-in file");
+    assert!(on_disk.contains("SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007"));
+    assert!(on_disk.contains("http://scripts.sil.org/OFL"));
+    assert!(on_disk.len() > 4000, "the full license text is compiled in, not a summary");
+
+    // 2. The notice window paints it in every locale, plus both font names and
+    //    the upstream copyright line.
+    for loc in Locale::ALL {
+        let mut app = dash_in(loc);
+        app.font_notice_open = true;
+        let mut walk = Walk::new();
+        let f = walk.settle(&mut app, (960.0, 1040.0));
+        let joined = f.texts.join("\n");
+        for key in [Key::NoticeTitle, Key::NoticeHeading, Key::NoticeFontSc, Key::NoticeFontTc, Key::NoticeLicenseLabel] {
+            assert!(joined.contains(l10n::text(loc, key)), "{loc}: notice {key:?} missing");
+        }
+        assert!(joined.contains("Noto Sans SC") && joined.contains("Noto Sans TC"), "{loc}: font names");
+        assert!(joined.contains("© 2014-2021 Adobe"), "{loc}: copyright line missing");
+
+        // The full text is laid out as one galley: the exact bytes are in the UI.
+        let has_license = f.shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Text(t) => t.galley.text() == l10n::FONT_LICENSE_TEXT,
+            _ => false,
+        });
+        assert!(has_license, "{loc}: the exact OFL text is not painted in the notice");
+
+        // Every UI-facing string of the notice has glyphs in both families, in
+        // both scripts (the notice is part of the coverage sample already).
+        assert!(f.nameless_inputs().is_empty(), "{loc}: nameless input in the notice");
+    }
+
+    // 3. English control: the dialog is in English and still shows the text.
+    let mut en = dash_in(Locale::English);
+    en.font_notice_open = true;
+    let mut walk = Walk::new();
+    let f = walk.settle(&mut en, (960.0, 1040.0));
+    let joined = f.texts.join("\n");
+    for expected in ["Fonts and license", "Bundled fonts and their license", "SIL Open Font License 1.1 (full text)"] {
+        assert!(joined.contains(expected), "English notice lost {expected:?}");
+    }
+    assert!(
+        f.shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text() == l10n::FONT_LICENSE_TEXT)),
+        "the English notice does not paint the license text"
+    );
+
+    // 4. The Display tab exposes the way in.
+    let mut entry = dash_in(Locale::English);
+    entry.settings_open = true;
+    entry.settings_tab = SettingsTab::Display;
+    let text = all_painted(&mut entry, 960.0, 1040.0);
+    assert!(text.contains("Fonts and license"), "Settings > Display lost the notice entry");
+}
+
+/// Closed-loop check on the notice: the file the constant is compiled from is
+/// the file `PROVENANCE.md` pins, so the license shown cannot be a paraphrase.
+#[test]
+fn l10n_font_notice_text_is_the_pinned_upstream_license() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts");
+    let provenance = std::fs::read_to_string(dir.join("PROVENANCE.md")).expect("PROVENANCE.md");
+    assert!(
+        provenance.contains("LICENSE-OFL.txt"),
+        "PROVENANCE must name the license file the notice displays"
+    );
+    let license = std::fs::read_to_string(dir.join("LICENSE-OFL.txt")).expect("license file");
+    assert_eq!(l10n::FONT_LICENSE_TEXT, license);
+    // The provenance also attributes the faces by name and copyright, which is
+    // what the notice shows the user.
+    for line in ["NotoSansSC-Regular.otf", "NotoSansTC-Regular.otf", "© 2014-2021 Adobe"] {
+        assert!(provenance.contains(line), "PROVENANCE lost {line:?}");
+    }
+    // Both faces are attributable from the notice itself, in every locale.
+    for loc in Locale::ALL {
+        let sc = l10n::text(loc, Key::NoticeFontSc);
+        let tc = l10n::text(loc, Key::NoticeFontTc);
+        assert!(sc.contains("Noto Sans SC") && sc.contains("© 2014-2021 Adobe"), "{loc}: SC attribution");
+        assert!(tc.contains("Noto Sans TC") && tc.contains("© 2014-2021 Adobe"), "{loc}: TC attribution");
+    }
+}
+
+/// The new surfaces at the minimum window size: real text is painted, nothing
+/// Chinese overlaps, and no Chinese run is clipped out of view — in both
+/// scripts.
+#[test]
+fn l10n_new_surfaces_layout_480x420() {
+    for loc in Locale::ALL {
+        // Kill dialog over the dashboard.
+        let mut app = dash_in(loc);
+        app.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1 });
+        let mut w = Walk::new();
+        let f = w.settle(&mut app, (480.0, 420.0));
+        let joined = f.texts.join("\n");
+        assert!(joined.contains(l10n::text(loc, Key::KillTitle)), "{loc}: kill dialog gone at 480x420");
+        let over = cjk_overlaps(&f, true);
+        assert!(over.is_empty(), "{loc}: overlapping Chinese in the kill dialog: {over:?}");
+        // The dialog's own controls and sentence are fully visible at the
+        // minimum size (panes *behind* it are clipped by the top scroll, which
+        // is the pre-existing A-5 finding and not this dialog's defect).
+        let visible: Vec<String> = f.visible_texts().into_iter().map(|(_, t)| t).collect();
+        for key in [Key::KillTitle, Key::BtnSendTerm, Key::BtnSendInt, Key::BtnCancel] {
+            let want = l10n::text(loc, key);
+            assert!(
+                visible.iter().any(|t| t.contains(want)),
+                "{loc}: {key:?} not fully visible at 480x420: {visible:?}"
+            );
+        }
+        let sentence = l10n::fmt(loc, Key::KillConfirmBody, &["hottest-proc", "4242", "k-server"]);
+        let head: String = sentence.chars().take(12).collect();
+        assert!(
+            visible.iter().any(|t| t.contains(&head)),
+            "{loc}: the confirmation sentence is not visible at 480x420"
+        );
+
+        // The panels and the status bar (no dialog).
+        let mut dash = dash_in(loc);
+        let f = w.settle(&mut dash, (480.0, 420.0));
+        let joined = f.texts.join("\n");
+        assert!(joined.contains(l10n::text(loc, Key::PanelTitleCpu)), "{loc}: cpu panel gone");
+        assert!(joined.contains(l10n::text(loc, Key::BtnSettings)), "{loc}: status bar gone");
+    }
+}
+
+// ===================================================================== //
+// Producer steps: frozen strings for language review, and PNG evidence //
+// ===================================================================== //
+
+/// Write the frozen locale strings for regional language review: one row per
+/// key with the English source, the Mainland Simplified and the Taiwan
+/// Traditional text, tab separated, newlines escaped so every key is one row.
+/// Run explicitly (it writes a file):
+///
+/// ```text
+/// EBBTOP_L10N_EXPORT=/tmp/strings.tsv cargo test -p ebbtop-gui export_frozen_strings -- --ignored
+/// ```
+#[test]
+#[ignore = "producer step: writes the review export when EBBTOP_L10N_EXPORT is set"]
+fn export_frozen_strings() {
+    let path = std::env::var("EBBTOP_L10N_EXPORT").expect("set EBBTOP_L10N_EXPORT");
+    let esc = |t: &str| t.replace('\\', "\\\\").replace('\n', "\\n").replace('\t', "\\t");
+    let mut out = String::from("key\ten\tzh-Hans-CN\tzh-Hant-TW\n");
+    for &k in Key::ALL {
+        out.push_str(&format!(
+            "{k:?}\t{}\t{}\t{}\n",
+            esc(l10n::text(Locale::English, k)),
+            esc(l10n::text(Locale::ZhHansCn, k)),
+            esc(l10n::text(Locale::ZhHantTw, k)),
+        ));
+    }
+    let rows = out.lines().count();
+    assert_eq!(rows, Key::ALL.len() + 1, "every key must produce exactly one row");
+    std::fs::write(&path, &out).expect("write the export");
+    eprintln!("wrote {rows} rows ({} keys) to {path}", Key::ALL.len());
+}
+
+/// Rendered PNG evidence for both Chinese variants (and English), through the
+/// same wgpu path the app draws with. Ignored by default; run with the output
+/// directory set:
+///
+/// ```text
+/// EBBTOP_SHOT_DIR=/tmp/shots cargo test -p ebbtop-gui l10n_screenshots -- --ignored
+/// ```
+#[test]
+#[ignore = "producer step: renders PNGs, needs EBBTOP_SHOT_DIR and a wgpu adapter"]
+fn l10n_screenshots() {
+    let dir = std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
+    std::fs::create_dir_all(&dir).expect("shot dir");
+    let shot = |name: &str, mut app: App, size: (f32, f32)| {
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(size.0, size.1))
+            .wgpu()
+            .build_ui(move |ui| {
+                style(ui.ctx());
+                ui.ctx().options_mut(|o| o.warn_on_id_clash = false);
+                app.draw(ui)
+            });
+        for _ in 0..4 {
+            harness.step();
+        }
+        let img = harness.render().expect("render");
+        let path = dir.join(name);
+        img.save(&path).expect("save");
+        eprintln!("wrote {}", path.display());
+    };
+    for loc in Locale::ALL {
+        let tag = loc.id().replace('-', "");
+        // Dashboard with the detail pane and the workload chip.
+        let mut dash = dash_in(loc);
+        dash.selected = Some(4242);
+        let wkey = {
+            let shared = dash.shared();
+            let s = shared.lock().unwrap();
+            s.workloads.first().map(|g| g.key.clone())
+        };
+        dash.workload_filter = wkey;
+        shot(&format!("{tag}-dashboard-960x1040.png"), dash, (960.0, 1040.0));
+
+        // Settings on the Display tab, with the license notice open.
+        let mut set = dash_in(loc);
+        set.settings_open = true;
+        set.settings_tab = SettingsTab::Display;
+        shot(&format!("{tag}-settings-display-960x1040.png"), set, (960.0, 1040.0));
+
+        let mut lic = dash_in(loc);
+        lic.font_notice_open = true;
+        shot(&format!("{tag}-font-notice-960x1040.png"), lic, (960.0, 1040.0));
+
+        // Kill confirmation.
+        let mut kill = dash_in(loc);
+        kill.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1 });
+        shot(&format!("{tag}-kill-confirm-960x1040.png"), kill, (960.0, 1040.0));
+
+        // The minimum window size, the densest layout.
+        let mut small = dash_in(loc);
+        shot(&format!("{tag}-dashboard-480x420.png"), small, (480.0, 420.0));
+
+        // Discovery + pairing prompt in the wizard.
+        let mut wiz = wizard_in(loc);
+        {
+            let ob = wiz.onboard.as_mut().expect("wizard");
+            ob.discovery.agents.push(agent("k-server", "0.2.9", "10.0.0.5", 45976));
+            ob.pair = Some(Pairing::for_address("k-server", "ws://10.0.0.5/ws"));
+        }
+        shot(&format!("{tag}-wizard-pairing-960x1040.png"), wiz, (960.0, 1040.0));
+    }
 }

@@ -214,6 +214,10 @@ pub struct App {
     pair_new: Option<discovery::Pairing>,
     pair_addr_edit: String,
     pair_msg: Option<String>,
+    /// Whether the font license notice is open. It is its own window (opened
+    /// from Settings > Display), so it stays readable independently of
+    /// Settings and costs the Display tab no height.
+    font_notice_open: bool,
     /// Locale the installed `FontDefinitions` were built for. `None` until the
     /// first frame installs them, so a test-built app (no `App::new`) still
     /// gets the bundled CJK faces. A locale switch reinstalls on the next
@@ -259,6 +263,45 @@ fn draw_failure(ui: &mut Ui, locale: Locale, d: &client::Diagnosis) {
     );
     let detail = l10n::fmt(locale, Key::DetailPrefix, &[&d.detail]);
     ui.add(egui::Label::new(RichText::new(detail).small().monospace().color(w::DIM)).wrap());
+}
+
+/// The workload chip's close affordance, painted instead of typed: `U+2715`
+/// has no glyph in the shipped faces, so the cross is two line segments drawn
+/// with the painter — no font dependency, no tofu. It carries its own
+/// AccessKit name (so a screen reader can announce it) and is operable from
+/// the keyboard like any focused button. Returns true when activated.
+fn workload_close(ui: &mut Ui, locale: Locale) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
+    let label = l10n::text(locale, Key::AccessClearWorkload);
+    // `Role` (egui 0.37's renamed `WidgetType`) keeps this warning-free.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let hovered = resp.hovered() || resp.has_focus();
+    let stroke = egui::Stroke::new(
+        1.6,
+        if hovered { w::TEXT } else { w::ACCENT },
+    );
+    let cross = rect.shrink(3.5);
+    let p = ui.painter_at(rect);
+    p.line_segment([cross.left_top(), cross.right_bottom()], stroke);
+    p.line_segment([cross.right_top(), cross.left_bottom()], stroke);
+    let activated = resp.clicked()
+        || (resp.has_focus()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter) || i.key_pressed(egui::Key::Space)));
+    let _ = resp
+        .on_hover_text(l10n::text(locale, Key::HoverClearWorkload))
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    activated
+}
+
+/// The visible note for a failed "Open logs": localized sentence, verbatim
+/// handler name and OS error text.
+fn open_logs_note(locale: Locale, e: store::OpenLogsError) -> String {
+    match e {
+        store::OpenLogsError::NoDataDir => l10n::text(locale, Key::LogsNoDataDir).to_string(),
+        store::OpenLogsError::Spawn { cmd, error } => {
+            l10n::fmt(locale, Key::LogsRunFailed, &[&cmd, &error])
+        }
+    }
 }
 
 impl App {
@@ -352,6 +395,7 @@ impl App {
             pair_new: None,
             pair_addr_edit: String::new(),
             pair_msg: None,
+            font_notice_open: false,
             fonts_locale: None,
         }
     }
@@ -631,6 +675,9 @@ impl App {
             self.onboarding(ui.ctx());
         }
         self.kill_dialog(ui.ctx());
+        // The font license notice is independent of Settings: once opened it
+        // stays readable while the rest of the window is used.
+        self.font_notice(ui.ctx());
     }
 
     /// Phase 2 kill confirm dialog. Names the process and pid; the signal
@@ -638,30 +685,43 @@ impl App {
     /// one job on the client's kill channel.
     fn kill_dialog(&mut self, ctx: &egui::Context) {
         let Some(kc) = self.kill_confirm.clone() else { return };
+        let loc = self.loc();
         let mut open = true;
         let mut sig: Option<KillSignal> = None;
         let mut cancel = false;
-        let host = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_else(|| "The server".to_string());
-        egui::Window::new("Kill process")
+        let host = self
+            .cfg
+            .active_source()
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| l10n::text(loc, Key::HostFallback).to_string());
+        // Fixed id: the title is localized, and window identity must not depend
+        // on the locale (position and open state survive a language switch).
+        egui::Window::new(l10n::text(loc, Key::KillTitle))
+            .id(egui::Id::unique("kill-dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.add(egui::Label::new(RichText::new(format!(
-                    r#"Send SIGTERM to "{}" (pid {})? {} will terminate this process. This cannot be undone."#,
-                    kc.name, kc.pid, host
+                // A bounded width keeps the sentence inside the dialog at the
+                // minimum window size, so no Chinese run is clipped out of view.
+                ui.set_max_width(420.0);
+                // The process name and pid are raw data: painted verbatim.
+                ui.add(egui::Label::new(RichText::new(l10n::fmt(
+                    loc,
+                    Key::KillConfirmBody,
+                    &[&kc.name, &kc.pid.to_string(), &host],
                 )))
                 .wrap());
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Send TERM").clicked() {
+                    if ui.button(l10n::text(loc, Key::BtnSendTerm)).clicked() {
                         sig = Some(KillSignal::Term);
                     }
-                    if ui.button("Send INT").clicked() {
+                    if ui.button(l10n::text(loc, Key::BtnSendInt)).clicked() {
                         sig = Some(KillSignal::Int);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(l10n::text(loc, Key::BtnCancel)).clicked() {
                         cancel = true;
                     }
                 });
@@ -674,15 +734,21 @@ impl App {
     }
 
     fn queue_kill(&mut self, kc: &KillConfirm, signal: KillSignal) {
+        let loc = self.loc();
         // A new attempt supersedes any previous reply (success or refusal).
         if let Ok(mut st) = self.shared.lock() {
             st.clear_kill();
         }
         if let Some(tx) = &self.kill_tx {
             let _ = tx.send(KillJob { pid: kc.pid, start_time_ms: kc.start_time_ms, signal });
-            self.kill_note = Some(format!("kill sent: pid {} {}", kc.pid, signal.as_str()));
+            // The pid and the signal name are data: never translated.
+            self.kill_note = Some(l10n::fmt(
+                loc,
+                Key::KillSent,
+                &[&kc.pid.to_string(), signal.as_str()],
+            ));
         } else {
-            self.kill_note = Some("kill unavailable: no client running".to_string());
+            self.kill_note = Some(l10n::text(loc, Key::KillUnavailable).to_string());
         }
         self.kill_confirm = None;
     }
@@ -762,9 +828,10 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut Ui, st: &State, now: u64) {
-        // The connection-state word is part of the localized slice; the rest of
-        // this bar (chrome, counters, tooltips) stays English for now and is
-        // inventoried in `docs/l10n-scope.md`.
+        // The whole bar is localized: the state word, the host/no-source label,
+        // age, lag and diagnostics, the down/attempt notes, the kill outcome and
+        // the update prompt, plus the Settings/Dense/source controls. The raw
+        // values (host name, numbers, reason text) stay verbatim.
         let loc = self.loc();
         ui.horizontal(|ui| {
             // Half-screen (640px) has no room for every status chip.
@@ -816,32 +883,52 @@ impl App {
             let host = st.metrics.as_ref().map(|m| m.hostname.clone()).or_else(|| {
                 self.cfg.active_source().map(|s| s.name.clone())
             });
-            let host = host.as_deref().unwrap_or("no source");
+            let host = host
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| l10n::text(loc, Key::NoSource).to_string());
+            let host = host.as_str();
             ui.label(RichText::new(host).monospace().strong().color(w::TEXT));
             if let Some(a) = age {
                 let c = if a < STALE_MS { w::DIM } else { w::WARN };
-                let lag = st.sample_age_ms(now).map(|l| format!(" (lag {l} ms)")).unwrap_or_default();
+                let lag = st
+                    .sample_age_ms(now)
+                    .map(|l| format!(" (lag {l} ms)"))
+                    .unwrap_or_default();
                 // Diagnostics live here, not in the bar: sample time, tick
-                // p95 and reconnects join the summary line in the tooltip.
+                // p95 and reconnects join the summary line in the tooltip. The
+                // summary line itself is the canonical English support text.
+                let reconnects = if st.reconnects > 0 {
+                    l10n::fmt(loc, Key::DiagReconnects, &[&st.reconnects.to_string()])
+                } else {
+                    String::new()
+                };
                 let diag = match (&st.metrics, st.stats.interval_p(95.0)) {
-                    (Some(m), Some(p95)) => format!(
-                        "\nsample {} · tick p95 {}{}",
-                        local_time(m.sampled_at_ms),
-                        view::age(p95),
-                        if st.reconnects > 0 { format!(" · reconnects {}", st.reconnects) } else { String::new() }
+                    (Some(m), Some(p95)) => l10n::fmt(
+                        loc,
+                        Key::DiagSampleTick,
+                        &[&local_time(m.sampled_at_ms), &view::age(p95), &reconnects],
                     ),
-                    (Some(m), None) => format!("\nsample {}", local_time(m.sampled_at_ms)),
+                    (Some(m), None) => l10n::fmt(loc, Key::DiagSample, &[&local_time(m.sampled_at_ms)]),
                     _ => String::new(),
                 };
-                ui.label(RichText::new(format!("age {}", view::age(a))).monospace().color(c))
-                    .on_hover_text(format!("time since a new sample arrived, local clock{lag}{diag}\n{}", st.summary_line(now)));
+                ui.label(
+                    RichText::new(l10n::fmt(loc, Key::Age, &[&view::age(a)]))
+                        .monospace()
+                        .color(c),
+                )
+                .on_hover_text(l10n::fmt(
+                    loc,
+                    Key::AgeHover,
+                    &[&lag, &format!("{diag}\n{}", st.summary_line(now))],
+                ));
             }
             match &st.conn {
                 Conn::Down { reason, retry_in, .. } => {
-                    ui.label(RichText::new(format!("{reason}; retry {}", view::age(retry_in.as_millis() as i64))).monospace().color(w::BAD));
+                    // The reason is the canonical English diagnostic text.
+                    ui.label(RichText::new(l10n::fmt(loc, Key::DownRetry, &[reason, &view::age(retry_in.as_millis() as i64)])).monospace().color(w::BAD));
                 }
                 Conn::Connecting { attempt } if *attempt > 1 => {
-                    ui.label(RichText::new(format!("attempt {attempt}")).monospace().color(w::WARN));
+                    ui.label(RichText::new(l10n::fmt(loc, Key::AttemptN, &[&attempt.to_string()])).monospace().color(w::WARN));
                 }
                 _ => {}
             }
@@ -857,9 +944,16 @@ impl App {
             }
             if let Some(r) = st.kill.as_ref().filter(|_| show_kill) {
                 let (txt, col) = if r.ok {
-                    (format!("kill {} {} sent", r.pid, r.signal), w::OK)
+                    (
+                        l10n::fmt(loc, Key::KillOk, &[&r.pid.to_string(), &r.signal.to_string()]),
+                        w::OK,
+                    )
                 } else {
-                    (format!("kill {} refused: {}", r.pid, r.error.as_deref().unwrap_or("error")), w::BAD)
+                    let why = r
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| l10n::text(loc, Key::KillErrorFallback).to_string());
+                    (l10n::fmt(loc, Key::KillRefused, &[&r.pid.to_string(), &why]), w::BAD)
                 };
                 ui.label(RichText::new(txt).monospace().color(col));
             } else if !narrow {
@@ -874,19 +968,19 @@ impl App {
             match self.update.status() {
                 UpdateStatus::Available { version, .. } => {
                     let version = version.clone();
-                    ui.label(RichText::new(format!("update {version} ready")).monospace().color(w::WARN));
-                    if ui.button("Update").clicked() {
+                    ui.label(RichText::new(l10n::fmt(loc, Key::UpdateReadyBar, &[&version])).monospace().color(w::WARN));
+                    if ui.button(l10n::text(loc, Key::BtnUpdate)).clicked() {
                         self.update_open = true;
                         self.update.mark_notified();
                     }
                 }
                 UpdateStatus::Failed(_) if !narrow => {
-                    ui.label(RichText::new("update check failed").monospace().color(w::DIM));
+                    ui.label(RichText::new(l10n::text(loc, Key::UpdateCheckFailed)).monospace().color(w::DIM));
                 }
                 _ => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Settings").clicked() {
+                if ui.button(l10n::text(loc, Key::BtnSettings)).clicked() {
                     self.settings_open = true;
                     self.url_edit = self.cfg.active_source().map(|s| s.url.clone()).unwrap_or_default();
                     self.settings_msg = None;
@@ -896,7 +990,8 @@ impl App {
                 if self.cfg.sources.len() > 1 {
                     let mut pick = self.cfg.active.min(self.cfg.sources.len() - 1);
                     let names: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
-                    egui::ComboBox::new("source", "source").selected_text(&names[pick]).show_ui(ui, |ui| {
+                    // Fixed combo id; only the visible label is localized.
+                    egui::ComboBox::new("source", l10n::text(loc, Key::ComboSource)).selected_text(&names[pick]).show_ui(ui, |ui| {
                         for (i, n) in names.iter().enumerate() {
                             ui.selectable_value(&mut pick, i, n);
                         }
@@ -909,7 +1004,7 @@ impl App {
                         self.pending_source = Some(pick);
                     }
                 }
-                if ui.selectable_label(self.cfg.compact, "Dense").clicked() {
+                if ui.selectable_label(self.cfg.compact, l10n::text(loc, Key::Dense)).clicked() {
                     self.cfg.compact = !self.cfg.compact;
                     let _ = store::save_config(&self.cfg);
                     style_with(ui.ctx(), self.cfg.compact);
@@ -925,26 +1020,27 @@ impl App {
     }
 
     fn cpu_box(&mut self, ui: &mut Ui, st: &State, slots: usize, graph_h: f32) {
+        let loc = self.loc();
         let mut open = !self.cfg.collapsed_cpu;
         // The header carries the machine's model so it stays readable while
         // the box is collapsed. None (legacy agent) => label alone.
         let model = st.metrics.as_ref().and_then(|m| m.cpu_model.as_deref());
-        w::panel_with_model(ui, "cpu", model, &mut open, |ui| {
+        w::panel_with_model(ui, l10n::text(loc, Key::PanelTitleCpu), model, &mut open, |ui| {
             let Some(m) = &st.metrics else {
-                ui.label(RichText::new("waiting for data").color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
                 return;
             };
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("{:5.1}%", m.cpu_total)).monospace().strong().color(w::heat(m.cpu_total / 100.0)));
-                ui.label(RichText::new(format!("{} cores", m.cpu_per_core.len())).monospace().color(w::DIM));
+                ui.label(RichText::new(l10n::fmt(loc, Key::Cores, &[&m.cpu_per_core.len().to_string()])).monospace().color(w::DIM));
                 if let Some(t) = m.cpu_temp_c {
                     ui.label(RichText::new(format!("{t:.0}°C")).monospace().color(w::DIM));
                 }
                 if let Some([a, b, c]) = m.load_avg {
-                    ui.label(RichText::new(format!("load {a:.2} {b:.2} {c:.2}")).monospace().color(w::DIM));
+                    ui.label(RichText::new(l10n::fmt(loc, Key::LoadAvg, &[&format!("{a:.2}"), &format!("{b:.2}"), &format!("{c:.2}")])).monospace().color(w::DIM));
                 }
                 if let Some(u) = m.uptime_s {
-                    ui.label(RichText::new(format!("up {}", view::uptime(u))).monospace().color(w::DIM));
+                    ui.label(RichText::new(l10n::fmt(loc, Key::Uptime, &[&view::uptime(u)])).monospace().color(w::DIM));
                 }
             });
             let vals: Vec<f64> = st.cpu.iter().map(|p| p.1).collect();
@@ -968,6 +1064,7 @@ impl App {
     }
 
     fn gpu_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
+        let loc = self.loc();
         let Some(gpus) = st
             .metrics
             .as_ref()
@@ -980,7 +1077,7 @@ impl App {
         // Header carries the first GPU's model (short form, same as the body
         // rows) so it stays readable while the box is collapsed.
         let model = gpus.first().map(|g| w::short_gpu_name(&g.name));
-        w::panel_with_model(ui, "gpu", model, &mut open, |ui| {
+        w::panel_with_model(ui, l10n::text(loc, Key::PanelTitleGpu), model, &mut open, |ui| {
             for (i, g) in gpus.iter().enumerate() {
                 let short = w::short_gpu_name(&g.name);
                 ui.horizontal(|ui| {
@@ -993,14 +1090,14 @@ impl App {
                         }
                     });
                 });
-                w::meter(ui, "Load", g.utilization_gpu_pct as f32 / 100.0,
+                w::meter(ui, l10n::text(loc, Key::MeterLoadGpu), g.utilization_gpu_pct as f32 / 100.0,
                     &format!("{}%", g.utilization_gpu_pct), Some(w::GPU));
                 let vram = if g.mem_total_bytes == 0 {
                     0.0
                 } else {
                     g.mem_used_bytes as f32 / g.mem_total_bytes as f32
                 };
-                w::meter(ui, "VRAM", vram,
+                w::meter(ui, l10n::text(loc, Key::MeterVram), vram,
                     &format!("{} / {}", view::bytes(g.mem_used_bytes), view::bytes(g.mem_total_bytes)), Some(w::GPU));
                 if let Some(ring) = st.gpu_pct.get(&g.name) {
                     let vals: Vec<f64> = ring.iter().map(|p| p.1).collect();
@@ -1025,13 +1122,14 @@ impl App {
     }
 
     fn mem_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
+        let loc = self.loc();
         let mut open = !self.cfg.collapsed_mem;
-        w::panel(ui, "mem", &mut open, |ui| {
+        w::panel(ui, l10n::text(loc, Key::PanelTitleMem), &mut open, |ui| {
             let Some(m) = &st.metrics else { return };
             let f = |u: u64, t: u64| if t == 0 { 0.0 } else { u as f32 / t as f32 };
-            w::meter(ui, "Used", f(m.mem_used, m.mem_total),
+            w::meter(ui, l10n::text(loc, Key::MeterUsed), f(m.mem_used, m.mem_total),
                 &format!("{} / {}", view::bytes(m.mem_used), view::bytes(m.mem_total)), Some(w::MEM));
-            w::meter(ui, "Swap", f(m.swap_used, m.swap_total),
+            w::meter(ui, l10n::text(loc, Key::MeterSwap), f(m.swap_used, m.swap_total),
                 &format!("{} / {}", view::bytes(m.swap_used), view::bytes(m.swap_total)), Some(w::MEM));
             let vals: Vec<f64> = st.mem_pct.iter().map(|p| p.1).collect();
             w::graph(ui, &vals, slots, 100.0, 24.0, Some(w::MEM));
@@ -1051,15 +1149,16 @@ impl App {
     }
 
     fn net_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
+        let loc = self.loc();
         let mut open = !self.cfg.collapsed_net;
-        w::panel(ui, "net", &mut open, |ui| {
+        w::panel(ui, l10n::text(loc, Key::PanelTitleNet), &mut open, |ui| {
             let ifaces = st.interfaces();
             if ifaces.is_empty() {
                 return;
             }
             let cur = self.cfg.iface.clone().filter(|i| ifaces.contains(i)).unwrap_or_else(|| ifaces[0].clone());
             let mut pick = cur.clone();
-            egui::ComboBox::new("iface", "interface").selected_text(&pick).show_ui(ui, |ui| {
+            egui::ComboBox::new("iface", l10n::text(loc, Key::LabelInterface)).selected_text(&pick).show_ui(ui, |ui| {
                 for i in &ifaces {
                     ui.selectable_value(&mut pick, i.clone(), i);
                 }
@@ -1068,11 +1167,11 @@ impl App {
                 self.cfg.iface = Some(pick.clone());
                 let _ = store::save_config(&self.cfg);
             }
-            if ui.checkbox(&mut self.cfg.log_scale, "log scale").changed() {
+            if ui.checkbox(&mut self.cfg.log_scale, l10n::text(loc, Key::LogScale)).changed() {
                 let _ = store::save_config(&self.cfg);
             }
             let Some(ring) = st.net.get(&pick) else {
-                ui.label(RichText::new("measuring").color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::MeterMeasuring)).color(w::DIM));
                 return;
             };
             let take = slots.min(ring.len());
@@ -1091,7 +1190,7 @@ impl App {
                 };
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("{arrow} {:>11}", view::rate_bits(now))).monospace().color(color));
-                    ui.label(RichText::new(format!("peak {}", view::rate_bits(peak_lin))).monospace().color(w::DIM));
+                    ui.label(RichText::new(l10n::fmt(loc, Key::Peak, &[&view::rate_bits(peak_lin)])).monospace().color(w::DIM));
                 });
                 w::graph(ui, &vals, slots, peak, 30.0, Some(color));
             }
@@ -1104,8 +1203,9 @@ impl App {
     }
 
     fn disk_box(&mut self, ui: &mut Ui, st: &State, slots: usize) {
+        let loc = self.loc();
         let mut open = !self.cfg.collapsed_disk;
-        w::panel(ui, "disk", &mut open, |ui| {
+        w::panel(ui, l10n::text(loc, Key::PanelTitleDisk), &mut open, |ui| {
             // Fullest first: the disks most likely to need attention stay
             // visible. Capped at four meters; the busiest-disk graphs below
             // carry the live rates, so per-disk text lines are gone.
@@ -1116,7 +1216,7 @@ impl App {
                 fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal).then(a.name.cmp(&b.name))
             });
             if disks.is_empty() {
-                ui.label(RichText::new("waiting for data").color(w::DIM));
+                ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
             }
             for d in disks.iter().take(4) {
                 let used = d.total.saturating_sub(d.available);
@@ -1125,7 +1225,7 @@ impl App {
                     &format!("{} / {}", view::bytes(used), view::bytes(d.total)), Some(w::DISK));
             }
             if disks.len() > 4 {
-                ui.label(RichText::new(format!("+{} more", disks.len() - 4)).monospace().color(w::DIM));
+                ui.label(RichText::new(l10n::fmt(loc, Key::MoreCount, &[&(disks.len() - 4).to_string()])).monospace().color(w::DIM));
             }
             // r/w history graphs for the picked disk (pin or busiest),
             // same pattern + log toggle as net. Data rings already
@@ -1144,7 +1244,7 @@ impl App {
                     names.sort();
                     let current = self.cfg.disk.clone().filter(|d| st.disk_io.contains_key(d));
                     let mut pick = current.clone();
-                    let selected = current.clone().unwrap_or_else(|| "auto".to_string());
+                    let selected = current.clone().unwrap_or_else(|| l10n::text(loc, Key::DiskAuto).to_string());
                     // No choice, no picker: mirrors the host picker rule.
                     let show_pick = names.len() > 1;
                     let recent: Vec<_> = ring.iter().skip(ring.len() - take).copied().collect();
@@ -1162,8 +1262,8 @@ impl App {
                         };
                         ui.horizontal(|ui| {
                             if show_pick && arrow == "r" {
-                                egui::ComboBox::new("disk", "disk").selected_text(&selected).show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut pick, None, "auto");
+                                egui::ComboBox::new("disk", l10n::text(loc, Key::ComboDisk)).selected_text(&selected).show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut pick, None, l10n::text(loc, Key::DiskAuto));
                                     for name in &names {
                                         ui.selectable_value(&mut pick, Some(name.clone()), name);
                                     }
@@ -1176,7 +1276,7 @@ impl App {
                             ui.label(RichText::new(format!("{name} {arrow} {:>10}", view::bytes(now as u64)))
                                 .monospace()
                                 .color(color));
-                            ui.label(RichText::new(format!("peak {}", view::bytes(peak_lin as u64)))
+                            ui.label(RichText::new(l10n::fmt(loc, Key::Peak, &[&view::bytes(peak_lin as u64)]))
                                 .monospace()
                                 .color(w::DIM));
                         });
@@ -1203,7 +1303,7 @@ impl App {
         let Some(pid) = self.selected else { return };
         let loc = self.loc();
         let mut open = !self.cfg.collapsed_proc_detail;
-        w::panel(ui, "proc-detail", &mut open, |ui| {
+        w::panel(ui, l10n::text(loc, Key::PanelTitleProcDetail), &mut open, |ui| {
             let row = st.procs.as_ref().and_then(|pp| pp.rows.iter().find(|r| r.pid == pid));
             let detail = st.proc_detail.as_ref().filter(|d| d.process.pid == pid);
             let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
@@ -1390,6 +1490,7 @@ impl App {
     /// summed from the current process sample. Clicking a row filters the
     /// process table to that workload; clicking the active row clears it.
     fn workloads_box(&mut self, ui: &mut Ui, st: &State, viewport_h: f32) -> LinkedTable {
+        let loc = self.loc();
         if st.procs.is_none() || st.workloads.is_empty() {
             return LinkedTable::NONE;
         }
@@ -1402,7 +1503,7 @@ impl App {
         let mut open = !self.cfg.collapsed_workloads;
         let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
         let mut scroll = LinkedTable::NONE;
-        w::panel(ui, "workloads", &mut open, |ui| {
+        w::panel(ui, l10n::text(loc, Key::PanelTitleWorkloads), &mut open, |ui| {
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
             let narrow = ui.available_width() < 640.0;
             let mut pick: Option<String> = None;
@@ -1420,14 +1521,19 @@ impl App {
                 tb = tb.column(Column::exact(76.0));
             }
             let out = tb.header(row_h + 2.0, |mut h| {
-                for name in ["Workload", "PIDs", "CPU%", "MEM%"] {
+                for name in [
+                    l10n::text(loc, Key::ColWorkload),
+                    l10n::text(loc, Key::ColPids),
+                    l10n::text(loc, Key::ColCpuPct),
+                    l10n::text(loc, Key::ColMemPct),
+                ] {
                     h.col(|ui| {
                         ui.label(RichText::new(name).monospace().strong().color(w::TEXT));
                     });
                 }
                 if !narrow {
                     h.col(|ui| {
-                        ui.label(RichText::new("MEM").monospace().strong().color(w::TEXT));
+                        ui.label(RichText::new(l10n::text(loc, Key::ColMem)).monospace().strong().color(w::TEXT));
                     });
                 }
             })
@@ -1470,7 +1576,7 @@ impl App {
         let loc = self.loc();
         let mut open = !self.cfg.collapsed_proc;
         let mut scroll = LinkedTable::NONE;
-        w::panel(ui, "proc", &mut open, |ui| {
+        w::panel(ui, l10n::text(loc, Key::PanelTitleProc), &mut open, |ui| {
             let Some(p) = &st.procs else {
                 ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
                 return;
@@ -1504,8 +1610,16 @@ impl App {
                     let chip = l10n::fmt(loc, Key::WorkloadChip, &[&label]);
                     let resp = ui
                         .add(egui::Label::new(RichText::new(chip).monospace().color(w::ACCENT)).sense(egui::Sense::click()))
+                        .on_hover_text(l10n::text(loc, Key::HoverClearWorkload))
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
+                        clear_workload = true;
+                    }
+                    // The close affordance is painted, not typed: the cross
+                    // U+2715 has no glyph in the shipped faces, and a painted
+                    // cross needs no glyph at all. It carries its own AccessKit
+                    // name and is keyboard-operable.
+                    if workload_close(ui, loc) {
                         clear_workload = true;
                     }
                 }
@@ -2012,13 +2126,15 @@ impl App {
     /// Copy the support summary to the clipboard and save it beside the log.
     /// Returns the note the caller shows.
     fn support_summary_action(&self, ctx: &egui::Context) -> String {
+        let loc = self.loc();
         let text = self.support_summary_text();
         ctx.copy_text(text.clone());
         match store::support_copy_path() {
+            // The saved path is data: appended verbatim.
             Some(p) if store::write_support(&p, &text).is_ok() => {
-                format!("support summary copied (saved to {})", p.display())
+                l10n::fmt(loc, Key::SupportCopiedSaved, &[&p.display().to_string()])
             }
-            _ => "support summary copied to the clipboard".to_string(),
+            _ => l10n::text(loc, Key::SupportCopied).to_string(),
         }
     }
 
@@ -2088,7 +2204,7 @@ impl App {
                 ui.add_space(4.0);
 
                 // (1) Discovery: find an agent on this segment, or skip it.
-                let picked = self.onboard.as_mut().expect("wizard open").discovery.draw(ui);
+                let picked = self.onboard.as_mut().expect("wizard open").discovery.draw(ui, loc);
                 if let Some(i) = picked {
                     let agent =
                         self.onboard.as_ref().and_then(|ob| ob.discovery.agents.get(i).cloned());
@@ -2107,7 +2223,7 @@ impl App {
 
                 // (2) Pairing-code step for the picked (or typed) host.
                 if let Some(p) = self.onboard.as_mut().and_then(|ob| ob.pair.as_mut()) {
-                    match p.draw(ui) {
+                    match p.draw(ui, loc) {
                         PairAction::Start => pair_start = true,
                         PairAction::Cancel => pair_cancel = true,
                         PairAction::None => {}
@@ -2249,7 +2365,7 @@ impl App {
                     && let Err(e) = store::open_logs()
                     && let Some(ob) = self.onboard.as_mut()
                 {
-                    ob.msg = Some(e);
+                    ob.msg = Some(open_logs_note(loc, e));
                 }
                 if copy_summary {
                     let m = self.support_summary_action(ctx);
@@ -2402,7 +2518,7 @@ impl App {
         if open_logs
             && let Err(e) = store::open_logs()
         {
-            self.source_msg = Some(e);
+            self.source_msg = Some(open_logs_note(loc, e));
         }
         ui.separator();
         ui.horizontal(|ui| {
@@ -2437,7 +2553,7 @@ impl App {
             )
             .wrap(),
         );
-        let picked = self.pair_discovery.draw(ui);
+        let picked = self.pair_discovery.draw(ui, loc);
         if let Some(i) = picked {
             let agent = self.pair_discovery.agents.get(i).cloned();
             if let Some(a) = agent {
@@ -2465,7 +2581,7 @@ impl App {
         let mut pair_start = false;
         let mut pair_cancel = false;
         if let Some(p) = self.pair_new.as_mut() {
-            match p.draw(ui) {
+            match p.draw(ui, loc) {
                 PairAction::Start => pair_start = true,
                 PairAction::Cancel => pair_cancel = true,
                 PairAction::None => {}
@@ -2553,7 +2669,82 @@ impl App {
             if let Some(opt) = chosen {
                 self.set_language(opt);
             }
+            // The license notice is its own window, opened here: it rides on
+            // the language row so the tab's height (and every pane behind it)
+            // stays exactly as it was, and the button sits next to the fonts it
+            // credits.
+            if ui
+                .button(l10n::text(loc, Key::NoticeTitle))
+                .on_hover_text(l10n::text(loc, Key::NoticeHeading))
+                .clicked()
+            {
+                self.font_notice_open = true;
+            }
         });
+    }
+
+    /// The bundled fonts' provenance, copyright and the *exact* checked-in OFL
+    /// text, readable offline from the executable (the text is compiled in with
+    /// `include_str!`, so no package file beside the binary is needed). Opened
+    /// from Settings > Display; it is its own window so the tab keeps its size
+    /// and the 92-line license gets a real reading column.
+    fn font_notice(&mut self, ctx: &egui::Context) {
+        if !self.font_notice_open {
+            return;
+        }
+        let loc = self.loc();
+        let mut open = true;
+        // Fixed id: the title is localized, and window identity must not depend
+        // on the locale.
+        egui::Window::new(l10n::text(loc, Key::NoticeTitle))
+            .id(egui::Id::unique("font-notice-window"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(560.0);
+                ui.label(RichText::new(l10n::text(loc, Key::NoticeHeading)).strong().color(w::TEXT));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(l10n::text(loc, Key::NoticeIntro))
+                            .small()
+                            .color(w::DIM),
+                    )
+                    .wrap(),
+                );
+                for key in [Key::NoticeFontSc, Key::NoticeFontTc] {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(l10n::text(loc, key))
+                                .small()
+                                .monospace()
+                                .color(w::DIM),
+                        )
+                        .wrap(),
+                    );
+                }
+                ui.separator();
+                ui.label(RichText::new(l10n::text(loc, Key::NoticeLicenseLabel)).small().color(w::TEXT));
+                egui::ScrollArea::vertical()
+                    .id_salt("font-license-text")
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        // The license text is the upstream file, verbatim: never
+                        // translated, wrapped only for the column.
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(l10n::FONT_LICENSE_TEXT)
+                                    .small()
+                                    .monospace()
+                                    .color(w::DIM),
+                            )
+                            .wrap(),
+                        );
+                    });
+            });
+        self.font_notice_open = open;
     }
 
     /// Connection tab for the active source. True when Save was pressed.
@@ -2594,7 +2785,7 @@ impl App {
             if ui.button(l10n::text(loc, Key::BtnOpenLogs)).clicked()
                 && let Err(e) = store::open_logs()
             {
-                self.settings_msg = Some(e);
+                self.settings_msg = Some(open_logs_note(loc, e));
             }
             if ui.button(l10n::text(loc, Key::BtnCopySupportSummary)).clicked() {
                 let m = self.support_summary_action(ui.ctx());
@@ -2697,6 +2888,7 @@ impl App {
     /// until a newer release appears. Compiled out of Store builds.
     #[cfg(not(feature = "store"))]
     fn update_dialog(&mut self, ctx: &egui::Context) {
+        let loc = self.loc();
         // Accepted is transient: kick off the download, then render the
         // resulting Downloading (or Failed) state below.
         if matches!(self.update.status(), UpdateStatus::Accepted { .. }) {
@@ -2713,16 +2905,19 @@ impl App {
         let mut open = self.update_open;
         let title: &str;
         match self.update.status() {
-            UpdateStatus::Available { .. } | UpdateStatus::Accepted { .. } => title = "Update available",
-            UpdateStatus::Downloading { .. } => title = "Downloading update",
-            UpdateStatus::Ready { .. } => title = "Restart to update",
-            UpdateStatus::Failed(_) => title = "Update failed",
+            UpdateStatus::Available { .. } | UpdateStatus::Accepted { .. } => title = l10n::text(loc, Key::UpdateAvailTitle),
+            UpdateStatus::Downloading { .. } => title = l10n::text(loc, Key::UpdateDownloadingTitle),
+            UpdateStatus::Ready { .. } => title = l10n::text(loc, Key::UpdateRestartTitle),
+            UpdateStatus::Failed(_) => title = l10n::text(loc, Key::UpdateFailedTitle),
             _ => {
                 self.update_open = false;
                 return;
             }
         }
+        // Fixed id: the title is localized, and window identity must not depend
+        // on the locale.
         egui::Window::new(title)
+            .id(egui::Id::unique("update-dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2731,42 +2926,44 @@ impl App {
                 match self.update.status() {
                     UpdateStatus::Available { version, .. }
                     | UpdateStatus::Accepted { version, .. } => {
-                        ui.label(format!(
-                            "EbbTop {version} is available (you have {}).",
-                            update::current_version()
+                        ui.label(l10n::fmt(
+                            loc,
+                            Key::UpdateAvailBody,
+                            &[&version, update::current_version()],
                         ));
                         ui.horizontal(|ui| {
-                            if ui.button("Download update").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnDownload)).clicked() {
                                 act = Act::Accept;
                             }
-                            if ui.button("Later").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnLater)).clicked() {
                                 act = Act::Decline;
                             }
                         });
                     }
                     UpdateStatus::Downloading { version, done } => {
-                        ui.label(format!(
-                            "Downloading EbbTop {version}… {} MB so far.",
-                            done / 1_000_000
+                        ui.label(l10n::fmt(
+                            loc,
+                            Key::UpdateDownloadingBody,
+                            &[&version, &(done / 1_000_000).to_string()],
                         ));
                     }
                     UpdateStatus::Ready { version, .. } => {
-                        ui.label(format!(
-                            "EbbTop {version} is downloaded and verified."
-                        ));
+                        ui.label(l10n::fmt(loc, Key::UpdateReadyBody, &[&version]));
                         ui.horizontal(|ui| {
-                            if ui.button("Restart to update").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnRestartUpdate)).clicked() {
                                 act = Act::Restart;
                             }
-                            if ui.button("Later").clicked() {
+                            if ui.button(l10n::text(loc, Key::BtnLater)).clicked() {
                                 act = Act::Decline;
                             }
                         });
                     }
                     UpdateStatus::Failed(e) => {
                         let e = e.clone();
-                        ui.label(RichText::new(format!("Update failed: {e}")).color(w::WARN));
-                        if ui.button("Check again").clicked() {
+                        // `e` is the canonical English failure detail from the
+                        // update worker: painted verbatim inside the localized frame.
+                        ui.label(RichText::new(l10n::fmt(loc, Key::UpdateFailedBody, &[&e])).color(w::WARN));
+                        if ui.button(l10n::text(loc, Key::BtnCheckAgain)).clicked() {
                             act = Act::Recheck;
                         }
                     }
