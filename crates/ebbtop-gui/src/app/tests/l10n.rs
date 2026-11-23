@@ -1445,6 +1445,44 @@ fn painted_age_tooltip(app: &mut App, loc: Locale) -> (String, u64, u64) {
     (tooltip, set_at, client::now_ms())
 }
 
+// --------------------------------------------------------------------- //
+// English fidelity control: pin the *painted* tooltip to the accepted     //
+// base revision (round-2 review advisory F3)                              //
+// --------------------------------------------------------------------- //
+//
+// The synthetic composer control this replaces passed `diag = "D"`, which
+// bypasses the leading-newline diagnostic path the real hover paints, so it
+// could not see that the tooltip had gained a blank line between the lag
+// parenthetical and the sample line. The literal below is the tooltip a real
+// hover painted on the accepted base `3797eaf` (probe run with the same
+// fixture state: metrics present, tick p95 1.0s, one reconnect). `{CLOCK}` and
+// the two numeric spans are the only volatile parts; `normalize_age_tooltip`
+// masks exactly those, so every other byte is pinned.
+
+const BASE_3797EAF_EN_AGE_TOOLTIP: &str = "time since a new sample arrived, local clock (lag 6 ms)\n\
+sample {CLOCK} · tick p95 1.0s · reconnects 3\n\
+conn=connected since_new_ms=2001 interval_p50=1000 interval_p95=1000 interval_max=1000 lag_p50=3 lag_p95=3 proc_interval_p95=na proc_lag_p95=3 gaps=0 repeats=0 reconnects=3 samples=70";
+
+/// Mask the two clock-dependent spans of an age tooltip: the local sample time
+/// and the numeric value of `since_new_ms` and of the lag parenthetical.
+fn normalize_age_tooltip(text: &str, clock: &str) -> String {
+    let mut s = text.replace(clock, "<clock>");
+    for key in ["since_new_ms=", "(lag "] {
+        let mut out = String::new();
+        let mut rest: &str = &s;
+        while let Some(i) = rest.find(key) {
+            out.push_str(&rest[..i + key.len()]);
+            let tail = &rest[i + key.len()..];
+            let end = tail.find(|c: char| !c.is_ascii_digit()).unwrap_or(tail.len());
+            out.push_str("<n>");
+            rest = &tail[end..];
+        }
+        out.push_str(rest);
+        s = out;
+    }
+    s
+}
+
 /// The lag fragment is localized, the number and `ms` unit are unchanged data,
 /// the adjacent sample/tick/reconnect labels stay localized, and English keeps
 /// its base tooltip byte for byte.
@@ -1490,6 +1528,34 @@ fn l10n_age_tooltip_lag_localized_both_scripts() {
             want,
             "{loc}: first tooltip line is not the localized summary + lag"
         );
+
+        // No blank line anywhere in the painted tooltip, in any locale: the
+        // diagnostic block carries its own leading newline and `AgeHover` must
+        // not add a second one (round-2 advisory F3).
+        assert!(
+            !tooltip.contains("\n\n"),
+            "{loc}: the painted tooltip has a blank line: {tooltip:?}"
+        );
+        if loc == Locale::English {
+            // The painted English tooltip IS the accepted base tooltip: three
+            // lines, same words, same data, same units — no added whitespace.
+            let clock = local_time(set_at - 5);
+            assert_eq!(
+                tooltip.lines().count(),
+                3,
+                "English: the painted tooltip is not the base three-line tooltip: {tooltip:?}"
+            );
+            assert_eq!(
+                normalize_age_tooltip(&tooltip, &clock),
+                normalize_age_tooltip(&BASE_3797EAF_EN_AGE_TOOLTIP.replace("{CLOCK}", &clock), &clock),
+                "English: the painted tooltip deviates from the accepted base 3797eaf tooltip"
+            );
+            // The lag fragment is the base English parenthetical, unchanged.
+            assert!(
+                tooltip.contains(&format!(" (lag {n} ms)")),
+                "English: the base lag parenthetical changed: {tooltip:?}"
+            );
+        }
         if loc != Locale::English {
             // The base English parenthetical must not be painted in a Chinese
             // tooltip. (The canonical support summary keeps its `lag_p50=`
@@ -1519,8 +1585,12 @@ fn l10n_age_tooltip_lag_localized_both_scripts() {
         // Adjacent diagnostics stay localized around verbatim data. Only the
         // localized head is asserted: the last line is the canonical English
         // support summary (documented by design), which keeps field names like
-        // `reconnects=` and is not a UI label.
-        let head: String = tooltip.lines().take(3).collect::<Vec<_>>().join("\n");
+        // `reconnects=` and is not a UI label. The head is every line but that
+        // summary — three lines in the base layout (summary, sample, support),
+        // so `take(3)` would swallow the support line.
+        let lines: Vec<&str> = tooltip.lines().collect();
+        assert_eq!(lines.len(), 3, "{loc}: unexpected tooltip line count: {tooltip:?}");
+        let head: String = lines[..lines.len() - 1].join("\n");
         if loc != Locale::English {
             assert!(
                 !head.contains("reconnects"),
@@ -1531,12 +1601,13 @@ fn l10n_age_tooltip_lag_localized_both_scripts() {
         }
     }
 
-    // English control: the base tooltip, byte for byte.
+    // English controls: the fragment is the base parenthetical, and the
+    // painted tooltip itself was pinned to the base revision inside the loop
+    // above (`BASE_3797EAF_EN_AGE_TOOLTIP`). No synthetic-diag control here:
+    // `diag = "D"` skips the leading-newline diagnostic path the real hover
+    // paints, which is what let the F3 blank line through in round 2.
     assert_eq!(l10n::text(Locale::English, Key::Lag), " (lag {} ms)");
-    assert_eq!(
-        age_tooltip(Locale::English, Some(5), "D"),
-        "time since a new sample arrived, local clock (lag 5 ms)\nD"
-    );
+    assert_eq!(l10n::fmt(Locale::English, Key::Lag, &["5"]), " (lag 5 ms)");
 
     // No lag value: the fragment contributes nothing at all, so no locale can
     // paint an empty parenthetical. (`sample_age_ms` is `None` only when there

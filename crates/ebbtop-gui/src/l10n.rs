@@ -454,10 +454,15 @@ strings! {
     // number as data, and use the fullwidth parens the rest of the Chinese
     // tooltip uses.
     Lag => (" (lag {} ms)", "（延迟 {} ms）", "（延遲 {} ms）"),
+    // The second placeholder is the diagnostic block, whose templates
+    // (`DiagSampleTick` / `DiagSample`) already carry their own leading
+    // newline; this template therefore adds none of its own. A newline here
+    // would paint a blank line between the lag parenthetical and the sample
+    // line, which the accepted base `3797eaf` never did (review round-2 F3).
     AgeHover => (
-        "time since a new sample arrived, local clock{}\n{}",
-        "距上次收到新采样的时间（本机时钟）{}\n{}",
-        "距上次收到新取樣的時間（本機時鐘）{}\n{}"
+        "time since a new sample arrived, local clock{}{}",
+        "距上次收到新采样的时间（本机时钟）{}{}",
+        "距上次收到新取樣的時間（本機時鐘）{}{}"
     ),
     DiagSampleTick => (
         "\nsample {} · tick p95 {}{}",
