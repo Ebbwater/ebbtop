@@ -73,6 +73,19 @@ install carries a trusted signature.
     that resolver and for the workflow's sign-step shape. It runs on any host
     with PowerShell; the real SDK resolution, the signing call, the install and
     the WACK report remain hosted checks.
+  - The signing certificate is selected by **thumbprint** (`/sha1`), not by
+    subject name. SignTool documents `/n` as a substring of the subject, and the
+    Win32 find behind it renders the subject as `CERT_SIMPLE_NAME_STR`, which
+    discards the attribute OIDs — so the rendered subject of this certificate is
+    the bare GUID `32700780-5AAE-4D15-A591-B49543B86C16`, and
+    `/n CN=32700780-...` matched nothing ("No certificates were found that met
+    all the given criteria"). `deploy/windows/msix/wack-cert.ps1` re-reads the
+    created certificate from `Cert:\CurrentUser\My`, refuses it unless it has a
+    private key, the Code Signing EKU, a current validity window, a Key Usage
+    extension permitting DigitalSignature, and a subject equal to the manifest
+    Publisher exactly, and returns its thumbprint for `/sha1`.
+    `test-wack-cert.ps1` is the fixture proof; the store lookup and the signing
+    call remain hosted checks.
 
 What the Microsoft signature means: the bytes match the package we submitted
 and Microsoft vouches they have not been altered since. It is not an audit of
