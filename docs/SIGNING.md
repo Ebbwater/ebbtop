@@ -93,9 +93,9 @@ the source.
 
 ### Certification result for 0.3.0
 
-The `wack-gate` job ran on the exact release commit
-(`b8d8127ac8ccbee9409c6b5ebad73b1513cb5df2`) in hosted run `45316184029` and the
-report it produced is the evidence for this submission:
+The `wack-gate` job ran on the release tag `v0.3.0`
+(`b8d8127ac8ccbee9409c6b5ebad73b1513cb5df2`) in hosted run `45772887492`, and
+the report it produced is the evidence for this submission:
 
 - `OVERALL_RESULT="PASS"`, 24 tests, 23 PASS, 1 FAIL.
 - The single FAIL is `Blocked executables` (`OPTIONAL="TRUE"`). Its messages are
@@ -113,10 +113,18 @@ report it produced is the evidence for this submission:
     match is a substring scan, which is why it reports them.
   A FAIL on an optional test is a finding, not a blocker, which is why the run
   is green.
-- The certified package is `EbbTop-0.3.0-x64.msix`, sha256
-  `99ac53babc121ef5fdf144d365fef156a0108ae6eef4d378df12dfb159cbe233`, 87 parts,
-  85 block-map files, version `0.3.0.0`, unsigned. That digest is the one to
-  compare against the file uploaded to Partner Center.
+- The published package is `EbbTop-0.3.0-x64.msix`, sha256
+  `2b7af43fc8150c4b4e6eededf951e1c06baab94253b3f2283aead96010f3caaa`, 87 parts,
+  85 block-map files, version `0.3.0.0`, languages `en-US,zh-CN,zh-TW`, unsigned.
+  **That digest is the one to compare against the file uploaded to Partner
+  Center**, and the release API reports it as `assets[].digest`.
+- The same commit built twice (dispatch run `45316184029` and the tag run) gives
+  two exe digests that differ in exactly three bytes: the PE COFF
+  `TimeDateStamp` at file offset 129. The tag run is the published one, because
+  it is the run the release, its artifact names and its digests all point at.
+  This is the documented Windows cross-build non-reproducibility, not source
+  drift: the MSIX member set is identical and every other member's digest is
+  identical.
 
 What the Microsoft signature means: the bytes match the package we submitted
 and Microsoft vouches they have not been altered since. It is not an audit of
