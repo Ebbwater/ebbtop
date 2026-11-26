@@ -70,5 +70,6 @@ Running the macOS path on Linux with stubbed `launchctl`/`lsof`/`plutil` proves
 the packaging, the verification rules, the bind validation, the lifecycle
 sequencing and the failure attribution. It does **not** prove that launchd
 loads the job, that the agent binds on a real Mac, or that the Mac's sensors
-report what the client expects. Those are proven by
-`../macos/test-agent-live.sh` and the `macos-agent` workflow on native arm64.
+report what the client expects. The native `macos-agent` workflow runs
+`../macos/test-agent-live.sh` for foreground networking and metrics. A separate
+logged-in Mac test verifies real launchd operations and startup at login.

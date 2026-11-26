@@ -1,6 +1,6 @@
 [package]
 name = "ebbtop-agent"
-version = "0.3.0"
+version = "0.3.1"
 authors = ["Ebbwater"]
 description = "EbbTop agent daemon. Serves host metrics over WebSocket (tailnet-only)."
 edition = "2024"

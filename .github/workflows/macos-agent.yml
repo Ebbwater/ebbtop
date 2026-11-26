@@ -4,20 +4,15 @@ name: macos-agent
 #
 # Why this job exists: the agent's macOS code path cannot be *proven* on Linux.
 # A cross-target `cargo check` proves it type-checks; only a real arm64 Mac can
-# compile it, run its tests, start the binary, load a LaunchAgent and answer an
-# authenticated probe. This workflow is where that happens, on the exact commit
-# the release is cut from.
+# compile it, run its tests and answer an authenticated foreground probe.
+# LaunchAgent lifecycle and login startup are verified separately on a Mac.
 #
 # It is deliberately NOT wired into the release automatically: the release
 # assembly (deploy/release/assemble.sh) downloads this run's artifact and
 # refuses anything whose BUILD stamp names a different commit or version, so a
 # release can only contain a Mac archive that a real Mac built and tested.
 #
-# Runner: a self-hosted Apple Silicon Mac with the label set below. GitHub's
-# hosted `macos-14`/`macos-15` runners are arm64 and work too — swap
-# `runs-on` for `macos-14` if no self-hosted Mac is registered. The choice is
-# left explicit because the credentials, keychain and launchd behaviour this
-# job exercises are more predictable on a Mac we control.
+# Runner: GitHub-hosted Apple Silicon. Host identity below verifies arm64.
 on:
   push:
     branches: [main]
@@ -27,7 +22,7 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: [self-hosted, macOS, ARM64, ebbtop-mac]
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4

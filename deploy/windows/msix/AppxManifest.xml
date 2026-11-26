@@ -37,7 +37,7 @@
   <Identity
       Name="Ebbwater.EbbTop"
       Publisher="CN=32700780-5AAE-4D15-A591-B49543B86C16"
-      Version="0.3.0.0"
+      Version="0.3.1.0"
       ProcessorArchitecture="x64" />
 
   <Properties>

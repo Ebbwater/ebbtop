@@ -9,11 +9,8 @@
 #
 # This suite runs on Linux as well as macOS: it sets
 # EBBTOP_ALLOW_UNSUPPORTED_HOST=1 so the installer's Darwin/arm64 guard steps
-# aside, and drives the launchd path through the stub. That is a deliberate
-# limit, stated in the README: launchd on a real Mac is proven by
-# .github/workflows/macos-agent.yml running test-agent-live.sh and this suite
-# on native arm64, and the Linux run of this file is the packaging/lifecycle
-# regression net in between.
+# aside, and drives the launchd path through the stub on either OS. Real
+# LaunchAgent behavior is verified separately in a logged-in Mac session.
 #
 # Usage:
 #   bash deploy/macos/test-install-macos.sh

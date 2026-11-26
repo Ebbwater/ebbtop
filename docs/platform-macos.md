@@ -195,9 +195,10 @@ and enter that.
 **A Linux run of any of these scripts is not native macOS evidence.** Where a
 check needs launchd, a Mach-O binary or the Mac's own sensors, the script says
 so and either runs under a stub (packaging and lifecycle logic) or skips with a
-reason. The `macos-agent` workflow is what produces the native evidence, on
-the exact commit the release is assembled from; `deploy/release/assemble.sh`
-refuses a Mac archive whose `BUILD` stamp does not name that commit.
+reason. The `macos-agent` workflow builds the package and runs the foreground
+checks on the release commit. A separate logged-in Mac test verifies launchd.
+`deploy/release/assemble.sh` requires the archive's `BUILD` stamp to name the
+release commit.
 
 ## Known gaps in this release
 
