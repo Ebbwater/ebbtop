@@ -229,6 +229,16 @@ field does **not** steal the character or the focus — the wizard walkthrough
 types `t0/ken` into the token field and asserts both. Fix: honour the shortcut
 only when no text field has focus, or add a Settings toggle.
 
+### Minor — no language hint reaches the screen reader (A-11)
+
+The client ships three UI languages, but egui 0.37's AccessKit adapter never
+sets a node's `language` property (no `set_language` call exists anywhere in the
+adapter source), so the tree carries no BCP-47 hint in any locale. A screen
+reader therefore reads Chinese text with whatever voice the user has active,
+which is the exact case WCAG 3.1.2 covers. This is wiring egui does not offer
+today; the fix is an egui-side change or a post-pass over the update before it
+reaches the platform adapter. No 3.1.1/3.1.2 claim is made in the listing.
+
 ### Passing inventory
 
 | What | Evidence |
@@ -270,7 +280,8 @@ app, and no claim is made about them:
 | 1.3.4, 1.4.10 (reflow/orientation), 1.4.4 browser text resize | desktop window, no document flow, no orientation lock. App zoom is measured instead (A-5); at 150–200 % the clipped values are reachable only with the mouse, so no 1.4.4 claim is made there |
 | 2.5.x (pointer gestures), 3.3.x autocomplete | no touch targets and no multi-point gestures; the one pointer drag is the splitter, with `Top height` in Settings → Display as the keyboard-reachable alternative (A-8). No form autocomplete. (2.1.4 is **in scope**: see A-10) |
 | 2.2.x (timing), 2.3.x (seizures), 3.2.x on load, 3.2.5, 3.3.4 | no time limits, no flashing, no re-authentication |
-| 2.4.1, 2.4.5, 3.1.x, 3.2.3, 3.2.4 | single-window app: no blocks to bypass, no site navigation, one language (English, no `lang` equivalent in the tree), consistent identification is trivial. (4.1.3 is **in scope**: see A-9) |
+| 2.4.1, 2.4.5, 3.2.3, 3.2.4 | single-window app: no blocks to bypass, no site navigation, consistent identification is trivial. (4.1.3 is **in scope**: see A-9) |
+| 3.1.x (language of page and parts) | **not out of scope any more, and not satisfied.** The client ships three UI languages (English, `zh-Hans-CN`, `zh-Hant-TW`) chosen in Settings → Display, but egui 0.37's AccessKit adapter never sets the `language` property on any node (`grep -rln set_language $CARGO_HOME/registry/src/*/egui-0.37.0/src/` returns nothing), so a screen reader is given no language hint in any locale and reads Chinese text with whatever voice is active. Recorded as gap A-11 for a later slice; no 3.1.1/3.1.2 claim is made. |
 | 1.4.3 (contrast) for disabled controls | exempt by the criterion; measured for the record |
 | 2.4.7 (focus visible), 2.4.3 (focus order), 1.4.11 | **in scope** — these are the ones A-3/A-4/A-7 report on |
 
@@ -409,3 +420,6 @@ invisible to a reader, a blanket compliance claim would be false.
 6. **Focus visuals** (A-7) and **splitter keys** (A-8).
 7. **Live region** (A-9) on connection-state and kill-result changes; and scope
    the `/` shortcut to "no text field focused" or make it configurable (A-10).
+8. **Language property** (A-11): get the active BCP-47 tag onto the tree so a
+   screen reader switches voice with the UI language. Needs an egui-side change
+   or a post-pass over the AccessKit update.
