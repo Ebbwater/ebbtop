@@ -5212,13 +5212,16 @@ mod tests {
         }
         // 5. A selected process, so the detail inspector is on screen: command
         //    line, CPU time, cwd/exe, children, threads and the history graphs.
-        //    `selected` drives the pane; the fixture supplies 4242's history.
+        //    `selected` drives the pane; the fixture supplies 4242's history, and
+        //    `rich_detail` fills the facts a real agent reports so the listing
+        //    never shows an empty row (0.0s CPU time, no cwd, no children).
         {
             let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
             app.onboard = None;
             let now = client::now_ms() + 60_000;
             fake_state(&app, now);
             workload_rows(&app, now);
+            rich_detail(&app);
             app.selected = Some(4242);
             shot("ebbtop-store-1366x768-process-detail.png", app);
         }
@@ -5258,6 +5261,7 @@ mod tests {
             let now = client::now_ms() + 60_000;
             fake_state(&app, now);
             workload_rows(&app, now);
+            rich_detail(&app);
             app.selected = Some(4242);
             shot(&format!("ebbtop-store-1366x768-process-detail-{suffix}.png"), app);
         }
