@@ -5189,8 +5189,8 @@ mod tests {
             {
                 let ob = app.onboard.as_mut().expect("wizard open");
                 ob.discovery.agents = vec![
-                    agent("k-server", "0.2.9", "192.168.1.20", 45976),
-                    agent("build-box", "0.2.9", "192.168.1.31", 45976),
+                    agent("k-server", "0.3.0", "192.168.1.20", 45976),
+                    agent("build-box", "0.3.0", "192.168.1.31", 45976),
                 ];
                 ob.discovery.finished = true;
             }
@@ -5209,6 +5209,57 @@ mod tests {
                 ob.pair = Some(p);
             }
             shot("ebbtop-store-1366x768-pairing-code.png", app);
+        }
+        // 5. A selected process, so the detail inspector is on screen: command
+        //    line, CPU time, cwd/exe, children, threads and the history graphs.
+        //    `selected` drives the pane; the fixture supplies 4242's history.
+        {
+            let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
+            app.onboard = None;
+            let now = client::now_ms() + 60_000;
+            fake_state(&app, now);
+            workload_rows(&app, now);
+            app.selected = Some(4242);
+            shot("ebbtop-store-1366x768-process-detail.png", app);
+        }
+        // 6-8. The three shipped UI languages, same dashboard scene, so each
+        //    storefront lists screenshots in its own language. Config carries
+        //    the locale; `App::with` resolves it at draw time.
+        for (loc, suffix) in [
+            (Locale::English, "en"),
+            (Locale::ZhHansCn, "zh-cn"),
+            (Locale::ZhHantTw, "zh-tw"),
+        ] {
+            let mut app = App::with(
+                Config { language: loc.id().to_string(), ..Config::default() },
+                Some("t".into()),
+                TokenSource::Env,
+                None,
+            );
+            app.onboard = None;
+            let now = client::now_ms() + 60_000;
+            fake_state(&app, now);
+            workload_rows(&app, now);
+            shot(&format!("ebbtop-store-1366x768-dashboard-{suffix}.png"), app);
+        }
+        // 9-11. The process table in the same three languages.
+        for (loc, suffix) in [
+            (Locale::English, "en"),
+            (Locale::ZhHansCn, "zh-cn"),
+            (Locale::ZhHantTw, "zh-tw"),
+        ] {
+            let mut app = App::with(
+                Config { language: loc.id().to_string(), ..Config::default() },
+                Some("t".into()),
+                TokenSource::Env,
+                None,
+            );
+            app.onboard = None;
+            let now = client::now_ms() + 60_000;
+            fake_state(&app, now);
+            workload_rows(&app, now);
+            app.selected = Some(4242);
+            shot(&format!("ebbtop-store-1366x768-process-detail-{suffix}.png"), app);
         }
     }
 
