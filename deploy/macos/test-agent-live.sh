@@ -199,21 +199,30 @@ case_disk_no_double_count() {
   reported="$(python3 - "$out" <<'PY'
 import json, sys
 rows = json.load(open(sys.argv[1]))
-# The sum the client would display, and the root volume alone.
+# The sum the client would display, and the capacity the platform tool reports
+# for the same filesystem. The root row is NOT matched by name: on macOS the
+# row is named for the VOLUME (metrics.rs darwin_disks sets name from
+# v.name when the mount point is "/"), and the boot volume name is whatever
+# the owner chose -- "Macintosh HD" is only the factory default. Identify the
+# row by the one property checkable from the frame: its capacity.
 print(json.dumps({"rows": len(rows), "sum_total": sum(r["total"] for r in rows),
-                  "root": next((r["total"] for r in rows if r["name"] in ("/", "Macintosh HD")), 0)}))
+                  "totals": [r["total"] for r in rows]}))
 PY
 )" || { fail "$name" "could not parse the disk frame"; return; }
   df_root="$(df -k / | awk 'NR==2 { print $2 * 1024 }')"
   note "agent disks: $reported ; df / total: $df_root"
-  python3 - "$reported" "$df_root" <<'PY' || { fail "$name" "an APFS container was double counted: $reported"; return; }
+  python3 - "$reported" "$df_root" <<'PY' || { fail "$name" "an APFS container was double counted, or no row matches df: $reported"; return; }
 import json, sys
 r = json.loads(sys.argv[1]); df_root = int(sys.argv[2])
+if df_root <= 0:
+    sys.exit(1)
 # Summing the container once must not be materially larger than the root
 # volume's capacity; summing it once per volume would be several times that.
 if r["sum_total"] > df_root * 1.15:
     sys.exit(1)
-if r["root"] <= 0:
+# Some row must be the filesystem df measured, within 5%. This replaces a name
+# match, so a renamed boot volume does not fail a healthy install.
+if not any(abs(t - df_root) <= df_root * 0.05 for t in r["totals"]):
     sys.exit(1)
 PY
   pass "$name" "the reported capacity sums each APFS container once (no volume-count multiplication)"
