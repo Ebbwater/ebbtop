@@ -250,8 +250,8 @@ echo "== configuring (pack support on, samples/tests off)"
 # deploy/windows/msix/test-sdk-config.sh).
 # The upstream makelinux.sh hardcodes clang via cmake/linux.cmake. The hosted
 # image has clang, so use the upstream script's own toolchain file there;
-# fall back to the default compiler when clang is absent (documented in
-# docs/windows-store.md, not a supported release path).
+# fall back to the default compiler when clang is absent (a convenience for a
+# local run only; the release path is the hosted job, which always has clang).
 TOOLCHAIN=()
 CLANG_ENV=()
 if command -v clang >/dev/null && command -v clang++ >/dev/null; then

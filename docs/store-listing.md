@@ -177,6 +177,95 @@ sends nothing to the maintainers.
 The project's public site states the same handling at
 `https://ebbwater.net/ebbtop/privacy.html`.
 
+## Accessibility statement (Partner Center "Accessibility" / product features)
+
+Claims only what `docs/accessibility-audit.md` proves. The audit's own draft is
+the source; this is that text with the two findings added since (A-11, no
+language hint; and the note that the picker labels are localized) and it
+deliberately does not claim full screen-reader support.
+
+```
+EbbTop is built to work with the keyboard and with Windows assistive technology.
+
+Keyboard: the dashboard, the process table and the first-run wizard are operable
+without a pointer. Tab reaches the resource panes, the filter and Settings; the
+process table is driven by the arrow keys (Up/Down move the selection through the
+visible, filtered and sorted rows) and the selected process opens a detail pane
+whose Kill action is reachable with Tab and opened with Space. In the kill
+confirmation, Tab and Space choose the signal and run it. Every step of the
+first-run wizard (host name, address, token, pairing code) can be reached and
+activated from the keyboard.
+
+Screen readers: buttons, text fields, check boxes, drop-downs, sliders and dialog
+titles are exposed with their names and roles through the Windows UI Automation
+tree (AccessKit). Connection state is shown as a word ("LIVE", "STALE",
+"CONNECTING", "DOWN"), never by colour alone.
+
+Display: the interface scales with Ctrl/Cmd + and -, and the chosen scale is
+remembered between launches. Body text, headings, buttons, warnings and the
+connection badges meet WCAG 2.2 AA contrast on the dark theme panels and
+dialogs; two pairs of secondary grey text sit just under the bar (4.3-4.4:1) and
+the selected-row highlight is below it (secondary cells at 1.98:1 on the
+selection fill).
+
+Language: the interface is available in English, Simplified Chinese and
+Traditional Chinese, chosen in Settings > Display and remembered between
+launches.
+
+Known limitations, stated rather than glossed over: the process table's rows are
+not yet announced individually by screen readers (the row data is read cell by
+cell), the painted resource gauges (per-core CPU, memory/swap/disk totals, GPU
+and network values) are not yet exposed to screen readers, and at 150-200% zoom
+the memory and disk panes keep some values below the visible area, where only a
+mouse-wheel scroll reaches them. A change of state (a connection going STALE, a
+kill being refused) is not announced automatically, and no language hint is
+passed to the screen reader, so a reader may use the wrong voice for Chinese
+text. Each limitation is a recorded gap with a retained test in the audit behind
+this statement.
+```
+
+Do not use "fully accessible", "WCAG 2.2 AA compliant" or "screen-reader
+friendly": A-1 and A-2 make a blanket claim false.
+
+## Notes for certification
+
+The one intake risk for a client-server app: a tester installs on a clean machine
+with no EbbTop agent anywhere and sees only the first-run wizard. Paste this into
+**Submission options -> Notes for certification** so the reviewer knows why.
+
+```
+EbbTop is a monitor for the customer's own Linux machines, not a hosted service.
+The Windows app has no account, no sign-in and no server of its own: it connects
+over the customer's LAN, VPN or tailnet to a small agent the customer installs on
+each Linux host.
+
+A reviewer testing on a clean machine therefore sees the first-run wizard with no
+hosts listed, which is the correct empty state. Nothing is wrong and no
+configuration is missing on Microsoft's side. To see a populated dashboard:
+
+1. Use any Linux machine (a VM is fine) on the same network as the test PC.
+2. On that Linux host, run the one-line installer from our public repository:
+   curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
+   It installs a systemd user service and prints a host address and a token path.
+3. On the Windows PC, in the EbbTop wizard, type that address (format
+   ws://<address>:45976/ws) and paste the token from the printed path, then Test
+   and Save and connect. The dashboard reads LIVE within about a second.
+
+Without a Linux host, the four screenshots on the listing show the populated
+dashboard, the process table, and both steps of the pairing wizard; they are
+rendered from the shipping build, not mocked up.
+
+The app makes no outbound connection except to the hosts the customer configures.
+The Store build has no update check and no in-app updater, because the Store
+delivers updates; the GitHub download build is the one with the updater. There is
+no telemetry, no analytics and no crash reporting in either build.
+
+The one write action in the app is an explicit, confirmed SIGTERM or SIGINT sent
+to a process owned by the same user who runs the agent; it cannot signal root
+processes, PID 1, kernel threads, or another user's processes, and Store-era
+clients receive read-only tokens that are refused that action.
+```
+
 ## Store listing keywords / search terms
 
 ```
@@ -209,7 +298,9 @@ in-app purchases, no subscriptions, no ads.
 - [ ] `EbbTop-<version>-x64.msix` built by the `store-package` job for the
       release tag, and its `sha256` recorded.
 - [ ] `wack-gate` job report XML downloaded from the run and read: no FAIL
-      rows (see `docs/windows-store.md`).
+      rows on a non-optional test (`deploy/windows/msix/parse-wack-report.ps1`
+      is the same reader the job runs; `OPTIONAL="TRUE"` failures are findings,
+      not blockers).
 - [ ] Screenshots re-rendered at 1366x768 from the same commit.
 - [ ] Package uploaded **unsigned**: the Store re-signs it.
 - [ ] Listing text above pasted; age rating questionnaire answered as above.
