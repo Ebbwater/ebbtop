@@ -189,7 +189,7 @@ and enter that.
 | Package and installer fixtures (packaging, bind refusal, upgrade, rollback, activation failure, credentials, uninstall) | Linux with stubbed launchd **and** native | `deploy/macos/test-install-macos.sh` |
 | Bash 3.2 compatibility of the bootstrap and installer | a real Bash 3.2 binary | `deploy/bootstrap/test-install-portable.sh` |
 | Real foreground agent, authenticated probe, RAM/disk/process comparison against `sysctl`/`df`/a workload | native arm64 only | `deploy/macos/test-agent-live.sh` |
-| launchd load/unload on a real Mac, login startup | native arm64 only | `macos-agent` workflow |
+| LaunchAgent install, upgrade, rollback, uninstall and login startup | logged-in native arm64 test account | Run the packaged installer in the test account and verify the launchd job and authenticated listener |
 | Keychain / desktop client on the Mac | operator, unchanged | see the main README |
 
 **A Linux run of any of these scripts is not native macOS evidence.** Where a

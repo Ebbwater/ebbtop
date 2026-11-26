@@ -81,6 +81,15 @@ ENVFILE="$WORK/agent.env"
   printf 'EBBTOP_BIND=127.0.0.1\nEBBTOP_AGENT_DISCOVERY=0\nEBBTOP_AGENT_METRICS_TTL_MS=100\nEBBTOP_AGENT_PROCESSES_TTL_MS=500\nEBBTOP_TOKEN=%s\n' "$(cat "$TOK")" > "$ENVFILE" )
 chmod 600 "$ENVFILE"
 
+# macOS does not ship GNU timeout. Python is already used to read probe JSON.
+run_bounded() {
+  python3 -c 'import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[1:], timeout=10).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)' "$@"
+}
+
 # ===========================================================================
 # 1. fail closed: the enforced gate refuses a missing token and a wildcard bind
 # ===========================================================================
@@ -88,7 +97,7 @@ case_startup_refusals() {
   local name=startup-refusals out rc=0
   # (a) no token at all
   ( umask 077; printf 'EBBTOP_BIND=127.0.0.1\n' > "$WORK/no-token.env" )
-  out="$(EBBTOP_STATE_DIR="$STATE_DIR" timeout 10 "$BIN" --env-file "$WORK/no-token.env" --port "$PORT" 2>&1)" || rc=$?
+  out="$(EBBTOP_STATE_DIR="$STATE_DIR" run_bounded "$BIN" --env-file "$WORK/no-token.env" --port "$PORT" 2>&1)" || rc=$?
   printf '%s\n' "$out" >> "$LOG"
   if [[ $rc -eq 0 ]] || ! printf '%s' "$out" | grep -q 'without a token'; then
     fail "$name" "an agent with no token was not refused (exit $rc): $out"; return
@@ -96,7 +105,7 @@ case_startup_refusals() {
   # (b) a wildcard bind
   rc=0
   ( umask 077; printf 'EBBTOP_BIND=0.0.0.0\nEBBTOP_TOKEN=%s\n' "$(cat "$TOK")" > "$WORK/wild.env" )
-  out="$(EBBTOP_STATE_DIR="$STATE_DIR" timeout 10 "$BIN" --env-file "$WORK/wild.env" --port "$PORT" 2>&1)" || rc=$?
+  out="$(EBBTOP_STATE_DIR="$STATE_DIR" run_bounded "$BIN" --env-file "$WORK/wild.env" --port "$PORT" 2>&1)" || rc=$?
   printf '%s\n' "$out" >> "$LOG"
   if [[ $rc -eq 0 ]] || ! printf '%s' "$out" | grep -q 'not loopback or a private'; then
     fail "$name" "a wildcard bind was not refused (exit $rc): $out"; return
@@ -104,7 +113,7 @@ case_startup_refusals() {
   # (c) the gate cannot be relaxed by the environment on Darwin. Set every
   #     spelling that would disable enforcement on a permissive build.
   rc=0
-  out="$(EBBTOP_AGENT_REQUIRE_AUTH=0 EBBTOP_STATE_DIR="$STATE_DIR" timeout 10 "$BIN" --env-file "$WORK/no-token.env" --port "$PORT" 2>&1)" || rc=$?
+  out="$(EBBTOP_AGENT_REQUIRE_AUTH=0 EBBTOP_STATE_DIR="$STATE_DIR" run_bounded "$BIN" --env-file "$WORK/no-token.env" --port "$PORT" 2>&1)" || rc=$?
   printf '%s\n' "$out" >> "$LOG"
   if [[ $rc -eq 0 ]]; then
     fail "$name" "EBBTOP_AGENT_REQUIRE_AUTH=0 disabled enforcement on macOS"; return
@@ -211,17 +220,19 @@ PY
 }
 
 case_process_cpu_workload() {
-  local name=process-cpu wl out
+  local name=process-cpu wl first out
   [[ -n "${AGENT_PID:-}" ]] || { skip "$name" "no agent running"; return; }
-  # A known single-threaded CPU burn for ~2s: /bin/sh's busy loop is enough to
-  # register as a measurable share of one core and is not trivially optimised.
-  ( end=$(( SECONDS + 2 )); while (( SECONDS < end )); do :; done ) &
+  # The CPU percentage needs two samples of the same running process.
+  ( end=$(( SECONDS + 4 )); while (( SECONDS < end )); do :; done ) &
   wl=$!
-  sleep 0.6
+  first="$("$BIN" --probe "127.0.0.1:$PORT" --token-file "$TOK" --timeout-ms 8000 --dump-process "$wl" 2>>"$LOG")" || {
+    wait "$wl" 2>/dev/null
+    fail "$name" "could not collect the first CPU sample"; return
+  }
+  sleep 1
   out="$("$BIN" --probe "127.0.0.1:$PORT" --token-file "$TOK" --timeout-ms 8000 --dump-process "$wl" 2>>"$LOG")" || {
     wait "$wl" 2>/dev/null
-    skip "$name" "this build has no --dump-process; process CPU is covered by the agent's own tests"
-    return
+    fail "$name" "could not collect the second CPU sample"; return
   }
   wait "$wl" 2>/dev/null
   printf 'workload %s: %s\n' "$wl" "$out" >> "$LOG"
@@ -229,10 +240,11 @@ case_process_cpu_workload() {
   # The agent reports a percentage of total capacity; any nonzero reading for a
   # process that just burned a full core proves the measurement reaches the
   # right process rather than a cached or reused PID.
-  python3 - "$out" <<'PY' || { fail "$name" "the burnt process reported no CPU: $out"; return; }
+  python3 - "$wl" "$first" "$out" <<'PY' || { fail "$name" "the expected process did not report positive CPU"; return; }
 import json, sys
-row = json.loads(sys.argv[1])
-if float(row.get("cpu_usage", 0)) <= 0:
+pid = int(sys.argv[1])
+first, second = (json.loads(sample)["process"] for sample in sys.argv[2:])
+if first["pid"] != pid or second["pid"] != pid or float(second["cpu_usage"]) <= 0:
     sys.exit(1)
 PY
   pass "$name" "a known CPU-burning process reports nonzero CPU against its own PID"
