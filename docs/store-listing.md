@@ -79,6 +79,115 @@ WHAT YOU NEED
 Free and open source (MIT). The GitHub Releases page stays available for the Windows ZIP (the same app, without the Store's automatic updates), the Linux agent and the macOS build.
 ```
 
+## Localized listing copy: zh-CN (Simplified, Mainland China)
+
+Paste into the Partner Center listing for `zh-CN`. Terminology follows the
+app's own strings (`进程` for process, `工作负载` for workload,
+`实时` for LIVE), so the storefront matches what the user sees after install.
+The short description is 108 characters, inside the 270 limit.
+
+### zh-CN short description
+
+```
+在 Windows 上监控你自己的 Linux 主机：CPU、内存、网络、磁盘，以及可排序、可筛选的进程表和进程详情。每台主机一个小型代理，通过局域网、VPN 或 tailnet 通信，令牌由你保管。无云端、无遥测。
+```
+
+### zh-CN description
+
+```
+EbbTop 是一款原生的类 btop 监控工具，用于监控你自己运行的 Linux 机器。
+
+连接你自己的主机并实时查看：CPU 每核占用与温度、内存与交换分区、网络与磁盘吞吐、GPU 占用与显存，以及一个可排序、可筛选的进程表，附带进程详情面板（命令行、工作目录、子进程、线程、CPU 与内存历史曲线）。进程按工作负载归组，因此一个 systemd 服务或一个容器会显示为一行，并带有自己的合计值。
+
+它为少数几台你自己拥有的机器而做，而不是为云上的机器集群而做。
+
+工作原理
+
+每台 Linux 主机上运行一个很小的代理，通过一个 WebSocket 返回指标、进程表以及按需请求的进程详情。桌面应用可以连接任意多台主机，每台主机一个令牌，保存在 Windows 凭据管理器中，断线后会自动重连。
+
+配对只需一分钟。在主机上运行 ebbtop-agent --pair，把它打印的六位数字输入 EbbTop，应用会保存它签发的只读令牌。也可以直接填写地址和令牌，适用于 tailnet 或其他网段上的主机。
+
+它不做什么
+
+- 没有云端账号，没有登录，没有遥测。应用只连接你配置的主机。
+- 只读监控。唯一能执行的操作，是你在进程表中选中的、属于你自己用户的进程，经过确认后发送 SIGTERM 或 SIGINT。没有任何容器或服务控制功能。
+- 没有 SSH，Windows 端不安装代理，你的电脑上也没有后台服务。
+
+你需要准备
+
+- Windows 10 版本 1809（内部版本 17763）或更新版本，或 Windows 11，x64。
+- 在每台要监控的 Linux 主机上安装 EbbTop 代理（x86-64、glibc 2.39 或更新版本、systemd 用户会话）。用项目 Releases 页面的一行安装脚本或压缩包安装；代理是一个普通的 systemd 用户服务，它写出的令牌只有你能读取。
+- 电脑与主机之间的私有网络通路：同一局域网、VPN 或 tailnet。EbbTop 不是公共中继，也不需要端口转发。
+
+免费且开源（MIT 许可证）。GitHub Releases 页面继续提供 Windows ZIP（同一个应用，但没有 Store 的自动更新）、Linux 代理和 macOS 版本。
+```
+
+### zh-CN What's new
+
+```
+首个 Store 版本。
+
+- 为每台添加的主机提供实时面板：CPU、内存、网络、磁盘、GPU 与工作负载汇总。
+- 可排序、可筛选的进程表，附带进程详情面板。
+- 六位数字配对码；只读令牌保存在 Windows 凭据管理器中。
+- 界面支持英文、简体中文和繁体中文。
+- Store 版本通过 Microsoft Store 更新。
+```
+
+## Localized listing copy: zh-TW (Traditional, Taiwan)
+
+Paste into the Partner Center listing for `zh-TW`. Taiwan terminology is used
+(`處理程序` not `進程`, `記憶體` not `内存`, `網路` not `网络`), matching the
+app's `zh-Hant-TW` strings.
+
+### zh-TW short description
+
+```
+在 Windows 上監控你自己的 Linux 主機：CPU、記憶體、網路、磁碟，以及可排序、可篩選的處理程序表與詳細資料。每台主機一個小型代理，透過區域網路、VPN 或 tailnet 通訊，權杖由你保管。無雲端、無遙測。
+```
+
+### zh-TW description
+
+```
+EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 Linux 機器。
+
+連線到你自己的主機並即時檢視：CPU 每核心使用率與溫度、記憶體與置換空間、網路與磁碟吞吐量、GPU 使用率與視訊記憶體，以及一個可排序、可篩選的處理程序表，附處理程序詳細資料面板（命令列、工作目錄、子處理程序、執行緒、CPU 與記憶體歷史曲線）。處理程序依工作負載分組，因此一個 systemd 服務或一個容器會顯示為一列，並帶有自己的合計值。
+
+它是為少數幾台你自己擁有的機器而做，而不是為雲端上的機器叢集。
+
+運作方式
+
+每台 Linux 主機上執行一個很小的代理，透過一個 WebSocket 回傳指標、處理程序表以及隨選的處理程序詳細資料。桌面應用程式可以連線任意多台主機，每台主機一個權杖，儲存在 Windows 認證管理員中，連線中斷後會自動重新連線。
+
+配對只需一分鐘。在主機上執行 ebbtop-agent --pair，將它顯示的六位數字輸入 EbbTop，應用程式會儲存它簽發的唯讀權杖。也可以直接填入位址和權杖，適用於 tailnet 或其他網段上的主機。
+
+它不做什麼
+
+- 沒有雲端帳號，沒有登入，沒有遙測。應用程式只連線你設定的主機。
+- 唯讀監控。唯一能執行的動作，是你在處理程序表中選取、屬於你自己使用者的處理程序，經確認後送出 SIGTERM 或 SIGINT。沒有任何容器或服務控制功能。
+- 沒有 SSH，Windows 端不安裝代理，你的電腦上也沒有背景服務。
+
+你需要準備
+
+- Windows 10 版本 1809（組建 17763）或更新版本，或 Windows 11，x64。
+- 在每台要監控的 Linux 主機上安裝 EbbTop 代理（x86-64、glibc 2.39 或更新版本、systemd 使用者工作階段）。用專案 Releases 頁面的一行安裝指令或壓縮檔安裝；代理是一個一般的 systemd 使用者服務，它寫出的權杖只有你能讀取。
+- 電腦與主機之間的私有網路通路：同一個區域網路、VPN 或 tailnet。EbbTop 不是公共中繼，也不需要連接埠轉送。
+
+免費且開源（MIT 授權）。GitHub Releases 頁面繼續提供 Windows ZIP（同一個應用程式，但沒有 Store 的自動更新）、Linux 代理和 macOS 版本。
+```
+
+### zh-TW What's new
+
+```
+首個 Store 版本。
+
+- 為每台新增的主機提供即時面板：CPU、記憶體、網路、磁碟、GPU 與工作負載彙總。
+- 可排序、可篩選的處理程序表，附處理程序詳細資料面板。
+- 六位數字配對碼；唯讀權杖儲存在 Windows 認證管理員中。
+- 介面支援英文、簡體中文和繁體中文。
+- Store 版本透過 Microsoft Store 更新。
+```
+
 ## What's new in this version
 
 ```
@@ -107,16 +216,55 @@ Free and open source (MIT)
 
 ## Screenshots
 
-Four images, exactly 1366x768, in `docs/store-screenshots/`:
+Eleven images, all exactly 1366x768, in `docs/store-screenshots/`. The English
+scene set is what the `en-US` listing uses; the six localized ones carry the
+same scenes in the language of each storefront listing, so a Chinese listing
+never shows an English screenshot.
 
-| File | Scene |
+Partner Center takes a caption per image. Use these — they describe what the
+scene shows, in the language of the listing they belong to.
+
+**en-US**
+
+| Image | Caption |
 |---|---|
-| `ebbtop-store-1366x768-dashboard.png` | Dashboard: CPU, memory, network, GPU, disk, process table, LIVE |
-| `ebbtop-store-1366x768-processes.png` | Workload roll-up and the sortable process table |
-| `ebbtop-store-1366x768-pairing-discovered.png` | Pairing wizard: agents found on this network |
-| `ebbtop-store-1366x768-pairing-code.png` | Pairing wizard: the six-digit code step |
+| `dashboard-en.png` | Live dashboard for one host: CPU with per-core meters and temperature, memory and swap, network and disk throughput, GPU load and VRAM, the workload roll-up, and the process table. Status reads LIVE. |
+| `process-detail-en.png` | The process detail inspector: command line with Copy, CPU time, virtual memory, start time, working directory, executable, child processes, top threads, and CPU and memory history graphs for the selected process. |
+| `pairing-discovered.png` | First run: EbbTop finds the agents on your own network, showing each host name, agent version and address. |
+| `pairing-code.png` | Pairing with a six-digit code: the app exchanges the code for a read-only token and stores it, so no token is typed by hand. |
 
-They are generated, not captured by hand, from the app's own offscreen
+**zh-CN**
+
+| Image | Caption |
+|---|---|
+| `dashboard-zh-cn.png` | 单台主机的实时面板：CPU 每核占用与温度、内存与交换分区、网络与磁盘吞吐、GPU 占用与显存、工作负载汇总，以及进程表。状态显示为“实时”。 |
+| `process-detail-zh-cn.png` | 进程详情面板：命令行与复制按钮、CPU 时间、虚拟内存、启动时间、工作目录、可执行文件、子进程、主要线程，以及所选进程的 CPU 与内存历史曲线。 |
+
+**zh-TW**
+
+| Image | Caption |
+|---|---|
+| `dashboard-zh-tw.png` | 單台主機的即時面板：CPU 每核心使用率與溫度、記憶體與置換空間、網路與磁碟吞吐量、GPU 使用率與視訊記憶體、工作負載彙總，以及處理程序表。狀態顯示為「即時」。 |
+| `process-detail-zh-tw.png` | 處理程序詳細資料面板：命令列與複製按鈕、CPU 時間、虛擬記憶體、啟動時間、工作目錄、執行檔、子處理程序、主要執行緒，以及所選處理程序的 CPU 與記憶體歷史曲線。 |
+
+| File | Scene | Listing language |
+|---|---|---|
+| `ebbtop-store-1366x768-dashboard-en.png` | Dashboard: CPU, memory, network, GPU, disk, workloads, process table, LIVE | en-US |
+| `ebbtop-store-1366x768-process-detail-en.png` | A selected process: detail inspector with command line, CPU time, memory, cwd/exe, children, threads and two history graphs | en-US |
+| `ebbtop-store-1366x768-pairing-discovered.png` | Pairing wizard: agents found on this network | en-US |
+| `ebbtop-store-1366x768-pairing-code.png` | Pairing wizard: the six-digit code step | en-US |
+| `ebbtop-store-1366x768-dashboard-zh-cn.png` | Dashboard, Simplified Chinese interface | zh-CN |
+| `ebbtop-store-1366x768-process-detail-zh-cn.png` | Process detail inspector, Simplified Chinese | zh-CN |
+| `ebbtop-store-1366x768-dashboard-zh-tw.png` | Dashboard, Traditional Chinese interface | zh-TW |
+| `ebbtop-store-1366x768-process-detail-zh-tw.png` | Process detail inspector, Traditional Chinese | zh-TW |
+
+The four unsuffixed files (`dashboard.png`, `processes.png`, `pairing-code.png`,
+`pairing-discovered.png`) are the original English scene set. `dashboard.png`
+and `dashboard-en.png` are the same scene; `processes.png` is the table without
+a selection. Keep them because the README and older notes reference them, but
+the Store listing uses the suffixed set.
+
+Every image is generated, not captured by hand, from the app's own offscreen
 renderer with fixture data (no real host names, addresses or tokens). Exact
 commands:
 
@@ -124,10 +272,15 @@ commands:
 cd <repo>
 mkdir -p docs/store-screenshots
 EBBTOP_SHOT_DIR=$PWD/docs/store-screenshots \
-  cargo test -p ebbtop-gui store_screenshots -- --ignored
+  cargo test -p ebbtop-gui --locked store_screenshots -- --ignored
 ```
 
-Re-render after any UI change and commit the four PNGs in the same change;
+The localized scenes set `language` in the `Config` they render with, which is
+the same field the app reads at draw time, so these are real localizations and
+not overlaid text. The bundled Noto faces are what make the Chinese render
+offline.
+
+Re-render after any UI change and commit the PNGs in the same change;
 a listing screenshot that no longer matches the app is a review finding.
 
 ## Age rating (IARC questionnaire guidance)
