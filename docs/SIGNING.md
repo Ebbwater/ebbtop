@@ -91,6 +91,37 @@ What the Microsoft signature means: the bytes match the package we submitted
 and Microsoft vouches they have not been altered since. It is not an audit of
 the source.
 
+### Certification result for 0.3.0
+
+The `wack-gate` job ran on the exact release commit
+(`b8d8127ac8ccbee9409c6b5ebad73b1513cb5df2`) in hosted run `45316184029` and the
+report it produced is the evidence for this submission:
+
+- `OVERALL_RESULT="PASS"`, 24 tests, 23 PASS, 1 FAIL.
+- The single FAIL is `Blocked executables` (`OPTIONAL="TRUE"`). Its messages are
+  `CreateProcessW` and the strings `csi`, `cmd.exe`, `\cmd.exe` and `reg`. Read
+  in the packaged bytes, all five are incidental:
+  - `CreateProcessW` is in the import directory because the app spawns one
+    program: `explorer /select,<path>` for "Open logs" (`store.rs`). It launches
+    no shell and runs no user-supplied command line.
+  - `cmd.exe /e:ON /v:OFF /d /c "` is Rust's standard library support for
+    `Command` on Windows, linked whether or not a `.bat` is ever run.
+  - `csi` and `reg` are substrings, not identifiers. `csi` occurs inside the
+    bundled ICU data (`NFKC_Simple_Casefold`, `nfkcscf`); of 1,306 `reg` hits in
+    the image, 885 are the embedded crate path `/home/runner/.cargo/registry/...`
+    and the rest are `regex`/`registry`/`register` substrings. A WACK string
+    match is a substring scan, which is why it reports them.
+  A FAIL on an optional test is a finding, not a blocker, which is why the run
+  is green.
+- The certified package is `EbbTop-0.3.0-x64.msix`, sha256
+  `99ac53babc121ef5fdf144d365fef156a0108ae6eef4d378df12dfb159cbe233`, 87 parts,
+  85 block-map files, version `0.3.0.0`, unsigned. That digest is the one to
+  compare against the file uploaded to Partner Center.
+
+What the Microsoft signature means: the bytes match the package we submitted
+and Microsoft vouches they have not been altered since. It is not an audit of
+the source.
+
 ## Build provenance
 
 Every package comes from the project's public GitHub Actions workflow at the
