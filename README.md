@@ -263,6 +263,7 @@ That produces `target/release/ebbtop` (and `ebbtop-probe`). Fetch the token with
 - Workloads: a roll-up pane above the process table groups the sample by the cgroup boundary that owns each process (the container's own systemd unit, a `libpod-<id>` scope for rootless containers with no unit, a transient scope, or the host) with PID count, CPU% and RSS summed, biggest memory first. Click a workload to filter the table to it; click it again, or the chip in the proc header, to clear. The process table also carries a Workload column. An agent without proto field 8 reports no cgroup, so everything lands in `(host)`; the pane is skipped when the window leaves less than 240 px for it so the table keeps its rows. The workloads and process tables scroll together as a group (like the resource boxes) while each keeps its own independent inner scroll, and hovering a row highlights the matching rows in the other table.
 - Selecting a row opens the detail inspector: full command with Copy, CPU time, vmem/shared, start time, cwd, exe, children (click to jump), top threads, and CPU+RSS history graphs.
 - Sources: the status-bar picker switches hosts (token per host); Settings manages sources, display and connection. The disk graphs follow the busiest disk or a pinned one.
+- Language: Settings → Display switches the interface between English, Simplified Chinese (Mainland) and Traditional Chinese (Taiwan); the choice is stored in `config.json` and lasts across launches. Host data stays canonical (hostnames, process names, users, paths and every number are painted as the agent reports them), and the bundled Noto Sans SC/TC faces are compiled in so Chinese renders offline. A stored value the build does not know falls back to English. `docs/l10n-scope.md` lists exactly what is and is not translated, and Settings → Display → Fonts and license shows the bundled font's OFL notice.
 - At under 1100 px wide it switches to a stacked layout. The upper boxes scroll so the process table keeps about 45% of the height down to the 480x420 minimum.
 
 ## Evidence
@@ -363,9 +364,10 @@ exclude it yourself.
 **The Microsoft Store is the signed channel.** EbbTop is packaged as an MSIX
 for the Store, and Microsoft re-signs it with a Microsoft certificate during
 publishing, so a Store install carries a trusted signature and no SmartScreen
-reputation problem. See [the Store listing pack](docs/store-listing.md) for the
-listing copy and [docs/SIGNING.md](docs/SIGNING.md) for what each artifact
-carries.
+reputation problem. The package is built and certified by the `store-package`
+and `wack-gate` jobs; submission through Partner Center is the owner's step.
+See [the Store listing pack](docs/store-listing.md) for the listing copy and
+[docs/SIGNING.md](docs/SIGNING.md) for what each artifact carries.
 
 Both Windows executables already carry the metadata a package needs
 (`ProductName` EbbTop, file and product version from the crate version) and
