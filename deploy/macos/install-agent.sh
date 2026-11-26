@@ -402,7 +402,7 @@ launchd_state() {
 
 # --- install / upgrade ------------------------------------------------------
 install_prebuilt() {
-  local dir="$SCRIPT_DIR" addr state probe_out probe_rc=0 rendered
+  local dir="$SCRIPT_DIR" addr state probe_out probe_rc=0 rendered env_token file_token
 
   require_platform
   verify_package "$dir"
@@ -434,9 +434,12 @@ install_prebuilt() {
     # The token in agent.env and the one in ebbtop.token must be the same
     # credential; a mismatch means the files disagree about what the agent
     # will accept, and the probe would fail after the swap.
-    if ! grep -q "^EBBTOP_TOKEN=$(cat "$TOKENFILE")\$" "$ENVFILE"; then
+    env_token="$(sed -n 's/^EBBTOP_TOKEN=//p' "$ENVFILE")"
+    file_token="$(cat "$TOKENFILE")"
+    if [[ -z "$file_token" || "$env_token" != "$file_token" ]]; then
       die "existing $ENVFILE and $TOKENFILE carry different tokens: refusing before any change to the current install (one of the two was edited by hand; fix it or move $ENVFILE aside)"
     fi
+    unset env_token file_token
     # An agent.env written by an earlier build of THIS installer has no
     # EBBTOP_STATE_DIR line, so its agent falls back to its own default. On a
     # stock layout that default IS this directory, so the upgrade is safe; it is

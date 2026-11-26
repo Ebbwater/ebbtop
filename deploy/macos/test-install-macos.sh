@@ -409,6 +409,10 @@ case_credentials() {
   rc=0; out="$(run_installer "$GOOD" --prebuilt)" || rc=$?
   [[ $rc -ne 0 ]] || { fail "$name" "a token mismatch was accepted"; return; }
   printf '%s' "$out" | grep -q 'carry different tokens' || { fail "$name" "no mismatch refusal: $out"; return; }
+  printf '%s\n' '.*' > "$SVC/ebbtop.token"
+  rc=0; out="$(run_installer "$GOOD" --prebuilt)" || rc=$?
+  [[ $rc -ne 0 ]] && printf '%s' "$out" | grep -q 'carry different tokens' \
+    || { fail "$name" "the token file was interpreted as a pattern"; return; }
   pass "$name" "a missing, empty or disagreeing token file refuses before the current install is touched"
 }
 
