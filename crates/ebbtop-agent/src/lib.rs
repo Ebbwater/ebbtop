@@ -1,10 +1,13 @@
 //! Library interface for ebbtop_agent functionality.
 
 pub mod discovery;
+pub mod envfile;
 pub mod gpu;
 pub mod kill;
 pub mod metrics;
 pub mod pairing;
+pub mod platform;
+pub mod probe;
 pub mod proc_util;
 pub mod proto;
 pub mod secret;

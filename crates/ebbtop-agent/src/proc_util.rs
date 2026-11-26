@@ -61,20 +61,50 @@ pub fn parse_diskstats(s: &str, whole_disks: &[String]) -> Vec<DiskIo> {
 }
 
 pub fn load_avg() -> Option<[f64; 3]> {
-    parse_loadavg(&std::fs::read_to_string("/proc/loadavg").ok()?)
+    #[cfg(target_os = "linux")]
+    {
+        return parse_loadavg(&std::fs::read_to_string("/proc/loadavg").ok()?);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // sysinfo's load_average() is the getloadavg(3) reading on macOS and
+        // whatever the platform provides elsewhere: the same three numbers
+        // the shell's `uptime` shows, so the client's load graph means the
+        // same thing on both platforms.
+        let l = sysinfo::System::load_average();
+        Some([l.one, l.five, l.fifteen])
+    }
 }
 
 pub fn uptime_s() -> Option<u64> {
-    parse_uptime(&std::fs::read_to_string("/proc/uptime").ok()?)
+    #[cfg(target_os = "linux")]
+    {
+        return parse_uptime(&std::fs::read_to_string("/proc/uptime").ok()?);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Some(sysinfo::System::uptime())
+    }
 }
 
 pub fn disk_io() -> Vec<DiskIo> {
-    let whole: Vec<String> = std::fs::read_dir("/sys/block")
-        .map(|rd| rd.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect())
-        .unwrap_or_default();
-    std::fs::read_to_string("/proc/diskstats")
-        .map(|s| parse_diskstats(&s, &whole))
-        .unwrap_or_default()
+    #[cfg(target_os = "linux")]
+    {
+        let whole: Vec<String> = std::fs::read_dir("/sys/block")
+            .map(|rd| rd.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect())
+            .unwrap_or_default();
+        return std::fs::read_to_string("/proc/diskstats")
+            .map(|s| parse_diskstats(&s, &whole))
+            .unwrap_or_default();
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // Explicitly unavailable rather than invented: the per-device
+        // throughput field is Linux-only in this release, and an empty list
+        // is what the client already renders as "no per-disk throughput".
+        // The README and docs/platform-macos.md both say so.
+        Vec::new()
+    }
 }
 
 /// ebbtop: `/proc/stat` `btime` line (seconds since epoch, boot time).

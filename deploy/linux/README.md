@@ -7,7 +7,8 @@ unchanged and still works from a checkout.
 
 ## Install with one command
 
-`deploy/linux/ebbtop-install.sh` wraps this whole page:
+`deploy/bootstrap/ebbtop-install.sh` wraps this whole page (its Linux path;
+the same file serves macOS Apple Silicon, see `deploy/bootstrap/README.md`):
 
 ```sh
 curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash

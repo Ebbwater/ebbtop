@@ -72,10 +72,18 @@ impl DiscoveryConfig {
     /// Environment form: enabled unless `EBBTOP_AGENT_DISCOVERY` says off;
     /// port from `EBBTOP_DISCOVERY_PORT` (a bad value keeps the default).
     pub fn from_env() -> Self {
+        Self::from_env_or_default(true)
+    }
+
+    /// Same, with the default when `EBBTOP_AGENT_DISCOVERY` is unset. The
+    /// macOS pilot passes `false` so an unauthenticated responder is not on
+    /// by default on a laptop; an explicit value still wins on every
+    /// platform, and Linux keeps its historical `true`.
+    pub fn from_env_or_default(default_enabled: bool) -> Self {
         let enabled = std::env::var("EBBTOP_AGENT_DISCOVERY")
             .ok()
             .map(|v| enabled_from(&v))
-            .unwrap_or(true);
+            .unwrap_or(default_enabled);
         let port = std::env::var("EBBTOP_DISCOVERY_PORT")
             .ok()
             .and_then(|v| v.parse::<u16>().ok())

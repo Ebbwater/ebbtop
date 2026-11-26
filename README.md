@@ -34,7 +34,7 @@ The client is multi-host with onboarding, Settings and a source picker
 | `crates/ebbtop-agent` | monitored Linux host | Owned agent. Same WebSocket wire protocol; `SOCKTOP_*` env names still accepted as fallback for `EBBTOP_*`. |
 | `crates/ebbtop-core` | any OS | Wire decode, reconnecting poll loop, history and tick stats, view helpers, `ebbtop-probe`. No GUI types; a Tauri or TUI front end can reuse it. |
 | `crates/ebbtop-gui` | Windows and Mac | `ebbtop` exe, egui 0.37 / eframe (glow). |
-| `deploy/` | | Agent user unit and install script, the one-line `linux/ebbtop-install.sh` installer for prebuilt agents, install/uninstall wizards (`agent-wizard.sh`, `windows/setup.ps1`, `mac/setup.sh`), agent-host acceptance script, Windows/macOS build scripts, log parsers. |
+| `deploy/` | | Agent user unit and install script, the one-line `bootstrap/ebbtop-install.sh` installer for prebuilt agents (Linux systemd and macOS LaunchAgent), install/uninstall wizards (`agent-wizard.sh`, `windows/setup.ps1`, `mac/setup.sh`), agent-host acceptance script, Windows/macOS build scripts, log parsers. |
 
 ### Agent extensions (marked `ebbtop` in source)
 
@@ -136,13 +136,20 @@ alone unless `--purge` / `-Purge` is given; the token value is never printed in
 any mode.
 
 
-### Agent host (Linux)
+### Agent host (Linux or macOS)
 
-One command installs the prebuilt agent (no Git, no Rust, no checkout) and prints what the client needs:
+One command installs the prebuilt agent (no Git, no Rust, no checkout) and prints what the client needs. The same published script serves both platforms: it selects the package from `uname -s` and `uname -m` **before** it touches the network.
 
 ```sh
 curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
 ```
+
+| Host | Package it installs | Service |
+|---|---|---|
+| Linux x86_64, glibc ≥ 2.39, systemd user manager | `ebbtop-agent-linux-x86_64.tar.gz` | systemd user unit |
+| macOS 13+, Apple Silicon | `ebbtop-agent-macos-arm64.tar.gz` | per-user LaunchAgent |
+
+Anything else — an Intel Mac, a Rosetta shell, Windows, aarch64 Linux — is refused with one line and no network access. The macOS side, including the fail-closed token and bind rules and what metrics are unavailable there, is documented in [docs/platform-macos.md](docs/platform-macos.md).
 
 To read it before running it:
 
@@ -153,12 +160,12 @@ less ebbtop-install.sh && bash ebbtop-install.sh
 
 | Flag | What it does |
 |---|---|
-| `--version v0.2.9` | pin a release tag: that tag is resolved, not `latest` |
-| `--archive <path>` | install a local `ebbtop-agent-linux-x86_64.tar.gz`: no API, no download |
+| `--version v0.3.0` | pin a release tag: that tag is resolved, not `latest` |
+| `--archive <path>` | install a local tarball for this platform: no API, no download |
 | `--yes`, `-y` | take the default answer, no prompt |
 | `--dry-run`, `-n` | print the plan and change nothing |
 
-Before anything on this host changes it refuses: a non-x86_64 host, a glibc older than 2.39, no systemd user manager, an archive whose sha256 does not match the digest the release reports, an archive whose inner `SHA256SUMS` does not verify, or an archive carrying a member that is not one of the five packaged files. After that it hands the extracted directory to the packaged `install-agent.sh --prebuilt` and installs nothing itself, so the source-build and prebuilt paths cannot drift. `EBBTOP_ADDR` pre-answers the bind prompt with this host's tailnet/LAN IP; `EBBTOP_PORT` is ignored deliberately, because the packaged unit fixes the port and the script reports the port it actually starts.
+Before anything on this host changes it refuses: an unsupported OS or architecture, a glibc older than 2.39, no systemd user manager (Linux) or no logged-in launchd domain (macOS), an archive whose sha256 does not match the digest the release reports, an archive whose inner `SHA256SUMS` does not verify, or an archive carrying a member that is not one of the five packaged files. After that it hands the extracted directory to the packaged `install-agent.sh --prebuilt` and installs nothing itself, so the source-build and prebuilt paths cannot drift. `EBBTOP_ADDR` pre-answers the bind prompt with this host's tailnet/LAN IP; `EBBTOP_PORT` is ignored deliberately, because the packaged service definition fixes the port and the script reports the port it actually starts.
 
 `ebbtop-install.sh` is attached to releases from v0.2.9 on. On an older release that URL is a 404, so install the archive from a checkout as before:
 
@@ -253,6 +260,24 @@ That produces `target/release/ebbtop` (and `ebbtop-probe`). Fetch the token with
 `./target/release/ebbtop`, and the onboarding wizard takes it from there. No
 `.dmg`; run the binary directly.
 
+### macOS agent host (Apple Silicon)
+
+The agent runs on Apple Silicon Macs too, installed by the same one-line
+command as on Linux, and a Mac then appears in the client alongside the Linux
+hosts:
+
+```sh
+curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
+```
+
+Unlike the Linux install it **fails closed**: a nonempty token is required and
+the bind address must be loopback or private, with broadcast discovery off by
+default. Per-disk throughput, temperatures, Apple GPU metrics, cgroups and
+process logs are reported as unavailable rather than guessed. The whole
+picture — what is reported, what is not, where state lives, upgrade/rollback/
+uninstall, and which checks run natively versus on Linux — is in
+[docs/platform-macos.md](docs/platform-macos.md).
+
 ## Window
 
 - Status bar: `LIVE` / `STALE` (no new sample for 2 s or more) / `CONNECTING` / `DOWN` with reason and retry time; agent sample time; age; tick p95; reconnect count. Hover age for lag and the full stats line.
@@ -279,7 +304,7 @@ That produces `target/release/ebbtop` (and `ebbtop-probe`). Fetch the token with
 | Real render | PNGs at 960x1040, 1920x1080, 640x520 reviewed; fixed meter text overlap, header truncation, a picker with no accessible name, and an unusable table at small heights | `EBBTOP_SHOT_DIR=... cargo test -p ebbtop-gui screenshot -- --ignored` (egui_kittest + wgpu, software Vulkan) |
 | Frame cost | 0.69 ms p50, 1.04 ms p95 CPU per frame, 400 processes, 960x1040 | `cargo test --release -p ebbtop-gui frame_cost -- --ignored --nocapture` |
 | Windows target | `cargo check --target x86_64-pc-windows-gnu` clean | type-check only; not linked here |
-| Mac target | `cargo check --target aarch64-apple-darwin` clean | type-check only |
+| Mac target | `cargo check --target aarch64-apple-darwin` clean | type-check only; runtime proof in the `macos-agent` workflow |
 | Linux exe size | 12.3 MB stripped | `target/release/ebbtop` |
 | Agent service live | `ebbtop-agent.service` active, listening on the tailnet/LAN address only; loopback refused; wrong token rejected; `agent.env` and `ebbtop.token` mode 600 | `deploy/install-agent.sh`, 2026-11-07 |
 | Private-network probe, 30 s, agent host to its own address | metrics interval p50 1000 / p95 1097 / max 1106 ms; process interval p95 1101 ms; 0 gaps, 0 repeats, 0 reconnects | `deploy/acceptance-kserver.sh 30` |
@@ -343,7 +368,7 @@ temp=58C` over the tailnet probe).
 - Only `device_by_index(0)` is queried; a multi-GPU host would show the first GPU only.
 - GPU VRAM "used" comes from NVML v1, which includes the driver-reserved pool (about 379 MiB idle on this 4 GiB card). `nvidia-smi`'s "Used" excludes it; btop uses the same v1 call, so the panel matches btop.
 - Upstream token check is a plain string compare and the token travels in the query string. Acceptable inside the tailnet; noted.
-- `deploy/linux/ebbtop-install.sh` binds the agent archive to the digest the GitHub release reports over HTTPS. That is stronger than the archive's own `SHA256SUMS`, which travels inside the archive it describes, but it is still not a publisher signature: a compromised release entry would serve a matching digest. Signed manifests remain open; see [Linux agent distribution](deploy/linux/README.md#integrity-is-not-authenticity--known-gap).
+- `deploy/bootstrap/ebbtop-install.sh` binds the agent archive to the digest the GitHub release reports over HTTPS. That is stronger than the archive's own `SHA256SUMS`, which travels inside the archive it describes, but it is still not a publisher signature: a compromised release entry would serve a matching digest. Signed manifests remain open; see [Linux agent distribution](deploy/linux/README.md#integrity-is-not-authenticity--known-gap).
 - The client's discovery scan is IPv4 limited broadcast, so it finds only agents on the client's own L2 segment, and it lists an agent once per (source address, per-boot nonce). A tailnet-only or firewalled host needs its address typed; the manual token path stays available for agents older than the pairing endpoint. `/pair` is plain HTTP on the private network, the same transport posture as the ws token, and the six-digit code is the only secret in that exchange.
 - A paired client token is read-only (`kill:` is refused by the agent). Pairing a second client means minting a second code; a code is single use and dies after five wrong guesses, which an attacker on the segment can trigger (enrollment denial of service, not credential theft — the operator re-mints).
 - `pairing.json` and `clients.json` are agent state in `~/services/ebbtop-agent`, beside `agent.env`, but they are not in the unit's `EnvironmentFile`. `install-agent.sh --purge` deletes them with the token and the unit; a plain uninstall leaves them in place.

@@ -3,9 +3,14 @@
 use crate::gpu::collect_all_gpus;
 use crate::state::AppState;
 use crate::types::{
-    DetailedProcessInfo, DiskInfo, JournalEntry, JournalResponse, LogLevel, Metrics, NetworkInfo,
-    ProcessInfo, ProcessMetricsResponse, ProcessesPayload,
+    DetailedProcessInfo, DiskInfo, JournalResponse, Metrics, NetworkInfo, ProcessInfo,
+    ProcessMetricsResponse, ProcessesPayload,
 };
+// The journald parser (and its types) has no macOS counterpart to parse with;
+// the macOS build answers `collect_journal_entries` with an unsupported
+// notice instead.
+#[cfg(not(target_os = "macos"))]
+use crate::types::{JournalEntry, LogLevel};
 use once_cell::sync::OnceCell;
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
@@ -65,10 +70,40 @@ fn get_cpu_times_us(pid: u32) -> (u64, u64) {
     (utime * procstat::TICK_US, stime * procstat::TICK_US)
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Placeholder for non-Linux, non-macOS targets: no /proc to read, and no
+/// platform collector for CPU times in this release. macOS does not use it
+/// (see `darwin_cpu_time_us`), so it is compiled only where it is called.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn get_cpu_times_us(_pid: u32) -> (u64, u64) {
     (0, 0)
 }
+
+/// macOS: total accumulated CPU time, in microseconds.
+///
+/// `proc_pidinfo(PROC_PIDTASKINFO)` gives one total (`pti_total_user` +
+/// `pti_total_system`); there is no per-process user/system split without
+/// walking the thread list. The agent reports that total in the *user* slot
+/// and zero in the system slot, so the sum a client displays is the real
+/// CPU time and the README says the split is macOS-unavailable. Reporting
+/// 0/0 instead would read as "this process never ran".
+#[cfg(target_os = "macos")]
+fn darwin_cpu_time_us(pid: u32) -> Option<u64> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+        false,
+        ProcessRefreshKind::nothing().with_cpu(),
+    );
+    sys.process(sysinfo::Pid::from_u32(pid))
+        .map(|p| p.accumulated_cpu_time().saturating_mul(1000))
+}
+
+/// macOS: the uid a process runs as, or 0 when sysinfo could not read it.
+#[cfg(target_os = "macos")]
+fn user_id_or_zero(p: &sysinfo::Process) -> u32 {
+    p.user_id().map(|u| **u).unwrap_or(0)
+}
+
 // Runtime toggles (read once)
 fn gpu_enabled() -> bool {
     static ON: OnceCell<bool> = OnceCell::new();
@@ -214,7 +249,11 @@ pub fn parse_cpuinfo_model_name(s: &str) -> Option<String> {
 }
 
 /// The machine's CPU model. Read once: `/proc/cpuinfo` does not change while
-/// the agent runs. None off Linux or when even that read fails.
+/// the agent runs (and on macOS the CPU brand does not either).
+///
+/// Linux: `/proc/cpuinfo` `model name`. macOS: the CPU brand sysinfo reads
+/// from `sysctl machdep.cpu.brand_string` / `hw.model`, which on Apple
+/// Silicon is the chip name ("Apple M3 Pro"). Other platforms: None.
 pub fn cpu_model() -> Option<String> {
     static MODEL: OnceCell<Option<String>> = OnceCell::new();
     MODEL
@@ -225,7 +264,23 @@ pub fn cpu_model() -> Option<String> {
                     .ok()
                     .and_then(|s| parse_cpuinfo_model_name(&s))
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                // The brand string is per-CPU and identical across cores on
+                // an Apple Silicon SoC; ask for it explicitly rather than
+                // scanning, and prefer the brand over the marketing name so
+                // the value matches what sysctl reports.
+                let mut sys = sysinfo::System::new_with_specifics(
+                    sysinfo::RefreshKind::nothing().with_cpu(sysinfo::CpuRefreshKind::nothing()),
+                );
+                sys.refresh_cpu_all();
+                sys.cpus()
+                    .first()
+                    .map(|c| c.brand().to_string())
+                    .as_deref()
+                    .and_then(crate::platform::cpu_model_from_brand)
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 None
             }
@@ -281,7 +336,14 @@ pub async fn collect_fast_metrics(state: &AppState) -> Metrics {
 
     // CPU temperature: only rescan sensors when the cached result (even a
     // cached "no sensor found") goes stale.
-    let cpu_temp_c = if !temp_enabled() {
+    //
+    // macOS never reports one: `platform::cpu_temp_reported` is false there, so
+    // the documented null is produced by this code path rather than by hoping
+    // sysinfo finds no matching sensor (its IOHID scan does match Apple Silicon
+    // "PMU tdie*" die sensors).
+    let cpu_temp_c = if !crate::platform::cpu_temp_reported(cfg!(target_os = "macos")) {
+        None
+    } else if !temp_enabled() {
         None
     } else if let Some(cached) = TEMP.get_fresh(TTL) {
         cached
@@ -407,6 +469,11 @@ pub async fn collect_fast_metrics(state: &AppState) -> Metrics {
 /// Best-effort parent-disk name for a partition device name:
 /// "nvme0n1p1" -> "nvme0n1", "mmcblk0p2" -> "mmcblk0", "sda1" -> "sda".
 /// Works with or without a "/dev/" prefix.
+///
+/// The partition/parent aggregation is the non-macOS collector's; macOS
+/// reports whole APFS volumes instead, so on that target this exists only for
+/// its unit tests.
+#[cfg(any(not(target_os = "macos"), test))]
 fn parent_disk_name(name: &str) -> &str {
     if let Some(pos) = name.rfind('p') {
         let suffix = &name[pos + 1..];
@@ -424,6 +491,8 @@ fn parent_disk_name(name: &str) -> &str {
 /// derived parent is". This gets right the cases the old name heuristic got
 /// wrong: a whole-disk filesystem on nvme0n1 (ends in a digit but IS in
 /// /sys/block) and zram1 (a whole device). Non-Linux keeps the heuristic.
+/// Compiled for the non-macOS collector and for the unit tests everywhere.
+#[cfg(any(not(target_os = "macos"), test))]
 fn is_partition_name(name: &str) -> bool {
     let bare = name.strip_prefix("/dev/").unwrap_or(name);
     #[cfg(target_os = "linux")]
@@ -439,6 +508,7 @@ fn is_partition_name(name: &str) -> bool {
 
 /// Name-based fallback for platforms without /sys/block: a p<digits> marker
 /// or a trailing non-zero digit.
+#[cfg(any(not(target_os = "macos"), test))]
 fn is_partition_heuristic(bare: &str) -> bool {
     bare.contains("p1")
         || bare.contains("p2")
@@ -458,6 +528,79 @@ pub async fn collect_disks(state: &AppState) -> Vec<DiskInfo> {
         }
     }
     let mut disks_list = state.disks.lock().await;
+
+    // macOS keeps its own path: one row per real volume, because APFS reports
+    // container capacity on every volume and the Linux partition/parent
+    // aggregation below would sum the same gigabytes once per volume.
+    #[cfg(target_os = "macos")]
+    {
+        disks_list.refresh(false); // don't drop missing disks
+        let disks = darwin_disks(&disks_list);
+        drop(disks_list);
+        let mut cache = state.cache_disks.lock().await;
+        cache.set(disks.clone());
+        return disks;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        collect_disks_linux_like(state, &mut disks_list).await
+    }
+}
+
+/// macOS volume list, deduplicated by [`crate::platform::keep_macos_volume`].
+///
+/// Temperature is `None`: `sysinfo::Components` on macOS is the SMC list and
+/// does not expose per-disk sensors, and the pilot release reports disk
+/// temperature as unavailable rather than borrowing the CPU sensor.
+#[cfg(target_os = "macos")]
+fn darwin_disks(disks_list: &sysinfo::Disks) -> Vec<DiskInfo> {
+    use crate::platform::{Volume, keep_macos_volume};
+    let mut seen: Vec<(u64, u64)> = Vec::new();
+    let mut out: Vec<DiskInfo> = Vec::new();
+    for d in disks_list.iter() {
+        let v = Volume {
+            name: d.name().to_string_lossy().into_owned(),
+            mount_point: d.mount_point().to_string_lossy().into_owned(),
+            file_system: d.file_system().to_string_lossy().into_owned(),
+            total: d.total_space(),
+            available: d.available_space(),
+        };
+        if !keep_macos_volume(&v, &mut seen) {
+            continue;
+        }
+        out.push(DiskInfo {
+            // The mount point is what Finder shows and what the client can
+            // tell apart; the APFS volume name repeats ("Macintosh HD").
+            name: if v.mount_point == "/" {
+                v.name.clone()
+            } else {
+                v.mount_point.clone()
+            },
+            total: v.total,
+            available: v.available,
+            temperature: None,
+            // Every row here is a whole volume, not a partition of one, so
+            // the client must not indent it under a parent disk.
+            is_partition: false,
+        });
+    }
+    out.sort_by(|a, b| {
+        // "/" first, then by name: the root volume is the one an operator
+        // looks at, and sorting keeps the frame stable across refreshes.
+        (a.name != "/" && a.name != "Macintosh HD")
+            .cmp(&(b.name != "/" && b.name != "Macintosh HD"))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    out
+}
+
+/// The original collector, unchanged: used on Linux and every other platform.
+#[cfg(not(target_os = "macos"))]
+async fn collect_disks_linux_like(
+    state: &AppState,
+    disks_list: &mut tokio::sync::MutexGuard<'_, sysinfo::Disks>,
+) -> Vec<DiskInfo> {
     disks_list.refresh(false); // don't drop missing disks
 
     // Collect disk temperatures from components
@@ -880,6 +1023,19 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
         let mut proc_cache = state.proc_cache.lock().await;
         proc_cache.reusable_vec.clear();
 
+        // macOS: resolve user names and accumulated CPU time per process.
+        // Linux has its own /proc path above; the other non-Linux platforms
+        // keep the historical empty/unavailable values.
+        #[cfg(target_os = "macos")]
+        let darwin_names: std::collections::HashMap<u32, String> = {
+            let users = sysinfo::Users::new_with_refreshed_list();
+            users
+                .list()
+                .iter()
+                .map(|u| (**u.id(), u.name().to_string()))
+                .collect()
+        };
+
         // Collect all processes, will sort by CPU later
         for p in sys.processes().values() {
             let pid = p.pid().as_u32();
@@ -901,14 +1057,27 @@ pub async fn collect_processes_all(state: &AppState) -> ProcessesPayload {
             let raw = p.cpu_usage();
             let total_cpu = (raw / cpu_count.max(1.0)).clamp(0.0, 100.0);
 
+            #[cfg(target_os = "macos")]
+            let (user, start_time_ms) = {
+                let uid = p.user_id().map(|u| **u);
+                let user = uid
+                    .and_then(|u| darwin_names.get(&u).cloned())
+                    .unwrap_or_else(|| uid.map(|u| u.to_string()).unwrap_or_default());
+                // sysinfo's macOS start_time is already seconds since the
+                // epoch, which is the unit the wire field wants (milliseconds).
+                (user, p.start_time().saturating_mul(1000))
+            };
+            #[cfg(not(target_os = "macos"))]
+            let (user, start_time_ms) = (String::new(), 0u64);
+
             proc_cache.reusable_vec.push(ProcessInfo {
                 pid,
                 name,
                 cpu_usage: total_cpu,
                 mem_bytes: p.memory(),
-                user: String::new(), // ebbtop: Linux-only user lookup
+                user,
                 state: p.status().to_string(),
-                start_time_ms: 0, // ebbtop: Linux-only
+                start_time_ms,
                 cgroup: String::new(), // ebbtop: Linux-only
             });
         }
@@ -1350,6 +1519,16 @@ pub async fn collect_process_metrics(
     let parent_pid = process.parent().map(|p| p.as_u32());
     let start_time = process.start_time();
 
+    // macOS: uid/gid come from the same sysinfo fields as the name, and there
+    // is no /proc to read them from after the system lock is dropped — so take
+    // them here, while `process` is still borrowed. Other platforms keep the
+    // /proc path below.
+    #[cfg(target_os = "macos")]
+    let (darwin_uid, darwin_gid) = (
+        user_id_or_zero(process),
+        process.group_id().map(|g| *g).unwrap_or(0),
+    );
+
     // Read UID and GID directly from /proc/{pid}/status for accuracy.
     // Uses the shared single-read helper (also extracts memory, threads,
     // state — we discard those here since sysinfo already provided them).
@@ -1360,6 +1539,11 @@ pub async fn collect_process_metrics(
 
     #[cfg(not(target_os = "linux"))]
     let (user_id, group_id) = (0, 0);
+    // macOS replaces both pairs below with the ids sysinfo read (there is no
+    // /proc to parse), so the placeholders above are not used there and must
+    // not warn as unused.
+    #[cfg(target_os = "macos")]
+    let _ = (user_id, group_id, start_time);
 
     // Read I/O stats directly from /proc/{pid}/io
     // Use rchar/wchar to capture ALL I/O including cached reads (like htop/btop do)
@@ -1410,8 +1594,20 @@ pub async fn collect_process_metrics(
     // Collect thread information (Linux only)
     let threads = collect_thread_info(pid);
 
-    // One read of /proc/{pid}/stat covers both user + system CPU times.
+    // One read of /proc/{pid}/stat covers both user + system CPU times; on
+    // macOS the single accumulated total is reported in the user slot (see
+    // `darwin_cpu_time_us`), and other platforms report 0/0 as before.
+    #[cfg(target_os = "linux")]
     let (cpu_time_user, cpu_time_system) = get_cpu_times_us(pid);
+    #[cfg(target_os = "macos")]
+    let (cpu_time_user, cpu_time_system) = (darwin_cpu_time_us(pid).unwrap_or(0), 0u64);
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let (cpu_time_user, cpu_time_system) = (0u64, 0u64);
+
+    // macOS: sysinfo's epoch-seconds start_time becomes the wire's
+    // milliseconds, and the ids were captured above while the lock was held.
+    #[cfg(target_os = "macos")]
+    let (user_id, group_id, start_time) = (darwin_uid, darwin_gid, start_time.saturating_mul(1000));
 
     // Now construct the detailed info without holding the lock
     let detailed_info = DetailedProcessInfo {
@@ -1448,6 +1644,7 @@ pub async fn collect_process_metrics(
 /// Epoch microseconds -> RFC 3339 UTC for display. The old code
 /// Debug-formatted a SystemTime and string-replaced it into a raw epoch
 /// string that was neither ISO 8601 nor what the field documented.
+#[cfg(any(not(target_os = "macos"), test))]
 fn format_journal_timestamp(timestamp_us: u64) -> String {
     time::OffsetDateTime::from_unix_timestamp_nanos(timestamp_us as i128 * 1000)
         .ok()
@@ -1463,6 +1660,31 @@ fn format_journal_timestamp(timestamp_us: u64) -> String {
 /// Async via tokio::process — journalctl can take hundreds of ms on slow
 /// storage, and the old std::process call blocked one of the runtime's two
 /// worker threads for the duration.
+///
+/// macOS has no journald. Rather than spawn a `journalctl` that cannot exist
+/// and report its exit status as a failure, the macOS build answers with an
+/// explicit unsupported result: an empty entry list plus a notice that says
+/// why. The client shows that notice in the log pane instead of an error.
+#[cfg(target_os = "macos")]
+pub async fn collect_journal_entries(_pid: u32) -> Result<JournalResponse, String> {
+    Ok(JournalResponse {
+        entries: Vec::new(),
+        total_count: 0,
+        truncated: false,
+        notice: Some(
+            "process logs are not available on this host: macOS has no journald, and log \
+             streaming is a Linux-only feature in this release (use `log show` or Console on the \
+             Mac itself)"
+                .to_string(),
+        ),
+        cached_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
 pub async fn collect_journal_entries(pid: u32) -> Result<JournalResponse, String> {
     let output = tokio::process::Command::new("journalctl")
         .args([

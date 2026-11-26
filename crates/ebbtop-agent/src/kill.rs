@@ -88,6 +88,9 @@ pub fn decide_kill(req: &KillRequest, t: &ProcTarget, self_pid: u32, self_uid: u
     Ok(())
 }
 
+/// Signal name → number for the two signals the grammar admits. Linux-only:
+/// macOS refuses every kill request before this point (`ERR_PLATFORM`).
+#[cfg(target_os = "linux")]
 fn sig_num(signal: &str) -> i32 {
     match signal {
         "TERM" => 15,

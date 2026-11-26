@@ -1,0 +1,95 @@
+name: macos-agent
+
+# Native Apple Silicon build and package for the EbbTop agent.
+#
+# Why this job exists: the agent's macOS code path cannot be *proven* on Linux.
+# A cross-target `cargo check` proves it type-checks; only a real arm64 Mac can
+# compile it, run its tests, start the binary, load a LaunchAgent and answer an
+# authenticated probe. This workflow is where that happens, on the exact commit
+# the release is cut from.
+#
+# It is deliberately NOT wired into the release automatically: the release
+# assembly (deploy/release/assemble.sh) downloads this run's artifact and
+# refuses anything whose BUILD stamp names a different commit or version, so a
+# release can only contain a Mac archive that a real Mac built and tested.
+#
+# Runner: a self-hosted Apple Silicon Mac with the label set below. GitHub's
+# hosted `macos-14`/`macos-15` runners are arm64 and work too — swap
+# `runs-on` for `macos-14` if no self-hosted Mac is registered. The choice is
+# left explicit because the credentials, keychain and launchd behaviour this
+# job exercises are more predictable on a Mac we control.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: [self-hosted, macOS, ARM64, ebbtop-mac]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Host identity
+        run: |
+          uname -a
+          sw_vers
+          echo "arch: $(uname -m)"
+          # A Rosetta runner would build an x86_64 product and every metric
+          # would be measured under translation. Refuse instead.
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "::error::this job must run on native arm64, not $(uname -m)"
+            exit 1
+          fi
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+          rustup target list --installed | grep -qx aarch64-apple-darwin \
+            || rustup target add aarch64-apple-darwin
+
+      - name: Unit and integration tests (agent, core)
+        run: cargo test --locked --target aarch64-apple-darwin -p ebbtop-agent -p ebbtop-core --no-default-features
+
+      - name: Release build (agent, no GPU)
+        run: cargo build --release --locked --target aarch64-apple-darwin -p ebbtop-agent --no-default-features
+
+      - name: Package the Apple Silicon archive
+        run: bash deploy/macos/package-agent.sh
+
+      - name: Installer and bootstrap fixtures (macOS path, Bash 3.2)
+        run: |
+          # The published bootstrap runs under macOS's stock Bash 3.2, which is
+          # this runner's /bin/bash. The fixtures drive both platforms' code
+          # paths; the Bash 3.2 cases run the real stock interpreter here.
+          export EBBTOP_BASH32=/bin/bash
+          bash deploy/bootstrap/test-install-portable.sh
+          bash deploy/macos/test-install-macos.sh
+
+      - name: Live foreground agent probe (this runner, loopback)
+        run: bash deploy/macos/test-agent-live.sh
+
+      - name: Upload the archive and its evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ebbtop-agent-macos-arm64-${{ github.ref_name }}-${{ github.run_number }}
+          path: |
+            dist/ebbtop-agent-macos-arm64.tar.gz
+            dist/ebbtop-agent-macos-arm64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload the test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ebbtop-agent-macos-evidence-${{ github.ref_name }}-${{ github.run_number }}
+          path: |
+            dist/macos-evidence/**
+          if-no-files-found: warn
+          retention-days: 30

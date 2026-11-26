@@ -1,29 +1,43 @@
 #!/usr/bin/env bash
-# ebbtop-install.sh: one command installs the prebuilt EbbTop Linux agent.
+# ebbtop-install.sh: one command installs the prebuilt EbbTop agent.
 #
 #   curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
 #   curl -fsSL .../ebbtop-install.sh | bash -s -- --version v0.2.9
 #
+# The same published script serves both platforms. It selects the package from
+# `uname -s` and `uname -m` BEFORE it resolves a release, so an unsupported
+# host is refused with one line and no network access:
+#
+#   Linux  x86_64       ebbtop-agent-linux-x86_64.tar.gz    systemd user unit
+#   Darwin arm64        ebbtop-agent-macos-arm64.tar.gz     per-user LaunchAgent
+#
+# Anything else (an Intel Mac, Windows, aarch64 Linux, any other uname) is
+# refused: this release ships and tests no package for it, and inventing one
+# would be a false claim about what was verified.
+#
 # This is a thin fetch-and-verify wrapper. It installs nothing itself: the
-# install, the unit, the token, linger guidance and the self-verification all
-# belong to the packaged deploy/install-agent.sh --prebuilt, which ships inside
-# the release archive byte-identical to this repository. The wrapper only
-# proves that the bytes it hands over are the bytes the release published.
+# install, the service definition, the token, the login/linger guidance and
+# the self-verification all belong to the packaged install-agent.sh
+# --prebuilt, which ships inside the release archive byte-identical to this
+# repository. The wrapper only proves that the bytes it hands over are the
+# bytes the release published.
 #
 # What it does, in this order:
-#   1. preflight: x86_64, glibc >= 2.39 and a systemd user manager - one clear
-#      refusal line each, before any network access
+#   1. preflight, one clear refusal line each, before any network access:
+#        Linux: x86_64, glibc >= 2.39, a systemd user manager
+#        macOS: Darwin arm64 (not a Rosetta shell), a logged-in launchd domain
 #   2. resolve the release: latest via the GitHub API, --version <tag> to pin,
 #      or --archive <path> for a local tarball with no network at all
-#   3. download ebbtop-agent-linux-x86_64.tar.gz and refuse it unless its
-#      sha256 equals the digest the API reports for that asset
-#   4. extract it and run `sha256sum --strict -c SHA256SUMS` on the manifest
-#      inside it (member names are checked first so nothing is written outside
-#      the extraction directory)
+#   3. download the selected archive and refuse it unless its sha256 equals
+#      the digest the API reports for that asset
+#   4. extract it and verify the manifest inside it -- `sha256sum --strict -c
+#      SHA256SUMS` on Linux, `shasum -a 256 --strict -c SHA256SUMS` on macOS --
+#      after checking every member name so nothing is written outside the
+#      extraction directory
 #   5. choose the bind address: an existing agent.env wins; otherwise
 #      EBBTOP_ADDR, otherwise a prompt defaulting to this host's tailnet/LAN
 #      address. It is passed to the packaged installer, whose own validation
-#      refuses loopback and wildcard addresses
+#      is what decides whether that address is acceptable
 #   6. run the packaged installer from the extracted directory
 #   7. verify what landed and print the pairing facts: ws://<bind>:<port>/ws
 #      and the token file path - never the token value
@@ -33,13 +47,22 @@
 #   --archive <path>  install from a local tarball: no API, no download
 #   --yes, -y         take the default answer, no prompt (scripted installs)
 #   --dry-run, -n     print the plan, change nothing
+#   --platform <p>    force linux or macos (test fixtures only; otherwise the
+#                     platform comes from uname)
 #   --help, -h        this text
 #
 # Environment:
 #   EBBTOP_ADDR   bind address for a fresh install, instead of prompting
-#   EBBTOP_PORT   NOT used: the packaged unit fixes the port and this script
-#                 reports it, so a stray value can never misreport the listener
+#   EBBTOP_PORT   NOT used: the packaged service definition fixes the port and
+#                 this script reports it, so a stray value can never misreport
+#                 the listener
 #   WZ_YES/WZ_DRY/WZ_NO_TTY  accepted from the wizard helpers' convention
+#
+# Portability: this file must run under macOS's stock Bash 3.2 as well as Linux
+# Bash 5, so it avoids `mapfile`, associative arrays, `${var,,}`, and any
+# `${array[@]}` that could be empty under `set -u` (an unbound-variable error
+# in 3.2). deploy/bootstrap/test-install-portable.sh proves that against a
+# real Bash 3.2 binary.
 #
 # Presentation follows deploy/wizard/common.sh (show the state, print the plan,
 # confirm once, act, verify, report) but is inline: this file has to run
@@ -50,21 +73,24 @@ set -euo pipefail
 PROG=ebbtop-install.sh
 
 REPO_SLUG='Ebbwater/ebbtop'
-ASSET='ebbtop-agent-linux-x86_64.tar.gz'
 API_BASE="https://api.github.com/repos/$REPO_SLUG/releases"
 MIN_GLIBC='2.39'
 DEFAULT_PORT=45976
-PKG_MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh)
 
-# The packaged installer's own layout. Nothing here is ever written by this
-# wrapper; it is only read to show state and to verify the result.
-SVC="$HOME/services/ebbtop-agent"
-ENVFILE="$SVC/agent.env"
-TOKENFILE="$SVC/ebbtop.token"
-BINFILE="$SVC/bin/ebbtop-agent"
-UNITFILE="$HOME/.config/systemd/user/ebbtop-agent.service"
-
-RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# Platform facts, filled in by detect_platform. This is the only place in the
+# file that names a platform difference.
+PLATFORM=''
+ASSET=''
+PKG_MEMBERS=''
+SVC=''
+ENVFILE=''
+TOKENFILE=''
+BINFILE=''
+UNITFILE=''
+SERVICE_KIND=''
+SERVICE_KIND_LABEL=''
+RUNTIME_DIR=''
+PLATFORM_FORCE=''
 
 WZ_YES="${WZ_YES:-0}"
 WZ_DRY="${WZ_DRY:-0}"
@@ -136,9 +162,14 @@ wz_confirm() {
 
 usage() {
   cat <<'USAGE'
-ebbtop-install.sh: install the prebuilt EbbTop Linux agent on this host.
+ebbtop-install.sh: install the prebuilt EbbTop agent on this host.
 
   curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
+
+The package is selected from uname -s and uname -m before any download:
+
+  Linux x86_64         ebbtop-agent-linux-x86_64.tar.gz    systemd user service
+  macOS Apple Silicon  ebbtop-agent-macos-arm64.tar.gz     per-user LaunchAgent
 
   --version <tag>   pin a published release tag, exactly as tagged (v0.2.9)
   --archive <path>  install from a local tarball: no API, no download
@@ -147,10 +178,10 @@ ebbtop-install.sh: install the prebuilt EbbTop Linux agent on this host.
   --help, -h        this text
 
 Environment: EBBTOP_ADDR sets the bind address for a fresh install; EBBTOP_PORT
-is not used, because the packaged unit fixes the port and this script reports
-the port it actually finds in the unit.
+is not used, because the packaged service definition fixes the port and this
+script reports the port it actually finds.
 
-The install itself is the packaged deploy/install-agent.sh --prebuilt from the
+The install itself is the packaged install-agent.sh --prebuilt from the
 release archive. No token is ever printed.
 USAGE
 }
@@ -182,6 +213,74 @@ user_manager_ok() {
   command -v systemctl >/dev/null 2>&1 || return 1
   [[ -n "$RUNTIME_DIR" && -d "$RUNTIME_DIR/systemd" ]] || return 1
   [[ -e "$RUNTIME_DIR/systemd/private" || -e "$RUNTIME_DIR/bus" ]]
+}
+
+# A per-user LaunchAgent needs a logged-in launchd user domain. On a Mac that
+# is `launchctl print gui/<uid>`; it fails over a bare SSH session with no
+# login, and saying so is the honest answer: this release installs into a
+# logged-in session, not a pre-login context.
+launchd_user_domain_ok() {
+  command -v launchctl >/dev/null 2>&1 || return 1
+  launchctl print "gui/$(id -u)" >/dev/null 2>&1
+}
+
+# --- platform ---------------------------------------------------------------
+# `uname -m` in a Rosetta shell reports x86_64 on an Apple Silicon Mac, so the
+# Mac path checks the translation flag before refusing: a Rosetta terminal is
+# a mistake worth naming precisely, not a silent downgrade to a package this
+# release does not build.
+detect_platform() {
+  local os arch translated=0
+  if [[ -n "$PLATFORM_FORCE" ]]; then
+    case "$PLATFORM_FORCE" in
+      linux|macos) PLATFORM="$PLATFORM_FORCE" ;;
+      *) refuse "--platform '$PLATFORM_FORCE' is not a platform: use linux or macos" ;;
+    esac
+  fi
+
+  if [[ -z "$PLATFORM" ]]; then
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    case "$os" in
+      Linux)  PLATFORM=linux ;;
+      Darwin) PLATFORM=macos ;;
+      *)      refuse "unsupported operating system '$os': this installer supports Linux (x86_64) and macOS (Apple Silicon). On Windows, download EbbTop-Windows-x64.zip from the release page instead." ;;
+    esac
+  fi
+
+  case "$PLATFORM" in
+    linux)
+      ASSET='ebbtop-agent-linux-x86_64.tar.gz'
+      PKG_MEMBERS='BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh'
+      SVC="$HOME/services/ebbtop-agent"
+      ENVFILE="$SVC/agent.env"
+      TOKENFILE="$SVC/ebbtop.token"
+      BINFILE="$SVC/bin/ebbtop-agent"
+      UNITFILE="$HOME/.config/systemd/user/ebbtop-agent.service"
+      SERVICE_KIND=systemd
+      SERVICE_KIND_LABEL=unit
+      RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+      ;;
+    macos)
+      ASSET='ebbtop-agent-macos-arm64.tar.gz'
+      PKG_MEMBERS='BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh'
+      SVC="${EBBTOP_STATE_DIR:-$HOME/Library/Application Support/ebbtop-agent}"
+      ENVFILE="$SVC/agent.env"
+      TOKENFILE="$SVC/ebbtop.token"
+      BINFILE="$SVC/bin/ebbtop-agent"
+      UNITFILE="$HOME/Library/LaunchAgents/com.ebbwater.ebbtop-agent.plist"
+      SERVICE_KIND=launchd
+      SERVICE_KIND_LABEL=plist
+      RUNTIME_DIR=''
+      ;;
+  esac
+
+  arch="$(uname -m 2>/dev/null || echo unknown)"
+  if [[ "$PLATFORM" == macos && "$arch" == x86_64 ]]; then
+    translated="$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)"
+    if [[ "$translated" == 1 ]]; then
+      refuse "this shell is running under Rosetta (x86_64 on Apple Silicon): open a native Terminal (or run 'arch -arm64 bash') and re-run, so the arm64 agent is installed and its metrics are native"
+    fi
+  fi
 }
 
 # --- JSON, without jq ------------------------------------------------------
@@ -282,6 +381,42 @@ json_string() {
   '
 }
 
+# --- platform-native tools --------------------------------------------------
+# Linux ships sha256sum; macOS ships shasum. One helper per use so nothing
+# below has to know which tool exists. The two produce identical digests, and
+# both support --strict so a malformed manifest line is a failure rather than
+# a skipped line.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# The manifest check, in the wording each platform's tool uses, and reported
+# on the line the Linux harness has always asserted.
+manifest_verify() {
+  local dir="$1" tool n
+  if command -v sha256sum >/dev/null 2>&1; then
+    tool='sha256sum --strict -c SHA256SUMS'
+    ( cd "$dir" && sha256sum --strict -c SHA256SUMS ) || return 1
+  else
+    tool='shasum -a 256 --strict -c SHA256SUMS'
+    ( cd "$dir" && shasum -a 256 --strict -c SHA256SUMS ) || return 1
+  fi
+  n="$(grep -c . "$dir/SHA256SUMS" 2>/dev/null || echo 0)"
+  printf '%s: %s files verified\n' "$tool" "$n"
+}
+
+file_size() {
+  if stat -c %s "$1" >/dev/null 2>&1; then stat -c %s "$1"; else stat -f %z "$1"; fi
+}
+
+file_mode() {
+  if stat -c %a "$1" >/dev/null 2>&1; then stat -c %a "$1"; else stat -f %Lp "$1"; fi
+}
+
 # --- state (read-only) ------------------------------------------------------
 state_bind() {
   local b=''
@@ -304,7 +439,7 @@ show_state() {
   wz_step "state found on this host"
   v="$(installed_version)"
   if [[ -n "$v" ]]; then wz_kv agent "$v installed at $BINFILE"; else wz_kv agent "not installed"; fi
-  if [[ -f "$UNITFILE" ]]; then wz_kv unit "$UNITFILE"; else wz_kv unit "not installed"; fi
+  if [[ -f "$UNITFILE" ]]; then wz_kv "$SERVICE_KIND_LABEL" "$UNITFILE"; else wz_kv "$SERVICE_KIND_LABEL" "not installed"; fi
   if [[ -f "$ENVFILE" ]]; then
     bind="$(state_bind)"
     if [[ -n "$bind" ]]; then
@@ -316,7 +451,7 @@ show_state() {
     wz_kv env "absent (a fresh install writes it with the bind address)"
   fi
   if [[ -f "$TOKENFILE" ]]; then
-    tok="$(stat -c %a "$TOKENFILE" 2>/dev/null || echo '?')"
+    tok="$(file_mode "$TOKENFILE")"
     wz_kv token "$TOKENFILE (mode $tok; not read)"
   else
     wz_kv token "absent (the installer generates one)"
@@ -324,9 +459,8 @@ show_state() {
 }
 
 # --- preflight --------------------------------------------------------------
-preflight() {
+preflight_linux() {
   local arch glib
-  wz_step "preflight"
   arch="$(uname -m)"
   if [[ "$arch" != x86_64 ]]; then
     refuse "this package is x86_64 only: uname -m reports '$arch'"
@@ -348,6 +482,31 @@ preflight() {
   wz_ok "systemd user manager"
 }
 
+preflight_macos() {
+  local arch ver
+  arch="$(uname -m)"
+  if [[ "$arch" != arm64 ]]; then
+    refuse "this package is Apple Silicon only: uname -m reports '$arch' (Intel Macs are not supported in this release)"
+  fi
+  wz_ok "Apple Silicon (arm64)"
+
+  ver="$(sw_vers -productVersion 2>/dev/null || echo unknown)"
+  wz_ok "macOS $ver"
+
+  if ! launchd_user_domain_ok; then
+    refuse "no launchd user domain: 'launchctl print gui/$(id -u)' failed, so a per-user LaunchAgent cannot be loaded (log in at the console and re-run; this release does not install a pre-login launch daemon)"
+  fi
+  wz_ok "launchd user domain (gui/$(id -u))"
+}
+
+preflight() {
+  wz_step "preflight"
+  case "$PLATFORM" in
+    linux) preflight_linux ;;
+    macos) preflight_macos ;;
+  esac
+}
+
 # --- release resolution -----------------------------------------------------
 # Sets: TAG DOWNLOAD_URL EXPECT_SHA256 ASSET_SIZE ARCHIVE SOURCE_KIND
 resolve_release() {
@@ -360,7 +519,7 @@ resolve_release() {
     TAG=''
     DOWNLOAD_URL=''
     EXPECT_SHA256=''
-    ASSET_SIZE="$(stat -c %s "$ARCHIVE_PATH" 2>/dev/null || echo 0)"
+    ASSET_SIZE="$(file_size "$ARCHIVE_PATH" 2>/dev/null || echo 0)"
     return 0
   fi
 
@@ -387,8 +546,12 @@ resolve_release() {
   digest="$(printf '%s\n' "$json" | json_asset_field "$ASSET" digest)"
   size="$(printf '%s\n' "$json" | json_asset_field "$ASSET" size)"
 
-  [[ -n "$DOWNLOAD_URL" ]] \
-    || refuse "release $tag has no $ASSET asset: the Linux package is not attached to that release"
+  if [[ -z "$DOWNLOAD_URL" ]]; then
+    if [[ "$PLATFORM" == macos ]]; then
+      refuse "release $tag has no $ASSET asset: that release predates the Apple Silicon agent, so there is nothing to install on this Mac. Pin a release that includes it with --version <tag>, or build one from a checkout with deploy/macos/package-agent.sh"
+    fi
+    refuse "release $tag has no $ASSET asset: the Linux package is not attached to that release"
+  fi
   case "$DOWNLOAD_URL" in
     https://github.com/"$REPO_SLUG"/releases/download/*) ;;
     *) refuse "release $tag points $ASSET at '$DOWNLOAD_URL', which is not a https://github.com/$REPO_SLUG/releases/download/ URL; refusing" ;;
@@ -414,7 +577,7 @@ human_size() {
 }
 
 # --- bind address -----------------------------------------------------------
-detect_bind() {
+detect_bind_linux() {
   local b=''
   if command -v tailscale >/dev/null 2>&1; then
     b="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
@@ -430,14 +593,44 @@ detect_bind() {
   printf '%s' "$b"
 }
 
+# macOS has no `ip`(8). The tailnet address comes from the tailscale CLI and
+# the LAN address from ipconfig: en0 is Wi-Fi on every current Apple Silicon
+# laptop and en1+ are adapters/docks. No candidate is invented -- an empty
+# answer leaves it to the prompt or the refusal to say what to set.
+detect_bind_macos() {
+  local b='' i
+  if command -v tailscale >/dev/null 2>&1; then
+    b="$(tailscale ip -4 2>/dev/null | head -n 1 || true)"
+  fi
+  if [[ -z "$b" ]] && command -v ipconfig >/dev/null 2>&1; then
+    for i in en0 en1 en2; do
+      b="$(ipconfig getifaddr "$i" 2>/dev/null || true)"
+      [[ -n "$b" ]] && break
+    done
+  fi
+  printf '%s' "$b"
+}
+
+detect_bind() {
+  case "$PLATFORM" in
+    linux) detect_bind_linux ;;
+    macos) detect_bind_macos ;;
+  esac
+}
+
 # Only a fresh install needs an address; an existing agent.env is what the
 # packaged installer reads, so the prompt would be a lie on an upgrade. The
 # bind shown here is only for display: the packaged installer's own check is
 # what decides whether that file is usable, and its refusal is the one the
 # operator needs to read.
 choose_bind() {
-  local answer
+  local answer hint
   wz_step "bind address"
+  if [[ "$PLATFORM" == macos ]]; then
+    hint="this Mac's Tailscale/LAN IP, or 127.0.0.1 for a local-only install"
+  else
+    hint="this host's tailnet/LAN IP"
+  fi
   if [[ -f "$ENVFILE" ]]; then
     BIND="$(state_bind)"
     if [[ -n "${EBBTOP_ADDR:-}" && "${EBBTOP_ADDR}" != "$BIND" ]]; then
@@ -459,16 +652,16 @@ choose_bind() {
   fi
   answer="$(detect_bind)"
   if ((WZ_YES || WZ_DRY)); then
-    [[ -n "$answer" ]] || refuse "no tailnet/LAN address detected: set EBBTOP_ADDR=<this host's tailnet/LAN IP> and re-run"
+    [[ -n "$answer" ]] || refuse "no tailnet/LAN address detected: set EBBTOP_ADDR=<${hint}> and re-run"
     BIND="$answer"
     return 0
   fi
   wz__can_prompt \
-    || refuse "no terminal to prompt on: re-run with --yes, or set EBBTOP_ADDR=<this host's tailnet/LAN IP>${answer:+ (detected $answer)}"
-  printf '   %s [%s]: ' "address the agent binds (this host's tailnet/LAN IP)" "${answer:-none detected}"
-  wz__input || refuse "no answer for the bind address: set EBBTOP_ADDR=<this host's tailnet/LAN IP> and re-run"
+    || refuse "no terminal to prompt on: re-run with --yes, or set EBBTOP_ADDR=<${hint}>${answer:+ (detected $answer)}"
+  printf '   %s [%s]: ' "address the agent binds ($hint)" "${answer:-none detected}"
+  wz__input || refuse "no answer for the bind address: set EBBTOP_ADDR=<${hint}> and re-run"
   BIND="${REPLY:-$answer}"
-  [[ -n "$BIND" ]] || refuse "the bind address is empty: set EBBTOP_ADDR=<this host's tailnet/LAN IP> and re-run"
+  [[ -n "$BIND" ]] || refuse "the bind address is empty: set EBBTOP_ADDR=<${hint}> and re-run"
 }
 
 # --- plan / confirm ---------------------------------------------------------
@@ -477,7 +670,7 @@ print_plan() {
   if [[ "$SOURCE_KIND" == archive ]]; then
     wz_kv release "local archive (offline: no API, no download)"
     wz_kv asset "$ARCHIVE"
-    wz_kv sha256 "$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+    wz_kv sha256 "$(sha256_of "$ARCHIVE" | cut -d' ' -f1)"
     wz_note "no publisher digest is available offline; the manifest inside the archive is verified"
   else
     wz_kv release "$TAG${PIN:+ (pinned)}"
@@ -490,36 +683,52 @@ print_plan() {
   else
     wz_kv bind "${BIND:-unknown} (kept from the existing agent.env; the packaged installer validates it)"
   fi
-  wz_kv port "$DEFAULT_PORT (the packaged unit fixes the port; re-read before pairing)"
-  wz_kv install "$SVC/bin/ebbtop-agent"
-  wz_kv unit "$UNITFILE"
-  wz_kv action "enable and start ebbtop-agent.service, then verify it"
-  wz_note "the install itself is the packaged deploy/install-agent.sh --prebuilt from the archive"
+  if [[ "$PLATFORM" == macos ]]; then
+    wz_kv port "$DEFAULT_PORT (the packaged LaunchAgent fixes the port; re-read before pairing)"
+    wz_kv install "$SVC/bin/ebbtop-agent"
+    wz_kv plist "$UNITFILE"
+    wz_kv action "load the per-user LaunchAgent, then verify it with an authenticated probe"
+  else
+    wz_kv port "$DEFAULT_PORT (the packaged unit fixes the port; re-read before pairing)"
+    wz_kv install "$SVC/bin/ebbtop-agent"
+    wz_kv unit "$UNITFILE"
+    wz_kv action "enable and start ebbtop-agent.service, then verify it"
+  fi
+  wz_note "the install itself is the packaged install-agent.sh --prebuilt from the archive"
 }
 
 # --- act --------------------------------------------------------------------
 # Member names are checked before extraction: a traversing or unexpected member
 # must never be written, and the packaged installer's own member-set check runs
 # after extraction where it is already too late for a path escape.
+#
+# Written without arrays: macOS's Bash 3.2 makes an empty `${a[@]}` under
+# `set -u` an unbound-variable error, and this line has to run there.
 check_members() {
-  local archive="$1" m name
-  local -a members=() expected=()
-  mapfile -t members < <(tar -tzf "$archive" 2>/dev/null || true)
-  (( ${#members[@]} > 0 )) || refuse "cannot list the archive $archive: it is not a readable gzip tarball"
-  for m in "${members[@]}"; do
-    case "$m" in
-      */../*|../*|/*|*/) refuse "archive member '$m' is a path, not a bare packaged file name: refusing before extraction" ;;
+  local archive="$1" listing member name expected found found_list expected_list
+  listing="$(tar -tzf "$archive" 2>/dev/null || true)"
+  [[ -n "$listing" ]] || refuse "cannot list the archive $archive: it is not a readable gzip tarball"
+  found_list=''
+  while IFS= read -r member; do
+    [[ -z "$member" ]] && continue
+    case "$member" in
+      */../*|../*|/*|*/) refuse "archive member '$member' is a path, not a bare packaged file name: refusing before extraction" ;;
     esac
-    name="${m#./}"
-    case "$name" in
-      BUILD|SHA256SUMS|ebbtop-agent|ebbtop-agent.service|install-agent.sh) ;;
-      *) refuse "archive carries an unexpected member '$m': expected exactly ${PKG_MEMBERS[*]}" ;;
-    esac
-  done
-  mapfile -t expected < <(printf '%s\n' "${PKG_MEMBERS[@]}" | LC_ALL=C sort)
-  mapfile -t members < <(printf '%s\n' "${members[@]}" | sed 's|^\./||' | LC_ALL=C sort)
-  [[ "${members[*]}" == "${expected[*]}" ]] \
-    || refuse "archive member set mismatch: found ${members[*]:-none}; expected ${PKG_MEMBERS[*]}"
+    name="${member#./}"
+    found=0
+    for expected in $PKG_MEMBERS; do
+      [[ "$name" == "$expected" ]] && found=1
+    done
+    (( found )) || refuse "archive carries an unexpected member '$member': expected exactly $PKG_MEMBERS"
+    found_list="${found_list}${name}
+"
+  done <<MEMBERS
+$listing
+MEMBERS
+  found_list="$(printf '%s' "$found_list" | LC_ALL=C sort)"
+  expected_list="$(printf '%s\n' $PKG_MEMBERS | LC_ALL=C sort)"
+  [[ "$found_list" == "$expected_list" ]] \
+    || refuse "archive member set mismatch: found $(printf '%s' "$found_list" | tr '\n' ' '); expected $PKG_MEMBERS"
 }
 
 fetch_and_verify() {
@@ -533,7 +742,7 @@ fetch_and_verify() {
     wz_info "GET $DOWNLOAD_URL"
     curl -fSL --proto '=https' -o "$ARCHIVE" "$DOWNLOAD_URL" \
       || refuse "download failed: $DOWNLOAD_URL"
-    got="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+    got="$(sha256_of "$ARCHIVE")"
     if [[ "$got" != "$EXPECT_SHA256" ]]; then
       refuse "sha256 mismatch for $ASSET: the release reports $EXPECT_SHA256, the downloaded bytes are $got - refusing, nothing was installed and no unit or token was written"
     fi
@@ -543,57 +752,63 @@ fetch_and_verify() {
   check_members "$ARCHIVE"
   mkdir -p "$PKG"
   tar -xzf "$ARCHIVE" -C "$PKG" || refuse "cannot extract $ARCHIVE"
-  if ! ( cd "$PKG" && sha256sum --strict -c SHA256SUMS ) > "$WORK/manifest.log" 2>&1; then
+  if ! manifest_verify "$PKG" > "$WORK/manifest.log" 2>&1; then
     local detail
-    detail="$(grep -m1 -E 'FAILED|No such|WARNING' "$WORK/manifest.log" | tr -s ' ' || true)"
-    refuse "the archive's own SHA256SUMS did not verify: ${detail:-sha256sum reported no detail}"
+    detail="$(grep -m1 -E 'FAILED|No such|WARNING|FAILED open' "$WORK/manifest.log" | tr -s ' ' || true)"
+    refuse "the archive's own SHA256SUMS did not verify: ${detail:-the checksum tool reported no detail}"
   fi
-  wz_ok "sha256sum --strict -c SHA256SUMS: $(grep -c . "$WORK/manifest.log") files verified"
+  grep -q 'files verified' "$WORK/manifest.log" \
+    && wz_ok "$(tail -n 1 "$WORK/manifest.log")"
 
   # The packaged BUILD states the real ABI floor; the earlier preflight used
   # the floor this script ships with. A package that needs more than that is
-  # refused here, before the packaged installer touches anything.
+  # refused here, before the packaged installer touches anything. macOS has no
+  # glibc, so its BUILD carries no glibc_floor and only version/target are
+  # reported.
   local floor host
   floor="$(sed -n 's/^glibc_floor=//p' "$PKG/BUILD" | head -n 1)"
-  host="$(host_glibc)"
-  if [[ -n "$floor" ]] && ! version_ge "$host" "$floor"; then
-    refuse "the package needs glibc $floor (BUILD glibc_floor) but this host has glibc ${host:-unknown}"
-  fi
   if [[ -n "$floor" ]]; then
+    host="$(host_glibc)"
+    if ! version_ge "$host" "$floor"; then
+      refuse "the package needs glibc $floor (BUILD glibc_floor) but this host has glibc ${host:-unknown}"
+    fi
     wz_ok "package BUILD: glibc_floor=$floor, version=$(sed -n 's/^version=//p' "$PKG/BUILD" | head -n 1)"
+  else
+    wz_ok "package BUILD: version=$(sed -n 's/^version=//p' "$PKG/BUILD" | head -n 1), target=$(sed -n 's/^target=//p' "$PKG/BUILD" | head -n 1)"
   fi
 }
 
 run_packaged_installer() {
   local rc=0
-  local -a env_args=()
-  # EBBTOP_PORT is dropped so the packaged installer's own port checks and its
-  # "listen:" line describe the port the unit starts, not a stray env value.
-  if [[ "$FRESH" == 1 ]]; then
-    env_args=("EBBTOP_ADDR=$BIND")
-  fi
   wz_step "install"
   if [[ "$FRESH" == 1 ]]; then
     wz_info "EBBTOP_ADDR=$BIND bash install-agent.sh --prebuilt"
   else
     wz_info "bash install-agent.sh --prebuilt (existing agent.env kept)"
   fi
-  ( cd "$PKG" && env -u EBBTOP_PORT -u EBBTOP_ADDR "${env_args[@]}" \
-      bash ./install-agent.sh --prebuilt ) 2>&1 | tee "$WORK/install.log" || rc=$?
+  # EBBTOP_PORT is dropped so the packaged installer's own port checks and its
+  # "listen:" line describe the port the service starts, not a stray env value.
+  # The fresh-install address is passed the same way on both platforms; the
+  # brands differ only in how the variable reaches the child.
+  if [[ "$FRESH" == 1 ]]; then
+    ( cd "$PKG" && env -u EBBTOP_PORT -u EBBTOP_ADDR "EBBTOP_ADDR=$BIND" \
+        bash ./install-agent.sh --prebuilt ) 2>&1 | tee "$WORK/install.log" || rc=$?
+  else
+    ( cd "$PKG" && env -u EBBTOP_PORT -u EBBTOP_ADDR \
+        bash ./install-agent.sh --prebuilt ) 2>&1 | tee "$WORK/install.log" || rc=$?
+  fi
   (( rc == 0 )) || { wz_err "the packaged installer exited $rc; its output is above (it restores the previous binary when a new one does not start)"; exit "$rc"; }
 }
 
 # --- verify and report ------------------------------------------------------
-verify_and_report() {
+verify_and_report_linux() {
   local state listen linger ver commit floor pair_addr problems=0
-  wz_step "verify"
-
   ver="$(sed -n 's/^version=//p' "$PKG/BUILD" | head -n 1)"
   commit="$(sed -n 's/^commit=//p' "$PKG/BUILD" | head -n 1)"
   floor="$(sed -n 's/^glibc_floor=//p' "$PKG/BUILD" | head -n 1)"
 
   if [[ -f "$BINFILE" ]] && cmp -s "$PKG/ebbtop-agent" "$BINFILE"; then
-    wz_ok "installed binary is the verified package member ($(sha256sum "$BINFILE" | cut -c1-16))"
+    wz_ok "installed binary is the verified package member ($(sha256_of "$BINFILE" | cut -c1-16))"
   else
     wz_err "installed binary at $BINFILE does not match the verified package member"
     problems=$((problems + 1))
@@ -620,7 +835,7 @@ verify_and_report() {
   wz_kv package "${TAG:-local archive} version $ver${commit:+, commit ${commit:0:8}}${floor:+, glibc floor $floor}"
 
   if [[ -f "$TOKENFILE" ]]; then
-    wz_ok "token file present, mode $(stat -c %a "$TOKENFILE") (not read)"
+    wz_ok "token file present, mode $(file_mode "$TOKENFILE") (not read)"
   else
     wz_err "no token file at $TOKENFILE"
     problems=$((problems + 1))
@@ -652,6 +867,97 @@ verify_and_report() {
   fi
 }
 
+# The macOS report. The packaged installer prints `probe: ok ...` for an
+# authenticated exchange with the address in agent.env, `state:` for the
+# launchd job and `listen:` for the bound socket; this wrapper checks those
+# against the package and adds the pairing block. The pairing address comes
+# from the bind on file, bracketed when it is an IPv6 literal.
+verify_and_report_macos() {
+  local ver commit minos probe_line listen problems=0 addr
+  ver="$(sed -n 's/^version=//p' "$PKG/BUILD" | head -n 1)"
+  commit="$(sed -n 's/^commit=//p' "$PKG/BUILD" | head -n 1)"
+  minos="$(sed -n 's/^min_macos=//p' "$PKG/BUILD" | head -n 1)"
+
+  if [[ -f "$BINFILE" ]] && cmp -s "$PKG/ebbtop-agent" "$BINFILE"; then
+    wz_ok "installed binary is the verified package member ($(sha256_of "$BINFILE" | cut -c1-16))"
+  else
+    wz_err "installed binary at $BINFILE does not match the verified package member"
+    problems=$((problems + 1))
+  fi
+  # The installed LaunchAgent is the package template RENDERED for this home,
+  # so it is never byte-identical to the package member. What must hold is
+  # that it is a valid plist, names the installed binary and the agent's env
+  # file, and carries no unrendered placeholder: that is the same set of facts
+  # the installer's own lint checks, verified here on what is actually on disk.
+  if [[ ! -f "$UNITFILE" ]]; then
+    wz_err "no LaunchAgent at $UNITFILE"
+    problems=$((problems + 1))
+  else
+    local plist_ok=1 plist_problem=''
+    if ! grep -q '<plist' "$UNITFILE" || ! grep -q '</plist>' "$UNITFILE"; then
+      plist_ok=0; plist_problem='it is not a plist document'
+    elif ! grep -qF "$BINFILE" "$UNITFILE"; then
+      plist_ok=0; plist_problem="it does not name the installed binary $BINFILE"
+    elif ! grep -qF "$ENVFILE" "$UNITFILE"; then
+      plist_ok=0; plist_problem="it does not pass the agent env file $ENVFILE"
+    elif grep -q '__[A-Z_]*__' "$UNITFILE"; then
+      plist_ok=0; plist_problem='it still carries an unrendered placeholder'
+    elif grep -Eq 'EBBTOP_TOKEN=|EBBTOP_BIND=' "$UNITFILE"; then
+      plist_ok=0; plist_problem='it assigns a credential or a bind address'
+    fi
+    if (( plist_ok )); then
+      wz_ok "LaunchAgent is the packaged template rendered for this home ($UNITFILE)"
+    else
+      wz_err "LaunchAgent at $UNITFILE is not a usable render of the packaged template: $plist_problem"
+      problems=$((problems + 1))
+    fi
+  fi
+
+  probe_line="$(sed -n 's/^probe: //p' "$WORK/install.log" | tail -n 1)"
+  if [[ "$probe_line" == ok* ]]; then
+    wz_ok "authenticated probe of the running agent: probe: $probe_line"
+  else
+    wz_err "no authenticated probe succeeded (probe: ${probe_line:-none reported})"
+    problems=$((problems + 1))
+  fi
+  listen="$(sed -n 's/^listen: //p' "$WORK/install.log" | tail -n 1)"
+  if [[ -n "$listen" ]]; then wz_kv listen "$listen"; fi
+  wz_kv package "${TAG:-local archive} version $ver${commit:+, commit ${commit:0:8}}${minos:+, min macOS $minos}"
+
+  if [[ -f "$TOKENFILE" ]]; then
+    wz_ok "token file present, mode $(file_mode "$TOKENFILE") (not read)"
+  else
+    wz_err "no token file at $TOKENFILE"
+    problems=$((problems + 1))
+  fi
+
+  wz_step "pair it with the client"
+  addr="$(state_bind)"
+  case "$addr" in
+    '')  wz_kv address "the agent has no bind address on file; check the install output above" ;;
+    \[*) wz_kv address "ws://$addr:$PORT/ws" ;;
+    *:*) wz_kv address "ws://[$addr]:$PORT/ws" ;;
+    *)   wz_kv address "ws://$addr:$PORT/ws" ;;
+  esac
+  wz_kv token "$TOKENFILE"
+  wz_note "the token value is never printed here: read it on this Mac with 'cat \"$TOKENFILE\"' and paste it into the client's source"
+  wz_note "tailnet or LAN only: the agent binds one private address and has no TLS listener, the token is the gate"
+  wz_note "this LaunchAgent starts at login and after a reboot once you log in; it is not a pre-login service"
+
+  if (( problems )); then
+    wz_err "$problems verification check(s) failed; the install output above is the installer's own account"
+    exit 1
+  fi
+}
+
+verify_and_report() {
+  wz_step "verify"
+  case "$PLATFORM" in
+    linux) verify_and_report_linux ;;
+    macos) verify_and_report_macos ;;
+  esac
+}
+
 # --- main -------------------------------------------------------------------
 ARCHIVE_PATH=''
 PIN=''
@@ -677,6 +983,11 @@ while (( $# )); do
       ARCHIVE_PATH="$2"; shift 2 ;;
     --archive=*)
       ARCHIVE_PATH="${1#*=}"; shift ;;
+    --platform)
+      [[ $# -ge 2 && -n "$2" ]] || { echo "$PROG: --platform needs linux or macos" >&2; exit 2; }
+      PLATFORM_FORCE="$2"; shift 2 ;;
+    --platform=*)
+      PLATFORM_FORCE="${1#*=}"; shift ;;
     --yes|-y) WZ_YES=1; shift ;;
     --dry-run|-n) WZ_DRY=1; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -689,12 +1000,18 @@ done
 [[ -z "$ARCHIVE_PATH" || -z "$PIN" ]] \
   || { echo "$PROG: --archive installs a local tarball and --version pins a release on the network; use one" >&2; exit 2; }
 
+detect_platform
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ebbtop-install.XXXXXXXX")"
 PKG="$WORK/pkg"
 cleanup() { rm -rf -- "$WORK"; }
 trap cleanup EXIT
 
-wz_banner "EbbTop agent installer" "prebuilt Linux agent (x86_64, systemd user service)"
+if [[ "$PLATFORM" == macos ]]; then
+  wz_banner "EbbTop agent installer" "prebuilt macOS agent (Apple Silicon, per-user LaunchAgent)"
+else
+  wz_banner "EbbTop agent installer" "prebuilt Linux agent (x86_64, systemd user service)"
+fi
 
 show_state
 preflight
@@ -703,7 +1020,11 @@ choose_bind
 print_plan
 
 confirm_rc=0
-wz_confirm "install the agent as a systemd user service on this host?" y || confirm_rc=$?
+if [[ "$PLATFORM" == macos ]]; then
+  wz_confirm "install the agent as a LaunchAgent in your login session?" y || confirm_rc=$?
+else
+  wz_confirm "install the agent as a systemd user service on this host?" y || confirm_rc=$?
+fi
 case "$confirm_rc" in
   0) ;;
   1) wz_info "nothing was changed"; exit 0 ;;
@@ -717,8 +1038,15 @@ if ((WZ_DRY)); then
 fi
 
 fetch_and_verify
-PORT="$(sed -n 's/^ExecStart=.*--port \([0-9][0-9]*\)$/\1/p' "$PKG/ebbtop-agent.service" | head -n 1)"
-PORT="${PORT:-$DEFAULT_PORT}"
+if [[ "$PLATFORM" == macos ]]; then
+  # The packaged port lives in the plist's --port argument, between the
+  # <string> tags; read it so the report quotes the port the job starts.
+  PORT="$(sed -n 's/^[[:space:]]*<string>\([0-9][0-9]*\)<\/string>$/\1/p' "$PKG/ebbtop-agent.plist" | tail -n 1)"
+  PORT="${PORT:-$DEFAULT_PORT}"
+else
+  PORT="$(sed -n 's/^ExecStart=.*--port \([0-9][0-9]*\)$/\1/p' "$PKG/ebbtop-agent.service" | head -n 1)"
+  PORT="${PORT:-$DEFAULT_PORT}"
+fi
 
 run_packaged_installer
 verify_and_report

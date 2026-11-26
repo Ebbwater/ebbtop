@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Exercise deploy/linux/ebbtop-install.sh inside a disposable fixture.
+# Exercise deploy/bootstrap/ebbtop-install.sh (the Linux path of the shared
+# installer) inside a disposable fixture.
 #
 # Every case runs with HOME pointed at a throwaway directory, XDG_RUNTIME_DIR at
 # a fixture user-manager directory, and stubs for step on PATH: systemctl, ss,
@@ -20,7 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRIPT="$ROOT/deploy/linux/ebbtop-install.sh"
+SCRIPT="$ROOT/deploy/bootstrap/ebbtop-install.sh"
 REPO_INSTALLER="$ROOT/deploy/install-agent.sh"
 REPO_UNIT="$ROOT/deploy/ebbtop-agent.service"
 
@@ -171,9 +172,17 @@ case "${1:-}" in
 esac
 STUB
 
+# `uname` now answers both flags the bootstrap asks for: -s names the OS and
+# -m the architecture. The bootstrap selects the package from the pair before
+# any network access, so a stub that answers x86_64 for -s would fail at
+# platform detection instead of exercising the Linux path.
 cat > "$STUB/uname" <<'STUB'
 #!/bin/sh
-echo x86_64
+case "${1:-}" in
+  -s) echo Linux ;;
+  -m) echo x86_64 ;;
+  *)  echo Linux ;;
+esac
 STUB
 
 # Any attempt to build from source is a hard failure: this path needs no
@@ -187,9 +196,16 @@ exit 127
 STUB
 done
 
+# An x86_64 Linux host with an aarch64 CPU report: the preflight refuses
+# before the network, which is the arm64-on-Linux case the release does not
+# build for (as distinct from a Darwin arm64 Mac, which it does).
 cat > "$STUB_ARCH/uname" <<'STUB'
 #!/bin/sh
-echo aarch64
+case "${1:-}" in
+  -s) echo Linux ;;
+  -m) echo aarch64 ;;
+  *)  echo Linux ;;
+esac
 STUB
 
 chmod 755 "$STUB"/* "$STUB_ARCH"/*

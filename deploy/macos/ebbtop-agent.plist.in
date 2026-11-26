@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  EbbTop agent as a per-user launchd job (LaunchAgent).
+
+  This template ships inside ebbtop-agent-macos-arm64.tar.gz and is rendered
+  by install-agent.sh (macOS) into
+  ~/Library/LaunchAgents/com.ebbwater.ebbtop-agent.plist.
+
+  What is deliberately NOT in this file:
+    * the token           it lives in the agent's agent.env (mode 0600)
+    * the bind address    same file
+    * any EBBTOP_ value   all of them are read from the env file at startup
+
+  So this plist is safe to read, copy, log and diff: it names paths and a
+  process argument list, never a credential. The "env file" argument is how
+  the agent gets the settings launchd has no EnvironmentFile directive for.
+
+  RunAtLoad plus KeepAlive make the job start at login and stay running;
+  ThrottleInterval 10s keeps a crash loop from spinning the CPU.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ebbwater.ebbtop-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__AGENT_BIN__</string>
+        <string>--env-file</string>
+        <string>__ENV_FILE__</string>
+        <string>--port</string>
+        <string>__PORT__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/agent.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/agent.log</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Keep the process from inheriting a locale that would change
+             number formatting in the JSON frame. -->
+        <key>LC_ALL</key>
+        <string>C</string>
+    </dict>
+</dict>
+</plist>

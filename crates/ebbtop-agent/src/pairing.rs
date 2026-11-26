@@ -80,10 +80,13 @@ pub fn now_ms() -> u64 {
 /// Directory holding the agent's writable state (pairing code, issued
 /// clients).
 ///
-/// Resolution: `EBBTOP_STATE_DIR`, else `$HOME/services/ebbtop-agent` — the
-/// directory `deploy/install-agent.sh` already creates for `agent.env` — else
-/// `.` when HOME is unset. The service unit runs as the user, so `--pair`
-/// from an interactive shell and the daemon agree without extra flags.
+/// Resolution: `EBBTOP_STATE_DIR`, else the platform's default — on macOS
+/// `$HOME/Library/Application Support/ebbtop-agent` (where
+/// `deploy/macos/install-agent.sh` installs and what its `--uninstall --purge`
+/// deletes), on Linux `$HOME/services/ebbtop-agent` (the directory
+/// `deploy/install-agent.sh` already creates for `agent.env`) — else `.` when
+/// HOME is unset. The service runs as the user, so `--pair` from an
+/// interactive shell and the daemon agree without extra flags.
 pub fn state_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("EBBTOP_STATE_DIR")
         && !d.is_empty()
@@ -91,7 +94,10 @@ pub fn state_dir() -> PathBuf {
         return PathBuf::from(d);
     }
     match std::env::var_os("HOME") {
-        Some(h) if !h.is_empty() => PathBuf::from(h).join("services").join("ebbtop-agent"),
+        Some(h) if !h.is_empty() => crate::platform::default_state_dir(
+            cfg!(target_os = "macos"),
+            Path::new(&h),
+        ),
         _ => PathBuf::from("."),
     }
 }
@@ -509,7 +515,14 @@ mod tests {
         if let Some(h) = home {
             if std::env::var_os("EBBTOP_STATE_DIR").is_none() {
                 assert!(state_dir().starts_with(&h));
-                assert!(state_dir().ends_with("services/ebbtop-agent"));
+                // Per-platform, and it must agree with the installer that
+                // creates (and purges) the directory: see
+                // `platform::default_state_dir`.
+                if cfg!(target_os = "macos") {
+                    assert!(state_dir().ends_with("Library/Application Support/ebbtop-agent"));
+                } else {
+                    assert!(state_dir().ends_with("services/ebbtop-agent"));
+                }
             }
         }
     }
