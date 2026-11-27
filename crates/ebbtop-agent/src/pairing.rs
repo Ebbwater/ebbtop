@@ -94,10 +94,9 @@ pub fn state_dir() -> PathBuf {
         return PathBuf::from(d);
     }
     match std::env::var_os("HOME") {
-        Some(h) if !h.is_empty() => crate::platform::default_state_dir(
-            cfg!(target_os = "macos"),
-            Path::new(&h),
-        ),
+        Some(h) if !h.is_empty() => {
+            crate::platform::default_state_dir(cfg!(target_os = "macos"), Path::new(&h))
+        }
         _ => PathBuf::from("."),
     }
 }
@@ -263,8 +262,11 @@ impl PairingStore {
                 let _ = self.clear_pending();
                 Err(PairError::TooManyAttempts)
             } else {
-                self.write_private(&self.pair_file(), &serde_json::to_vec(&pending).map_err(|_| PairError::StateIo)?)
-                    .map_err(|_| PairError::StateIo)?;
+                self.write_private(
+                    &self.pair_file(),
+                    &serde_json::to_vec(&pending).map_err(|_| PairError::StateIo)?,
+                )
+                .map_err(|_| PairError::StateIo)?;
                 Err(PairError::WrongCode)
             }
         } else {
@@ -277,7 +279,9 @@ impl PairingStore {
     pub fn issue(&self, label: Option<&str>) -> io::Result<ClientRecord> {
         let rec = ClientRecord {
             token: secret::token(),
-            label: label.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            label: label
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             issued_at_ms: now_ms(),
             scope: SCOPE_READ_ONLY.to_string(),
         };
@@ -390,7 +394,10 @@ mod tests {
         assert_eq!(rec.label.as_deref(), Some("laptop"));
         assert_eq!(rec.token.len(), 64);
         // stored and authenticatable, with its scope
-        assert_eq!(store.authenticate(&rec.token).as_deref(), Some(SCOPE_READ_ONLY));
+        assert_eq!(
+            store.authenticate(&rec.token).as_deref(),
+            Some(SCOPE_READ_ONLY)
+        );
         // single use: the code file is gone and a replay is refused
         assert!(store.read_pending().is_none());
         assert_eq!(
@@ -417,9 +424,16 @@ mod tests {
     fn five_wrong_guesses_invalidate_the_pending_code() {
         let (_dir, store) = store();
         let pending = store.mint().unwrap();
-        let wrong = if pending.code == "000000" { "111111" } else { "000000" };
+        let wrong = if pending.code == "000000" {
+            "111111"
+        } else {
+            "000000"
+        };
         for n in 1..MAX_ATTEMPTS {
-            assert_eq!(store.exchange(wrong, None, now_ms()).unwrap_err(), PairError::WrongCode);
+            assert_eq!(
+                store.exchange(wrong, None, now_ms()).unwrap_err(),
+                PairError::WrongCode
+            );
             assert_eq!(store.read_pending().unwrap().attempts, n);
         }
         assert_eq!(
@@ -450,7 +464,10 @@ mod tests {
             PairError::Expired
         );
         assert!(store.read_pending().is_none());
-        assert!(!store.clients_file().exists(), "no token from an expired code");
+        assert!(
+            !store.clients_file().exists(),
+            "no token from an expired code"
+        );
     }
 
     #[test]
@@ -494,14 +511,20 @@ mod tests {
         }
         let clients = store.read_clients().clients;
         assert_eq!(clients.len(), MAX_CLIENTS);
-        assert!(store.authenticate(&first).is_none(), "oldest must be evicted");
+        assert!(
+            store.authenticate(&first).is_none(),
+            "oldest must be evicted"
+        );
     }
 
     #[test]
     fn a_state_dir_that_cannot_be_created_reports_state_io() {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("file-not-dir");
-        std::fs::File::create(&blocker).unwrap().write_all(b"x").unwrap();
+        std::fs::File::create(&blocker)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
         let store = PairingStore::new(blocker.join("sub"));
         // write_private fails because a file sits where the dir belongs
         assert!(store.mint().is_err());

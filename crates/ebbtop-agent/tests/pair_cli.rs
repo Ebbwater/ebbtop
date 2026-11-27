@@ -67,7 +67,10 @@ fn pair_replaces_a_previous_pending_code() {
     let code = |o: &std::process::Output| {
         String::from_utf8_lossy(&o.stdout)
             .lines()
-            .find_map(|l| l.strip_prefix("Pairing code: ").map(|s| s.trim().to_string()))
+            .find_map(|l| {
+                l.strip_prefix("Pairing code: ")
+                    .map(|s| s.trim().to_string())
+            })
             .unwrap()
     };
     assert!(first.status.success() && second.status.success());

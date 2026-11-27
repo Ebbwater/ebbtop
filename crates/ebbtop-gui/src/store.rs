@@ -177,9 +177,15 @@ pub fn parse_config(s: &str) -> Config {
     let mut cfg: Config = serde_json::from_str(s).unwrap_or_default();
     if cfg.sources.is_empty()
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
-        && let Some(u) = v.get("url").and_then(|u| u.as_str()).filter(|u| !u.is_empty())
+        && let Some(u) = v
+            .get("url")
+            .and_then(|u| u.as_str())
+            .filter(|u| !u.is_empty())
     {
-        cfg.sources = vec![Source { name: name_from_url(u), url: u.to_string() }];
+        cfg.sources = vec![Source {
+            name: name_from_url(u),
+            url: u.to_string(),
+        }];
     }
     cfg.clamp_active();
     cfg
@@ -204,7 +210,11 @@ pub fn name_from_url(u: &str) -> String {
         .split(':')
         .next()
         .unwrap_or("");
-    if host.is_empty() { "server".to_string() } else { host.to_string() }
+    if host.is_empty() {
+        "server".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 pub fn load_config() -> Config {
@@ -253,7 +263,12 @@ pub fn load_token_for(user: &str) -> (Option<String>, TokenSource) {
     if let Some(sink) = test_credentials() {
         // The suite never talks to a real credential store (that needs a
         // desktop session); it uses the in-memory sink the test installed.
-        let found = sink.borrow().iter().rev().find(|(u, _)| u == user).map(|(_, t)| t.clone());
+        let found = sink
+            .borrow()
+            .iter()
+            .rev()
+            .find(|(u, _)| u == user)
+            .map(|(_, t)| t.clone());
         return match found {
             Some(t) => (Some(t), TokenSource::Keyring),
             None => (None, TokenSource::Missing),
@@ -269,7 +284,8 @@ pub fn load_token_for(user: &str) -> (Option<String>, TokenSource) {
 pub fn save_token_for(user: &str, token: &str) -> anyhow::Result<()> {
     #[cfg(test)]
     if let Some(sink) = test_credentials() {
-        sink.borrow_mut().push((user.to_string(), token.to_string()));
+        sink.borrow_mut()
+            .push((user.to_string(), token.to_string()));
         return Ok(());
     }
     keyring::Entry::new(KEYRING_SERVICE, user)?.set_password(token)?;
@@ -380,7 +396,10 @@ pub fn open_logs() -> Result<(), OpenLogsError> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
-        .map_err(|e| OpenLogsError::Spawn { cmd, error: e.to_string() })
+        .map_err(|e| OpenLogsError::Spawn {
+            cmd,
+            error: e.to_string(),
+        })
 }
 
 /// Write the support summary beside the log. Same no-secret rule as the
@@ -398,7 +417,10 @@ pub fn write_support(path: &std::path::Path, text: &str) -> std::io::Result<()> 
 pub fn endpoint_shape(url: &str) -> String {
     let (scheme, rest) = url.split_once("://").unwrap_or(("ws", url));
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let port = authority.rsplit_once(':').map(|(_, p)| p.trim()).filter(|p| !p.is_empty());
+    let port = authority
+        .rsplit_once(':')
+        .map(|(_, p)| p.trim())
+        .filter(|p| !p.is_empty());
     let path = rest
         .split_once('/')
         .map(|(_, p)| format!("/{}", p.split(['?', '#']).next().unwrap_or("")))
@@ -412,7 +434,9 @@ pub fn endpoint_shape(url: &str) -> String {
 }
 
 pub fn log_bytes() -> Option<u64> {
-    log_path().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len())
+    log_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
 }
 
 /// Facts a support summary may contain. Every field is chosen to be
@@ -466,7 +490,14 @@ pub fn support_summary(f: &SupportFacts<'_>, token: Option<&str>) -> String {
         Some(n) => out.push_str(&format!("log: ebbtop.log present ({} KiB)\n", n / 1024)),
         None => out.push_str("log: ebbtop.log not written yet\n"),
     }
-    out.push_str(&format!("config: {}\n", if f.config_ok { "present" } else { "not written yet" }));
+    out.push_str(&format!(
+        "config: {}\n",
+        if f.config_ok {
+            "present"
+        } else {
+            "not written yet"
+        }
+    ));
     out.push_str("note: no host, address, path, token or token-bearing URL is included.\n");
     scrub_urls(&scrub_secret(&out, token))
 }
@@ -544,11 +575,18 @@ pub fn append_log_to(p: &std::path::Path, line: &str) {
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    if std::fs::metadata(p).map(|m| m.len() > LOG_MAX).unwrap_or(false) {
+    if std::fs::metadata(p)
+        .map(|m| m.len() > LOG_MAX)
+        .unwrap_or(false)
+    {
         let _ = std::fs::rename(p, p.with_extension("log.1"));
     }
     let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
         let _ = writeln!(f, "{ts} {line}");
     }
 }
@@ -568,7 +606,14 @@ mod tests {
         assert!(!c.compact && !c.log_scale);
         assert!((c.top_frac - 0.55).abs() < 1e-6, "top_frac {}", c.top_frac);
         assert!(c.show_cpu && c.show_gpu && c.show_mem && c.show_net && c.show_disk);
-        assert!(!c.collapsed_cpu && !c.collapsed_gpu && !c.collapsed_mem && !c.collapsed_net && !c.collapsed_disk && !c.collapsed_proc);
+        assert!(
+            !c.collapsed_cpu
+                && !c.collapsed_gpu
+                && !c.collapsed_mem
+                && !c.collapsed_net
+                && !c.collapsed_disk
+                && !c.collapsed_proc
+        );
     }
 
     #[test]
@@ -609,8 +654,14 @@ mod tests {
     fn multi_source_config_roundtrips() {
         let c = Config {
             sources: vec![
-                Source { name: "k-server".into(), url: "ws://10.0.0.1:1/ws".into() },
-                Source { name: "lab".into(), url: "ws://10.0.0.2:1/ws".into() },
+                Source {
+                    name: "k-server".into(),
+                    url: "ws://10.0.0.1:1/ws".into(),
+                },
+                Source {
+                    name: "lab".into(),
+                    url: "ws://10.0.0.2:1/ws".into(),
+                },
             ],
             active: 1,
             disk: Some("nvme0n1".into()),
@@ -631,7 +682,11 @@ mod tests {
         assert_eq!(c.file_name().unwrap(), "config.json");
         let l = log_path().expect("log path");
         assert_eq!(l.file_name().unwrap(), "ebbtop.log");
-        assert!(l.parent().unwrap().ends_with("ebbtop"), "got {}", l.display());
+        assert!(
+            l.parent().unwrap().ends_with("ebbtop"),
+            "got {}",
+            l.display()
+        );
     }
 
     #[test]
@@ -672,7 +727,10 @@ mod tests {
         assert_eq!(c.sources.len(), 1);
         assert_eq!(c.language, "zh-Hant-HK");
         // Nothing localized is ever written into the config.
-        let c = Config { language: "zh-Hans-CN".into(), ..Config::default() };
+        let c = Config {
+            language: "zh-Hans-CN".into(),
+            ..Config::default()
+        };
         assert!(!serde_json::to_string(&c).expect("serialize").contains('中'));
     }
 
@@ -708,8 +766,14 @@ mod tests {
 
     #[test]
     fn endpoint_shape_drops_host_and_query() {
-        assert_eq!(endpoint_shape("ws://10.9.9.9:45976/ws?token=x"), "ws, default port, /ws");
-        assert_eq!(endpoint_shape("wss://some.host:9443/custom"), "wss, custom port, /custom");
+        assert_eq!(
+            endpoint_shape("ws://10.9.9.9:45976/ws?token=x"),
+            "ws, default port, /ws"
+        );
+        assert_eq!(
+            endpoint_shape("wss://some.host:9443/custom"),
+            "wss, custom port, /custom"
+        );
         assert_eq!(endpoint_shape("barehost"), "ws, default port, /ws");
         assert!(!endpoint_shape("ws://10.9.9.9:45976/ws?token=x").contains("10.9.9.9"));
     }
@@ -742,7 +806,10 @@ mod tests {
         assert!(!s.contains("k-server"), "source name leaked:\n{s}");
         assert!(!s.contains("/home/"), "path leaked:\n{s}");
         assert!(!s.contains("?token="), "query leaked:\n{s}");
-        assert!(s.contains("detail: get_metrics: ws://<endpoint>"), "detail not reduced:\n{s}");
+        assert!(
+            s.contains("detail: get_metrics: ws://<endpoint>"),
+            "detail not reduced:\n{s}"
+        );
         // Still useful: the facts a maintainer needs.
         assert!(s.contains("version: 0.2.7"));
         assert!(s.contains("connection: DOWN"));
@@ -752,7 +819,10 @@ mod tests {
 
     #[test]
     fn scrub_urls_keeps_the_scheme_and_drops_the_authority() {
-        assert_eq!(scrub_urls("ws://10.9.9.9:45976/ws?token=abc failed"), "ws://<endpoint> failed");
+        assert_eq!(
+            scrub_urls("ws://10.9.9.9:45976/ws?token=abc failed"),
+            "ws://<endpoint> failed"
+        );
         assert_eq!(scrub_urls("(wss://h/x)"), "(wss://<endpoint>)");
         assert_eq!(scrub_urls("no urls here"), "no urls here");
     }
@@ -771,8 +841,14 @@ mod tests {
             config_ok: false,
         };
         let s = support_summary(&facts, None);
-        assert!(s.contains("credential store error (details omitted)"), "{s}");
-        assert!(!s.contains("libsecret"), "credential error text leaked:\n{s}");
+        assert!(
+            s.contains("credential store error (details omitted)"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("libsecret"),
+            "credential error text leaked:\n{s}"
+        );
         assert!(!s.contains("leak"), "credential error text leaked:\n{s}");
         assert!(s.contains("last failure: none"));
     }
@@ -790,7 +866,10 @@ mod tests {
         let p = dir.join("ebbtop-support.txt");
         let _ = std::fs::remove_dir_all(&dir);
         write_support(&p, "version: 0.2.7\n").expect("write support copy");
-        assert_eq!(std::fs::read_to_string(&p).expect("read back"), "version: 0.2.7\n");
+        assert_eq!(
+            std::fs::read_to_string(&p).expect("read back"),
+            "version: 0.2.7\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -799,7 +878,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ebbtop-log-test-{}", std::process::id()));
         let p = dir.join("ebbtop.log");
         let _ = std::fs::remove_dir_all(&dir);
-        append_log_to(&p, "probe auth-refused: get_metrics: agent closed (wrong token?)");
+        append_log_to(
+            &p,
+            "probe auth-refused: get_metrics: agent closed (wrong token?)",
+        );
         let one = std::fs::read_to_string(&p).expect("log line");
         assert!(one.contains("probe auth-refused"), "line missing: {one}");
         assert!(!one.contains(SENTINEL));
@@ -807,7 +889,11 @@ mod tests {
         std::fs::write(&p, "x".repeat((LOG_MAX + 1) as usize)).expect("seed big log");
         append_log_to(&p, "after rotation");
         assert!(p.with_extension("log.1").exists(), "no rotation");
-        assert!(std::fs::read_to_string(&p).expect("new log").contains("after rotation"));
+        assert!(
+            std::fs::read_to_string(&p)
+                .expect("new log")
+                .contains("after rotation")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -818,7 +904,11 @@ mod tests {
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             assert_eq!(cmd, "xdg-open");
-            assert_eq!(args, vec!["/tmp/ebbtop-data".to_string()], "open the folder, not the bare file");
+            assert_eq!(
+                args,
+                vec!["/tmp/ebbtop-data".to_string()],
+                "open the folder, not the bare file"
+            );
         }
         #[cfg(target_os = "macos")]
         {

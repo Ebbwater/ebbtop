@@ -302,4 +302,3 @@ mod tests {
         assert!(!sa.agent_version.is_empty());
     }
 }
-

@@ -126,13 +126,19 @@ pub fn is_private_source(ip: IpAddr) -> bool {
 /// "anything unrecognised disables": a typo must not silently drop the
 /// feature an operator thinks is on.
 pub fn enabled_from(v: &str) -> bool {
-    !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+    !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 /// True when a datagram is a discovery probe. Trailing CR/LF is tolerated
 /// (a shell `printf '…\n'`), nothing else is.
 pub fn is_discovery_request(bytes: &[u8]) -> bool {
-    let t = bytes.strip_suffix(b"\r\n").or_else(|| bytes.strip_suffix(b"\n")).unwrap_or(bytes);
+    let t = bytes
+        .strip_suffix(b"\r\n")
+        .or_else(|| bytes.strip_suffix(b"\n"))
+        .unwrap_or(bytes);
     t == DISCOVERY_REQUEST
 }
 
@@ -324,10 +330,24 @@ mod tests {
 
     #[test]
     fn private_sources_are_accepted_and_public_ones_refused() {
-        for s in ["127.0.0.1", "10.1.2.3", "172.16.0.9", "192.168.1.10", "169.254.4.4", "100.99.193.22"] {
+        for s in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.10",
+            "169.254.4.4",
+            "100.99.193.22",
+        ] {
             assert!(is_private_source(ip(s)), "{s}");
         }
-        for s in ["8.8.8.8", "1.1.1.1", "172.15.0.1", "172.32.0.1", "100.63.255.255", "100.128.0.0"] {
+        for s in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "172.15.0.1",
+            "172.32.0.1",
+            "100.63.255.255",
+            "100.128.0.0",
+        ] {
             assert!(!is_private_source(ip(s)), "{s}");
         }
         let v6: IpAddr = "2001:4860:4860::8888".parse().unwrap();
@@ -354,7 +374,10 @@ mod tests {
         let t0 = Instant::now();
         assert!(l.allow(ip("192.168.1.10"), t0));
         assert!(!l.allow(ip("192.168.1.10"), t0 + Duration::from_millis(1)));
-        assert!(!l.allow(ip("192.168.1.10"), t0 + SOURCE_MIN_GAP - Duration::from_millis(1)));
+        assert!(!l.allow(
+            ip("192.168.1.10"),
+            t0 + SOURCE_MIN_GAP - Duration::from_millis(1)
+        ));
         // a different source is independent, once the global gap has passed
         assert!(l.allow(ip("192.168.1.11"), t0 + GLOBAL_MIN_GAP));
     }

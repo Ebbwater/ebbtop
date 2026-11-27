@@ -18,7 +18,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{MissedTickBehavior, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::wire::{self, DiskInfo, Frame, KillJob, KillResult, Metrics, ProcessMetricsResponse, Processes};
+use crate::wire::{
+    self, DiskInfo, Frame, KillJob, KillResult, Metrics, ProcessMetricsResponse, Processes,
+};
 
 /// `detail_pid` value meaning "no pid selected". PIDs are below 2^22 on
 /// Linux, so u32::MAX can never be a real pid.
@@ -83,15 +85,35 @@ impl ClientConfig {
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)] // a few events per second
 pub enum Event {
-    Connecting { attempt: u32 },
+    Connecting {
+        attempt: u32,
+    },
     Connected,
-    Disconnected { reason: String, retry_in: Duration },
-    Metrics { m: Metrics, recv_ms: u64 },
-    Processes { p: Processes, recv_ms: u64 },
-    Disks { d: Vec<DiskInfo>, recv_ms: u64 },
-    ProcessDetail { d: ProcessMetricsResponse, recv_ms: u64 },
+    Disconnected {
+        reason: String,
+        retry_in: Duration,
+    },
+    Metrics {
+        m: Metrics,
+        recv_ms: u64,
+    },
+    Processes {
+        p: Processes,
+        recv_ms: u64,
+    },
+    Disks {
+        d: Vec<DiskInfo>,
+        recv_ms: u64,
+    },
+    ProcessDetail {
+        d: ProcessMetricsResponse,
+        recv_ms: u64,
+    },
     /// Phase 2 kill reply (ok, or the agent's refusal reason).
-    KillResult { r: KillResult, recv_ms: u64 },
+    KillResult {
+        r: KillResult,
+        recv_ms: u64,
+    },
 }
 
 pub fn now_ms() -> u64 {
@@ -119,7 +141,11 @@ pub fn normalize_base_url(raw: &str) -> anyhow::Result<String> {
         !t.is_empty(),
         "URL is empty: enter a host like 192.168.1.10 or ws://host:45976/ws"
     );
-    let with_scheme = if t.contains("://") { t.to_string() } else { format!("ws://{t}") };
+    let with_scheme = if t.contains("://") {
+        t.to_string()
+    } else {
+        format!("ws://{t}")
+    };
     let mut u =
         url::Url::parse(&with_scheme).map_err(|e| anyhow::anyhow!("bad URL {raw:?}: {e}"))?;
     match u.scheme() {
@@ -152,13 +178,14 @@ pub fn token_warning(cleaned: &str) -> Option<String> {
     if cleaned.is_empty() {
         return None;
     }
-    let hex = cleaned.len() == AGENT_TOKEN_HEX_LEN
-        && cleaned.bytes().all(|b| b.is_ascii_hexdigit());
+    let hex =
+        cleaned.len() == AGENT_TOKEN_HEX_LEN && cleaned.bytes().all(|b| b.is_ascii_hexdigit());
     if hex {
         None
     } else {
         Some(
-            "token looks unusual: the agent token is 64 hex characters from ebbtop.token".to_string(),
+            "token looks unusual: the agent token is 64 hex characters from ebbtop.token"
+                .to_string(),
         )
     }
 }
@@ -183,14 +210,27 @@ pub struct ProbeOk {
     pub hostname: String,
 }
 
-pub async fn probe_once(base: &str, token: Option<&str>, deadline: Duration) -> Result<ProbeOk, String> {
+pub async fn probe_once(
+    base: &str,
+    token: Option<&str>,
+    deadline: Duration,
+) -> Result<ProbeOk, String> {
     let r: anyhow::Result<ProbeOk> = async {
         let url = connect_url(base, token)?;
         let (mut ws, _) = timeout(deadline, tokio_tungstenite::connect_async(url.as_str()))
             .await
             .map_err(|_| anyhow::anyhow!("connect timed out"))??;
-        let m = request(&mut ws, "get_metrics", "get_metrics", deadline, wire::decode_metrics).await?;
-        Ok(ProbeOk { hostname: m.hostname })
+        let m = request(
+            &mut ws,
+            "get_metrics",
+            "get_metrics",
+            deadline,
+            wire::decode_metrics,
+        )
+        .await?;
+        Ok(ProbeOk {
+            hostname: m.hostname,
+        })
     }
     .await;
     r.map_err(|e| redact(error_text(&e), token))
@@ -350,7 +390,10 @@ impl Diagnosis {
     /// should pass the error through [`redact`] first (as `probe_once` does).
     pub fn from_error(err: &str) -> Self {
         let detail = scrub(err);
-        Self { kind: ProbeFailure::classify(&detail), detail }
+        Self {
+            kind: ProbeFailure::classify(&detail),
+            detail,
+        }
     }
 
     pub fn headline(&self) -> &'static str {
@@ -415,7 +458,11 @@ pub fn error_text(e: &anyhow::Error) -> String {
 
 /// Next backoff: doubles from `min`, capped at `max`.
 pub fn next_backoff(cur: Duration, min: Duration, max: Duration) -> Duration {
-    if cur.is_zero() { min } else { (cur * 2).min(max) }
+    if cur.is_zero() {
+        min
+    } else {
+        (cur * 2).min(max)
+    }
 }
 
 pub async fn run<F: FnMut(Event) + Send>(cfg: ClientConfig, emit: F) -> ! {
@@ -445,7 +492,10 @@ pub async fn run_with_kill<F: FnMut(Event) + Send>(
             Ok(()) => "closed".to_string(),
             Err(e) => redact(error_text(&e), cfg.token.as_deref()),
         };
-        emit(Event::Disconnected { reason, retry_in: backoff });
+        emit(Event::Disconnected {
+            reason,
+            retry_in: backoff,
+        });
         tokio::time::sleep(backoff).await;
     }
 }
@@ -457,9 +507,12 @@ async fn session<F: FnMut(Event)>(
     kill_rx: Option<&mut UnboundedReceiver<KillJob>>,
 ) -> anyhow::Result<()> {
     let url = connect_url(&cfg.url, cfg.token.as_deref())?;
-    let (mut ws, _) = timeout(cfg.connect_timeout, tokio_tungstenite::connect_async(url.as_str()))
-        .await
-        .map_err(|_| anyhow::anyhow!("connect timed out"))??;
+    let (mut ws, _) = timeout(
+        cfg.connect_timeout,
+        tokio_tungstenite::connect_async(url.as_str()),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("connect timed out"))??;
     emit(Event::Connected);
 
     let mut tick = tokio::time::interval(cfg.tick);
@@ -488,13 +541,21 @@ async fn session<F: FnMut(Event)>(
         if let Some(job) = job {
             let res = kill_roundtrip(&mut ws, &job, cfg.reply_timeout).await;
             match res {
-                Ok(r) => emit(Event::KillResult { r, recv_ms: now_ms() }),
+                Ok(r) => emit(Event::KillResult {
+                    r,
+                    recv_ms: now_ms(),
+                }),
                 Err(e) => {
                     // Defined error path: report the failure, then drop the
                     // connection so frame alignment is rebuilt on reconnect.
                     let msg = redact(error_text(&e), cfg.token.as_deref());
                     emit(Event::KillResult {
-                        r: KillResult { ok: false, pid: job.pid, signal: job.signal.as_str().to_string(), error: Some(msg) },
+                        r: KillResult {
+                            ok: false,
+                            pid: job.pid,
+                            signal: job.signal.as_str().to_string(),
+                            error: Some(msg),
+                        },
                         recv_ms: now_ms(),
                     });
                     return Err(e);
@@ -503,12 +564,32 @@ async fn session<F: FnMut(Event)>(
             continue;
         }
 
-        let m = request(&mut ws, "get_metrics", "get_metrics", cfg.reply_timeout, wire::decode_metrics).await?;
+        let m = request(
+            &mut ws,
+            "get_metrics",
+            "get_metrics",
+            cfg.reply_timeout,
+            wire::decode_metrics,
+        )
+        .await?;
         *got_data = true;
-        emit(Event::Metrics { m, recv_ms: now_ms() });
+        emit(Event::Metrics {
+            m,
+            recv_ms: now_ms(),
+        });
 
-        let p = request(&mut ws, "get_processes", "get_processes", cfg.reply_timeout, wire::decode_processes).await?;
-        emit(Event::Processes { p, recv_ms: now_ms() });
+        let p = request(
+            &mut ws,
+            "get_processes",
+            "get_processes",
+            cfg.reply_timeout,
+            wire::decode_processes,
+        )
+        .await?;
+        emit(Event::Processes {
+            p,
+            recv_ms: now_ms(),
+        });
 
         // Per-process detail: only while a pid is selected, on the same 1 s
         // tick (no second loop). The pid is read here, after processes, so a
@@ -516,14 +597,35 @@ async fn session<F: FnMut(Event)>(
         // decodes to None and is skipped, not treated as a disconnect.
         if let Some(pid) = cfg.detail_selected() {
             let req = wire::encode_process_metrics_request(pid);
-            if let Some(d) = request(&mut ws, &req, "get_process_metrics", cfg.reply_timeout, wire::decode_process_detail).await? {
-                emit(Event::ProcessDetail { d, recv_ms: now_ms() });
+            if let Some(d) = request(
+                &mut ws,
+                &req,
+                "get_process_metrics",
+                cfg.reply_timeout,
+                wire::decode_process_detail,
+            )
+            .await?
+            {
+                emit(Event::ProcessDetail {
+                    d,
+                    recv_ms: now_ms(),
+                });
             }
         }
 
         if n.is_multiple_of(cfg.disks_every.max(1)) {
-            let d = request(&mut ws, "get_disks", "get_disks", cfg.reply_timeout, wire::decode_disks).await?;
-            emit(Event::Disks { d, recv_ms: now_ms() });
+            let d = request(
+                &mut ws,
+                "get_disks",
+                "get_disks",
+                cfg.reply_timeout,
+                wire::decode_disks,
+            )
+            .await?;
+            emit(Event::Disks {
+                d,
+                recv_ms: now_ms(),
+            });
         }
         n = n.wrapping_add(1);
     }
@@ -540,7 +642,8 @@ async fn kill_roundtrip(
     request(ws, &msg, "kill", deadline, wire::decode_kill).await
 }
 
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn request<T>(
     ws: &mut Ws,
@@ -578,7 +681,10 @@ mod tests {
     fn token_is_query_encoded() {
         let u = connect_url("ws://h:1/ws", Some("a b&c")).unwrap();
         assert_eq!(u.as_str(), "ws://h:1/ws?token=a+b%26c");
-        assert_eq!(connect_url("ws://h:1/ws", None).unwrap().as_str(), "ws://h:1/ws");
+        assert_eq!(
+            connect_url("ws://h:1/ws", None).unwrap().as_str(),
+            "ws://h:1/ws"
+        );
         assert!(connect_url("http://h/ws", None).is_err());
     }
 
@@ -604,10 +710,7 @@ mod tests {
             normalize_base_url("wss://h:1/custom").unwrap(),
             "wss://h:1/custom"
         );
-        assert_eq!(
-            normalize_base_url("ws://h/ws").unwrap(),
-            "ws://h:45976/ws"
-        );
+        assert_eq!(normalize_base_url("ws://h/ws").unwrap(), "ws://h:45976/ws");
         assert!(normalize_base_url("http://h/ws").is_err());
         assert!(normalize_base_url("   ").is_err());
     }
@@ -630,28 +733,52 @@ mod tests {
 
     #[test]
     fn redact_hides_token() {
-        assert_eq!(redact("bad ws://h/?token=s3cr3t".into(), Some("s3cr3t")), "bad ws://h/?token=<token>");
+        assert_eq!(
+            redact("bad ws://h/?token=s3cr3t".into(), Some("s3cr3t")),
+            "bad ws://h/?token=<token>"
+        );
     }
 
     #[test]
     fn backoff_doubles_and_caps() {
         let (a, b) = (Duration::from_millis(500), Duration::from_secs(10));
         let mut d = Duration::ZERO;
-        let seq: Vec<u128> = (0..7).map(|_| { d = next_backoff(d, a, b); d.as_millis() }).collect();
+        let seq: Vec<u128> = (0..7)
+            .map(|_| {
+                d = next_backoff(d, a, b);
+                d.as_millis()
+            })
+            .collect();
         assert_eq!(seq, vec![500, 1000, 2000, 4000, 8000, 10000, 10000]);
-        assert_eq!(ClientConfig::new("ws://h/ws", None).backoff_max, Duration::from_secs(4));
+        assert_eq!(
+            ClientConfig::new("ws://h/ws", None).backoff_max,
+            Duration::from_secs(4)
+        );
     }
 
     #[test]
     fn error_text_drops_repeated_source() {
-        let io = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused (os error 111)");
-        let e = anyhow::Error::new(io).context("IO error: Connection refused (os error 111)").context("get_metrics");
-        assert_eq!(error_text(&e), "get_metrics: IO error: Connection refused (os error 111)");
+        let io = std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "Connection refused (os error 111)",
+        );
+        let e = anyhow::Error::new(io)
+            .context("IO error: Connection refused (os error 111)")
+            .context("get_metrics");
+        assert_eq!(
+            error_text(&e),
+            "get_metrics: IO error: Connection refused (os error 111)"
+        );
     }
 
     #[tokio::test]
     async fn probe_refused_connection_is_an_error_without_token() {
-        let r = probe_once("ws://127.0.0.1:1/ws", Some("s3cr3t"), Duration::from_secs(2)).await;
+        let r = probe_once(
+            "ws://127.0.0.1:1/ws",
+            Some("s3cr3t"),
+            Duration::from_secs(2),
+        )
+        .await;
         let e = r.expect_err("closed port must fail");
         assert!(!e.contains("s3cr3t"), "probe error leaked token: {e}");
     }
@@ -682,7 +809,12 @@ mod tests {
             let body = r#"{"sampled_at_ms":1700000000000,"cpu_total":1.0,"cpu_per_core":[1.0],"mem_total":8,"mem_used":4,"swap_total":0,"swap_used":0,"hostname":"fakehost"}"#;
             ws.send(Message::text(body)).await.expect("reply");
         });
-        let r = probe_once(&format!("ws://{addr}/ws"), Some("s3cr3t"), Duration::from_secs(5)).await;
+        let r = probe_once(
+            &format!("ws://{addr}/ws"),
+            Some("s3cr3t"),
+            Duration::from_secs(5),
+        )
+        .await;
         assert_eq!(r.expect("probe").hostname, "fakehost");
     }
 
@@ -708,9 +840,13 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
             let _ = ws.close(None).await;
         });
-        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
-            .await
-            .expect_err("an agent-style close must fail the probe");
+        let e = probe_once(
+            &format!("ws://{addr}/ws"),
+            Some(SENTINEL),
+            Duration::from_secs(3),
+        )
+        .await
+        .expect_err("an agent-style close must fail the probe");
         let d = Diagnosis::from_error(&e);
         assert_eq!(d.kind, ProbeFailure::AuthRefused, "detail: {e}");
         // F1: the headline describes the observed close, not a confirmed
@@ -718,7 +854,10 @@ mod tests {
         assert_eq!(d.headline(), "Closed right after the handshake");
         assert_close_guidance_is_uncertain(d.next_action());
         assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
-        assert!(!d.log_line().contains(SENTINEL), "log line leaked the token");
+        assert!(
+            !d.log_line().contains(SENTINEL),
+            "log line leaked the token"
+        );
         assert!(!d.message().contains(SENTINEL), "message leaked the token");
     }
 
@@ -736,7 +875,10 @@ mod tests {
             "host and port point at the EbbTop agent",
             "systemctl --user status ebbtop-agent",
         ] {
-            assert!(action.contains(need), "close guidance misses {need:?}: {action}");
+            assert!(
+                action.contains(need),
+                "close guidance misses {need:?}: {action}"
+            );
         }
         assert!(
             !action.contains("private network"),
@@ -750,8 +892,8 @@ mod tests {
     #[tokio::test]
     async fn non_agent_normal_close_is_indistinguishable_and_guidance_says_so() {
         use tokio::net::TcpListener;
-        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
         use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
@@ -765,9 +907,13 @@ mod tests {
                 }))
                 .await;
         });
-        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
-            .await
-            .expect_err("a benign non-agent close must fail the probe");
+        let e = probe_once(
+            &format!("ws://{addr}/ws"),
+            Some(SENTINEL),
+            Duration::from_secs(3),
+        )
+        .await
+        .expect_err("a benign non-agent close must fail the probe");
         assert_eq!(
             e, "get_metrics: agent closed the connection (wrong token?)",
             "the wire no longer hides the non-agent close; revisit the guidance"
@@ -784,8 +930,8 @@ mod tests {
     #[tokio::test]
     async fn non_agent_policy_close_is_indistinguishable_and_guidance_says_so() {
         use tokio::net::TcpListener;
-        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
         use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
         tokio::spawn(async move {
@@ -799,9 +945,13 @@ mod tests {
                 }))
                 .await;
         });
-        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
-            .await
-            .expect_err("a policy close must fail the probe");
+        let e = probe_once(
+            &format!("ws://{addr}/ws"),
+            Some(SENTINEL),
+            Duration::from_secs(3),
+        )
+        .await
+        .expect_err("a policy close must fail the probe");
         assert_eq!(e, "get_metrics: agent closed the connection (wrong token?)");
         let d = Diagnosis::from_error(&e);
         assert_eq!(d.kind, ProbeFailure::AuthRefused);
@@ -819,27 +969,43 @@ mod tests {
             let (_stream, _) = listener.accept().await.expect("accept");
             tokio::time::sleep(Duration::from_secs(2)).await;
         });
-        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_millis(300))
-            .await
-            .expect_err("a silent listener must time out");
+        let e = probe_once(
+            &format!("ws://{addr}/ws"),
+            Some(SENTINEL),
+            Duration::from_millis(300),
+        )
+        .await
+        .expect_err("a silent listener must time out");
         let d = Diagnosis::from_error(&e);
         assert_eq!(d.kind, ProbeFailure::Timeout, "detail: {e}");
         assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
         // Ambiguous by construction: the action must name the checks that
         // separate IP, private network, port and a stopped agent.
         for word in ["IP", "network", "port", "agent"] {
-            assert!(d.next_action().contains(word), "guidance misses {word}: {}", d.next_action());
+            assert!(
+                d.next_action().contains(word),
+                "guidance misses {word}: {}",
+                d.next_action()
+            );
         }
     }
 
     #[tokio::test]
     async fn probe_classifies_refused_port_as_unreachable() {
-        let e = probe_once("ws://127.0.0.1:1/ws", Some(SENTINEL), Duration::from_secs(2))
-            .await
-            .expect_err("closed port must fail");
+        let e = probe_once(
+            "ws://127.0.0.1:1/ws",
+            Some(SENTINEL),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("closed port must fail");
         let d = Diagnosis::from_error(&e);
         assert_eq!(d.kind, ProbeFailure::Unreachable, "detail: {e}");
-        assert!(d.next_action().contains("private network"), "not actionable: {}", d.next_action());
+        assert!(
+            d.next_action().contains("private network"),
+            "not actionable: {}",
+            d.next_action()
+        );
         assert!(!e.contains(SENTINEL), "probe error leaked the token: {e}");
     }
 
@@ -853,14 +1019,24 @@ mod tests {
             let (mut s, _) = listener.accept().await.expect("accept");
             let mut buf = [0u8; 2048];
             let _ = s.read(&mut buf).await;
-            let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n").await;
+            let _ = s
+                .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                .await;
         });
-        let e = probe_once(&format!("ws://{addr}/ws"), Some(SENTINEL), Duration::from_secs(3))
-            .await
-            .expect_err("a plain HTTP answer must fail the probe");
+        let e = probe_once(
+            &format!("ws://{addr}/ws"),
+            Some(SENTINEL),
+            Duration::from_secs(3),
+        )
+        .await
+        .expect_err("a plain HTTP answer must fail the probe");
         let d = Diagnosis::from_error(&e);
         assert_eq!(d.kind, ProbeFailure::NotAgent, "detail: {e}");
-        assert!(d.next_action().contains("port"), "not actionable: {}", d.next_action());
+        assert!(
+            d.next_action().contains("port"),
+            "not actionable: {}",
+            d.next_action()
+        );
     }
 
     #[test]
@@ -882,34 +1058,73 @@ mod tests {
         }
         // The one distinction the card names explicitly.
         assert!(
-            !ProbeFailure::AuthRefused.next_action().contains("private network"),
+            !ProbeFailure::AuthRefused
+                .next_action()
+                .contains("private network"),
             "an auth refusal must not be answered with network checks"
         );
         assert!(
-            !ProbeFailure::Unreachable.next_action().contains("Re-copy the token"),
+            !ProbeFailure::Unreachable
+                .next_action()
+                .contains("Re-copy the token"),
             "a failed network path must not be answered with the token"
         );
     }
 
     #[test]
     fn classification_reads_the_most_specific_evidence() {
-        assert_eq!(ProbeFailure::classify("get_metrics: agent closed the connection (wrong token?)"), ProbeFailure::AuthRefused);
-        assert_eq!(ProbeFailure::classify("get_metrics: no reply within 5000 ms"), ProbeFailure::Timeout);
-        assert_eq!(ProbeFailure::classify("connect timed out"), ProbeFailure::Timeout);
-        assert_eq!(ProbeFailure::classify("IO error: Connection refused (os error 111)"), ProbeFailure::Unreachable);
-        assert_eq!(ProbeFailure::classify("failed to lookup address information: Name or service not known"), ProbeFailure::Unreachable);
-        assert_eq!(ProbeFailure::classify("HTTP error: 404 Not Found"), ProbeFailure::NotAgent);
-        assert_eq!(ProbeFailure::classify("Protocol error: Missing, duplicated or incorrect header sec-websocket-accept"), ProbeFailure::NotAgent);
-        assert_eq!(ProbeFailure::classify("something else entirely"), ProbeFailure::Ambiguous);
+        assert_eq!(
+            ProbeFailure::classify("get_metrics: agent closed the connection (wrong token?)"),
+            ProbeFailure::AuthRefused
+        );
+        assert_eq!(
+            ProbeFailure::classify("get_metrics: no reply within 5000 ms"),
+            ProbeFailure::Timeout
+        );
+        assert_eq!(
+            ProbeFailure::classify("connect timed out"),
+            ProbeFailure::Timeout
+        );
+        assert_eq!(
+            ProbeFailure::classify("IO error: Connection refused (os error 111)"),
+            ProbeFailure::Unreachable
+        );
+        assert_eq!(
+            ProbeFailure::classify(
+                "failed to lookup address information: Name or service not known"
+            ),
+            ProbeFailure::Unreachable
+        );
+        assert_eq!(
+            ProbeFailure::classify("HTTP error: 404 Not Found"),
+            ProbeFailure::NotAgent
+        );
+        assert_eq!(
+            ProbeFailure::classify(
+                "Protocol error: Missing, duplicated or incorrect header sec-websocket-accept"
+            ),
+            ProbeFailure::NotAgent
+        );
+        assert_eq!(
+            ProbeFailure::classify("something else entirely"),
+            ProbeFailure::Ambiguous
+        );
     }
 
     #[test]
     fn scrub_removes_a_token_bearing_url_without_knowing_the_secret() {
-        assert_eq!(scrub("bad ws://h:1/ws?token=abc"), "bad ws://h:1/ws?token=<token>");
+        assert_eq!(
+            scrub("bad ws://h:1/ws?token=abc"),
+            "bad ws://h:1/ws?token=<token>"
+        );
         assert_eq!(scrub("x?token=abc&b=1"), "x?token=<token>&b=1");
         assert_eq!(scrub("no query here"), "no query here");
         let d = Diagnosis::from_error(&format!("bad ws://h:1/ws?token={SENTINEL}"));
-        assert!(!d.detail.contains(SENTINEL), "scrub missed the token: {}", d.detail);
+        assert!(
+            !d.detail.contains(SENTINEL),
+            "scrub missed the token: {}",
+            d.detail
+        );
         assert!(!d.log_line().contains(SENTINEL));
         assert!(!d.message().contains(SENTINEL));
     }
@@ -919,6 +1134,10 @@ mod tests {
         // Defence in depth: a library that echoes the URL must not leak it.
         let d = Diagnosis::from_error(&format!("connect failed ws://h:1/ws?token={SENTINEL}"));
         assert!(!d.detail.contains(SENTINEL), "detail: {}", d.detail);
-        assert!(d.detail.contains("<token>"), "detail lost the marker: {}", d.detail);
+        assert!(
+            d.detail.contains("<token>"),
+            "detail lost the marker: {}",
+            d.detail
+        );
     }
 }

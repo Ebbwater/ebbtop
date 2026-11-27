@@ -19,7 +19,10 @@ pub struct Ring<T> {
 
 impl<T> Ring<T> {
     pub fn new(cap: usize) -> Self {
-        Self { cap, buf: VecDeque::with_capacity(cap) }
+        Self {
+            cap,
+            buf: VecDeque::with_capacity(cap),
+        }
     }
     pub fn push(&mut self, v: T) {
         if self.buf.len() == self.cap {
@@ -56,9 +59,15 @@ pub struct NetRate {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Conn {
-    Connecting { attempt: u32 },
+    Connecting {
+        attempt: u32,
+    },
     Connected,
-    Down { reason: String, retry_in: Duration, since_ms: u64 },
+    Down {
+        reason: String,
+        retry_in: Duration,
+        since_ms: u64,
+    },
 }
 
 /// Nearest-rank percentile, p in 0..=100. None when empty.
@@ -208,7 +217,11 @@ impl Default for State {
 }
 
 fn pct(used: u64, total: u64) -> f64 {
-    if total == 0 { 0.0 } else { used as f64 * 100.0 / total as f64 }
+    if total == 0 {
+        0.0
+    } else {
+        used as f64 * 100.0 / total as f64
+    }
 }
 
 impl State {
@@ -220,7 +233,11 @@ impl State {
                 if self.conn == Conn::Connected {
                     self.reconnects += 1;
                 }
-                self.conn = Conn::Down { reason, retry_in, since_ms: now_ms };
+                self.conn = Conn::Down {
+                    reason,
+                    retry_in,
+                    since_ms: now_ms,
+                };
             }
             Event::Metrics { m, recv_ms } => self.on_metrics(m, recv_ms),
             Event::Processes { p, recv_ms } => {
@@ -235,7 +252,11 @@ impl State {
                     self.prev_procs_t = Some(t);
                 }
                 // Derived once per sample: 400 rows at 1 Hz, not per frame.
-                self.row_workload = p.rows.iter().map(|r| view::workload_key(&r.cgroup)).collect();
+                self.row_workload = p
+                    .rows
+                    .iter()
+                    .map(|r| view::workload_key(&r.cgroup))
+                    .collect();
                 self.workloads = view::group_by_workload(&p.rows);
                 self.procs = Some(p);
                 self.procs_recv_ms = recv_ms;
@@ -281,7 +302,11 @@ impl State {
                     self.net
                         .entry(n.name.clone())
                         .or_insert_with(|| Ring::new(HISTORY_LEN))
-                        .push(NetRate { t_ms: t, rx_bps: rx, tx_bps: tx });
+                        .push(NetRate {
+                            t_ms: t,
+                            rx_bps: rx,
+                            tx_bps: tx,
+                        });
                 }
             }
             for d in &m.disk_io {
@@ -291,7 +316,11 @@ impl State {
                     self.disk_io
                         .entry(d.name.clone())
                         .or_insert_with(|| Ring::new(HISTORY_LEN))
-                        .push(NetRate { t_ms: t, rx_bps: r, tx_bps: w });
+                        .push(NetRate {
+                            t_ms: t,
+                            rx_bps: r,
+                            tx_bps: w,
+                        });
                 }
             }
         }
@@ -322,7 +351,11 @@ impl State {
         let cpu = d.process.cpu_usage as f64;
         let mem = d.process.mem_bytes as f64;
         let start = d.process.start_time;
-        let t = if d.cached_at == 0 { recv_ms } else { d.cached_at.saturating_mul(1000) };
+        let t = if d.cached_at == 0 {
+            recv_ms
+        } else {
+            d.cached_at.saturating_mul(1000)
+        };
         // New pid (selection changed) or reused pid (same pid, different
         // start): start a fresh history rather than gluing two processes
         // together. First sample for a pid always counts as new.
@@ -351,13 +384,17 @@ impl State {
     /// Agent sample time to `now_ms` on the client clock: end-to-end lag.
     /// Includes any clock offset between the machines.
     pub fn sample_age_ms(&self, now_ms: u64) -> Option<i64> {
-        self.metrics.as_ref().map(|m| now_ms as i64 - m.sampled_at_ms as i64)
+        self.metrics
+            .as_ref()
+            .map(|m| now_ms as i64 - m.sampled_at_ms as i64)
     }
 
     /// Time since a new sample last arrived, client clock only. Use this
     /// for LIVE/STALE: immune to clock offset between the machines.
     pub fn since_new_sample_ms(&self, now_ms: u64) -> Option<i64> {
-        self.metrics.as_ref().map(|_| now_ms as i64 - self.last_new_sample_recv_ms as i64)
+        self.metrics
+            .as_ref()
+            .map(|_| now_ms as i64 - self.last_new_sample_recv_ms as i64)
     }
 
     /// Whether the stored kill reply should still show in the status bar.
@@ -389,10 +426,17 @@ impl State {
             "conn={conn} since_new_ms={} interval_p50={} interval_p95={} interval_max={} lag_p50={} lag_p95={} \
 proc_interval_p95={} proc_lag_p95={} gaps={} repeats={} reconnects={} samples={}",
             o(self.since_new_sample_ms(now_ms)),
-            o(self.stats.interval_p(50.0)), o(self.stats.interval_p(95.0)), o(self.stats.interval_p(100.0)),
-            o(self.stats.age_p(50.0)), o(self.stats.age_p(95.0)),
-            o(self.stats.proc_interval_p(95.0)), o(self.stats.proc_age_p(95.0)),
-            self.stats.gaps, self.stats.repeats, self.reconnects, self.cpu.len(),
+            o(self.stats.interval_p(50.0)),
+            o(self.stats.interval_p(95.0)),
+            o(self.stats.interval_p(100.0)),
+            o(self.stats.age_p(50.0)),
+            o(self.stats.age_p(95.0)),
+            o(self.stats.proc_interval_p(95.0)),
+            o(self.stats.proc_age_p(95.0)),
+            self.stats.gaps,
+            self.stats.repeats,
+            self.reconnects,
+            self.cpu.len(),
         )
     }
 
@@ -401,7 +445,12 @@ proc_interval_p95={} proc_lag_p95={} gaps={} repeats={} reconnects={} samples={}
         let mut v: Vec<(String, u64)> = self
             .metrics
             .as_ref()
-            .map(|m| m.networks.iter().map(|n| (n.name.clone(), n.received + n.transmitted)).collect())
+            .map(|m| {
+                m.networks
+                    .iter()
+                    .map(|n| (n.name.clone(), n.received + n.transmitted))
+                    .collect()
+            })
             .unwrap_or_default();
         v.sort_by(|a, b| (a.0 == "lo").cmp(&(b.0 == "lo")).then(b.1.cmp(&a.1)));
         v.into_iter().map(|x| x.0).collect()
@@ -425,11 +474,19 @@ mod tests {
             hostname: "k".into(),
             cpu_temp_c: None,
             disks: vec![],
-            networks: vec![NetworkInfo { name: "eth0".into(), received: rx, transmitted: 0 }],
+            networks: vec![NetworkInfo {
+                name: "eth0".into(),
+                received: rx,
+                transmitted: 0,
+            }],
             gpus: None,
             load_avg: None,
             uptime_s: None,
-            disk_io: vec![crate::wire::DiskIo { name: "nvme0n1".into(), read_bytes: rx * 2, written_bytes: rx }],
+            disk_io: vec![crate::wire::DiskIo {
+                name: "nvme0n1".into(),
+                read_bytes: rx * 2,
+                written_bytes: rx,
+            }],
             cpu_model: None,
             agent_version: None,
             boot_nonce: None,
@@ -457,15 +514,45 @@ mod tests {
     #[test]
     fn rates_intervals_gaps_and_repeats() {
         let mut s = State::default();
-        s.apply(Event::Metrics { m: metrics(1_000, 0), recv_ms: 1_030 }, 0);
-        s.apply(Event::Metrics { m: metrics(2_000, 5_000), recv_ms: 2_020 }, 0);
-        s.apply(Event::Metrics { m: metrics(2_000, 5_000), recv_ms: 2_500 }, 0); // cache repeat
-        s.apply(Event::Metrics { m: metrics(4_500, 5_000), recv_ms: 4_510 }, 0); // gap
+        s.apply(
+            Event::Metrics {
+                m: metrics(1_000, 0),
+                recv_ms: 1_030,
+            },
+            0,
+        );
+        s.apply(
+            Event::Metrics {
+                m: metrics(2_000, 5_000),
+                recv_ms: 2_020,
+            },
+            0,
+        );
+        s.apply(
+            Event::Metrics {
+                m: metrics(2_000, 5_000),
+                recv_ms: 2_500,
+            },
+            0,
+        ); // cache repeat
+        s.apply(
+            Event::Metrics {
+                m: metrics(4_500, 5_000),
+                recv_ms: 4_510,
+            },
+            0,
+        ); // gap
         let net: Vec<_> = s.net["eth0"].iter().map(|r| r.rx_bps).collect();
         assert_eq!(net, vec![5_000.0, 0.0]);
-        let disk: Vec<_> = s.disk_io["nvme0n1"].iter().map(|r| (r.rx_bps, r.tx_bps)).collect();
+        let disk: Vec<_> = s.disk_io["nvme0n1"]
+            .iter()
+            .map(|r| (r.rx_bps, r.tx_bps))
+            .collect();
         assert_eq!(disk, vec![(10_000.0, 5_000.0), (0.0, 0.0)]);
-        assert_eq!(s.stats.interval_ms.iter().copied().collect::<Vec<_>>(), vec![1_000, 2_500]);
+        assert_eq!(
+            s.stats.interval_ms.iter().copied().collect::<Vec<_>>(),
+            vec![1_000, 2_500]
+        );
         assert_eq!(s.stats.gaps, 1);
         assert_eq!(s.stats.repeats, 1);
         assert_eq!(s.cpu.len(), 3);
@@ -486,22 +573,52 @@ mod tests {
         };
         let mut a = metrics(1_000, 0);
         a.gpus = Some(vec![gpu(10)]);
-        s.apply(Event::Metrics { m: a, recv_ms: 1_010 }, 0);
+        s.apply(
+            Event::Metrics {
+                m: a,
+                recv_ms: 1_010,
+            },
+            0,
+        );
         let mut b = metrics(2_000, 0);
         b.gpus = Some(vec![gpu(50)]);
-        s.apply(Event::Metrics { m: b.clone(), recv_ms: 2_010 }, 0);
-        s.apply(Event::Metrics { m: b, recv_ms: 2_400 }, 0); // cache repeat
+        s.apply(
+            Event::Metrics {
+                m: b.clone(),
+                recv_ms: 2_010,
+            },
+            0,
+        );
+        s.apply(
+            Event::Metrics {
+                m: b,
+                recv_ms: 2_400,
+            },
+            0,
+        ); // cache repeat
         let ring = &s.gpu_pct["NVIDIA GeForce GTX 1650"];
-        assert_eq!(ring.iter().map(|p| p.1).collect::<Vec<_>>(), vec![10.0, 50.0]);
+        assert_eq!(
+            ring.iter().map(|p| p.1).collect::<Vec<_>>(),
+            vec![10.0, 50.0]
+        );
         let mring = &s.gpu_mem_pct["NVIDIA GeForce GTX 1650"];
-        assert_eq!(mring.iter().map(|p| p.1).collect::<Vec<_>>(), vec![25.0, 25.0]);
+        assert_eq!(
+            mring.iter().map(|p| p.1).collect::<Vec<_>>(),
+            vec![25.0, 25.0]
+        );
     }
 
     #[test]
     fn staleness_ignores_clock_offset() {
         let mut s = State::default();
         // Agent clock 10 s ahead of client: lag looks negative, freshness is still right.
-        s.apply(Event::Metrics { m: metrics(20_000, 0), recv_ms: 10_005 }, 0);
+        s.apply(
+            Event::Metrics {
+                m: metrics(20_000, 0),
+                recv_ms: 10_005,
+            },
+            0,
+        );
         assert_eq!(s.sample_age_ms(10_100), Some(-9_900));
         assert_eq!(s.since_new_sample_ms(10_100), Some(95));
         assert!(s.summary_line(10_100).contains("since_new_ms=95"));
@@ -510,7 +627,10 @@ mod tests {
     #[test]
     fn reconnect_counted_only_after_connected() {
         let mut s = State::default();
-        let down = || Event::Disconnected { reason: "x".into(), retry_in: Duration::ZERO };
+        let down = || Event::Disconnected {
+            reason: "x".into(),
+            retry_in: Duration::ZERO,
+        };
         s.apply(down(), 0);
         assert_eq!(s.reconnects, 0);
         s.apply(Event::Connected, 0);
@@ -552,9 +672,27 @@ mod tests {
     #[test]
     fn process_detail_history_skips_cache_repeats() {
         let mut s = State::default();
-        s.apply(Event::ProcessDetail { d: detail(42, 10.0, 1_000), recv_ms: 1_010_000 }, 0);
-        s.apply(Event::ProcessDetail { d: detail(42, 20.0, 1_001), recv_ms: 1_011_000 }, 0);
-        s.apply(Event::ProcessDetail { d: detail(42, 20.0, 1_001), recv_ms: 1_011_500 }, 0); // cache repeat
+        s.apply(
+            Event::ProcessDetail {
+                d: detail(42, 10.0, 1_000),
+                recv_ms: 1_010_000,
+            },
+            0,
+        );
+        s.apply(
+            Event::ProcessDetail {
+                d: detail(42, 20.0, 1_001),
+                recv_ms: 1_011_000,
+            },
+            0,
+        );
+        s.apply(
+            Event::ProcessDetail {
+                d: detail(42, 20.0, 1_001),
+                recv_ms: 1_011_500,
+            },
+            0,
+        ); // cache repeat
         let vals: Vec<_> = s.proc_detail_cpu.iter().map(|p| p.1).collect();
         assert_eq!(vals, vec![10.0, 20.0]);
         assert_eq!(s.proc_detail.as_ref().unwrap().process.pid, 42);
@@ -565,8 +703,20 @@ mod tests {
     #[test]
     fn process_detail_history_resets_on_pid_change() {
         let mut s = State::default();
-        s.apply(Event::ProcessDetail { d: detail(42, 10.0, 1_000), recv_ms: 1_000_000 }, 0);
-        s.apply(Event::ProcessDetail { d: detail(43, 30.0, 1_001), recv_ms: 1_001_000 }, 0);
+        s.apply(
+            Event::ProcessDetail {
+                d: detail(42, 10.0, 1_000),
+                recv_ms: 1_000_000,
+            },
+            0,
+        );
+        s.apply(
+            Event::ProcessDetail {
+                d: detail(43, 30.0, 1_001),
+                recv_ms: 1_001_000,
+            },
+            0,
+        );
         let pts: Vec<_> = s.proc_detail_cpu.iter().copied().collect();
         assert_eq!(pts, vec![(1_001_000, 30.0)]);
         let mem: Vec<_> = s.proc_detail_mem.iter().copied().collect();
@@ -579,10 +729,22 @@ mod tests {
         let mut s = State::default();
         let mut a = detail(42, 10.0, 1_000);
         a.process.mem_bytes = 1000;
-        s.apply(Event::ProcessDetail { d: a, recv_ms: 1_000_000 }, 0);
+        s.apply(
+            Event::ProcessDetail {
+                d: a,
+                recv_ms: 1_000_000,
+            },
+            0,
+        );
         let mut b = detail(42, 20.0, 1_001);
         b.process.mem_bytes = 2000;
-        s.apply(Event::ProcessDetail { d: b, recv_ms: 1_001_000 }, 0);
+        s.apply(
+            Event::ProcessDetail {
+                d: b,
+                recv_ms: 1_001_000,
+            },
+            0,
+        );
         let pts: Vec<_> = s.proc_detail_mem.iter().copied().collect();
         assert_eq!(pts, vec![(1_000_000, 1000.0), (1_001_000, 2000.0)]);
     }
@@ -591,36 +753,71 @@ mod tests {
     fn kill_result_kept_and_does_not_touch_metrics() {
         let mut s = State::default();
         assert_eq!(s.kill, None);
-        s.apply(Event::KillResult {
-            r: KillResult { ok: true, pid: 4242, signal: "TERM".into(), error: None },
-            recv_ms: 9_999,
-        }, 9_999);
+        s.apply(
+            Event::KillResult {
+                r: KillResult {
+                    ok: true,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: None,
+                },
+                recv_ms: 9_999,
+            },
+            9_999,
+        );
         assert_eq!(s.kill.as_ref().map(|r| r.pid), Some(4242));
         assert_eq!(s.kill_recv_ms, 9_999);
         assert!(s.metrics.is_none()); // no sample arrived
         // A later refusal replaces it.
-        s.apply(Event::KillResult {
-            r: KillResult { ok: false, pid: 1, signal: "INT".into(), error: Some("pid 1".into()) },
-            recv_ms: 10_000,
-        }, 10_000);
+        s.apply(
+            Event::KillResult {
+                r: KillResult {
+                    ok: false,
+                    pid: 1,
+                    signal: "INT".into(),
+                    error: Some("pid 1".into()),
+                },
+                recv_ms: 10_000,
+            },
+            10_000,
+        );
         assert_eq!(s.kill.as_ref().map(|r| r.ok), Some(false));
     }
 
     #[test]
     fn kill_success_expires_but_refusal_persists() {
         let mut s = State::default();
-        s.apply(Event::KillResult {
-            r: KillResult { ok: true, pid: 4242, signal: "TERM".into(), error: None },
-            recv_ms: 10_000,
-        }, 10_000);
+        s.apply(
+            Event::KillResult {
+                r: KillResult {
+                    ok: true,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: None,
+                },
+                recv_ms: 10_000,
+            },
+            10_000,
+        );
         assert!(s.kill_visible(10_000));
         assert!(s.kill_visible(10_000 + KILL_OK_TTL_MS - 1));
-        assert!(!s.kill_visible(10_000 + KILL_OK_TTL_MS), "success should expire");
+        assert!(
+            !s.kill_visible(10_000 + KILL_OK_TTL_MS),
+            "success should expire"
+        );
         // A refusal stays visible until cleared.
-        s.apply(Event::KillResult {
-            r: KillResult { ok: false, pid: 4242, signal: "TERM".into(), error: Some("stale start_time".into()) },
-            recv_ms: 20_000,
-        }, 20_000);
+        s.apply(
+            Event::KillResult {
+                r: KillResult {
+                    ok: false,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: Some("stale start_time".into()),
+                },
+                recv_ms: 20_000,
+            },
+            20_000,
+        );
         assert!(s.kill_visible(20_000 + 60_000));
         s.clear_kill();
         assert!(!s.kill_visible(20_000 + 60_000));

@@ -30,7 +30,10 @@ fn install_crash_hook() {
             dir.push("ebbtop");
             std::fs::create_dir_all(&dir)?;
             dir.push("ebbtop.log");
-            let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&dir)?;
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&dir)?;
             writeln!(f, "{:?} PANIC: {info}", std::time::SystemTime::now())?;
             Ok(())
         })();
@@ -54,5 +57,9 @@ fn main() -> eframe::Result {
         persist_window: true,
         ..Default::default()
     };
-    eframe::run_native("ebbtop", opts, Box::new(|cc| Ok(Box::new(app::App::new(cc.egui_ctx.clone())))))
+    eframe::run_native(
+        "ebbtop",
+        opts,
+        Box::new(|cc| Ok(Box::new(app::App::new(cc.egui_ctx.clone())))),
+    )
 }

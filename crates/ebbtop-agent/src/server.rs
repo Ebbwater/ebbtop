@@ -7,8 +7,8 @@
 
 use axum::{
     Json, Router,
-    extract::rejection::JsonRejection,
     extract::State,
+    extract::rejection::JsonRejection,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -50,7 +50,10 @@ fn status_for(e: PairError) -> StatusCode {
 /// The code is read from the JSON body only. It is not logged, not echoed in
 /// an error, and not accepted from the query string (a `?code=` request has
 /// no body field and is refused as a bad request).
-async fn pair_handler(State(state): State<AppState>, body: Result<Json<PairRequest>, JsonRejection>) -> Response {
+async fn pair_handler(
+    State(state): State<AppState>,
+    body: Result<Json<PairRequest>, JsonRejection>,
+) -> Response {
     let Ok(Json(req)) = body else {
         return no_store(
             StatusCode::BAD_REQUEST,
@@ -60,7 +63,10 @@ async fn pair_handler(State(state): State<AppState>, body: Result<Json<PairReque
     // One exchange at a time: two concurrent requests must not both consume
     // the same pending code.
     let _guard = state.pair_lock.lock().await;
-    match state.pairing.exchange(&req.code, req.label.as_deref(), now_ms()) {
+    match state
+        .pairing
+        .exchange(&req.code, req.label.as_deref(), now_ms())
+    {
         Ok(rec) => no_store(
             StatusCode::OK,
             serde_json::json!(PairResponse {
@@ -77,12 +83,7 @@ async fn pair_handler(State(state): State<AppState>, body: Result<Json<PairReque
 
 /// JSON response that a proxy must never cache: the body can carry a token.
 fn no_store(status: StatusCode, body: serde_json::Value) -> Response {
-    (
-        status,
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(body),
-    )
-        .into_response()
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
 
 #[cfg(test)]
@@ -94,7 +95,13 @@ mod tests {
         assert_eq!(status_for(PairError::NoPendingCode), StatusCode::NOT_FOUND);
         assert_eq!(status_for(PairError::WrongCode), StatusCode::FORBIDDEN);
         assert_eq!(status_for(PairError::Expired), StatusCode::FORBIDDEN);
-        assert_eq!(status_for(PairError::TooManyAttempts), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(status_for(PairError::StateIo), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_for(PairError::TooManyAttempts),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            status_for(PairError::StateIo),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

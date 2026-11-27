@@ -31,7 +31,10 @@ async fn main() -> anyhow::Result<()> {
         None => std::env::var("EBBTOP_TOKEN").ok(),
     };
     let cfg = ClientConfig::new(url.clone(), token);
-    println!("probe url={url} seconds={secs} token={}", if cfg.token.is_some() { "set" } else { "none" });
+    println!(
+        "probe url={url} seconds={secs} token={}",
+        if cfg.token.is_some() { "set" } else { "none" }
+    );
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(client::run(cfg, move |e| {
@@ -62,11 +65,21 @@ async fn main() -> anyhow::Result<()> {
                     }
                     last_t = m.sampled_at_ms;
                 }
-                println!("metrics sampled_at={} recv={} age_ms={} cpu={:.1}", m.sampled_at_ms, recv_ms,
-                    *recv_ms as i64 - m.sampled_at_ms as i64, m.cpu_total);
+                println!(
+                    "metrics sampled_at={} recv={} age_ms={} cpu={:.1}",
+                    m.sampled_at_ms,
+                    recv_ms,
+                    *recv_ms as i64 - m.sampled_at_ms as i64,
+                    m.cpu_total
+                );
             }
-            Event::Processes { p, recv_ms } => println!("procs   sampled_at={} recv={} age_ms={} n={}",
-                p.sampled_at_ms, recv_ms, *recv_ms as i64 - p.sampled_at_ms as i64, p.rows.len()),
+            Event::Processes { p, recv_ms } => println!(
+                "procs   sampled_at={} recv={} age_ms={} n={}",
+                p.sampled_at_ms,
+                recv_ms,
+                *recv_ms as i64 - p.sampled_at_ms as i64,
+                p.rows.len()
+            ),
             Event::Disks { d, .. } => println!("disks   n={}", d.len()),
             other => println!("{other:?}"),
         }
@@ -75,22 +88,49 @@ async fn main() -> anyhow::Result<()> {
 
     let s = &st.stats;
     println!("--- summary");
-    println!("whole run: metrics_frames={metrics_frames} distinct_samples={distinct} repeats={} gaps_over_2000ms={gaps} max_interval_ms={max_iv} reconnects={}",
-        s.repeats, st.reconnects);
+    println!(
+        "whole run: metrics_frames={metrics_frames} distinct_samples={distinct} repeats={} gaps_over_2000ms={gaps} max_interval_ms={max_iv} reconnects={}",
+        s.repeats, st.reconnects
+    );
     println!("percentiles below: last {} samples", s.interval_ms.len());
-    println!("metrics interval_ms p50={} p95={} max={}", fmt_opt(s.interval_p(50.0)), fmt_opt(s.interval_p(95.0)), fmt_opt(s.interval_p(100.0)));
-    println!("metrics age_ms      p50={} p95={} max={}", fmt_opt(s.age_p(50.0)), fmt_opt(s.age_p(95.0)), fmt_opt(s.age_p(100.0)));
-    println!("procs   interval_ms p50={} p95={} max={}", fmt_opt(s.proc_interval_p(50.0)), fmt_opt(s.proc_interval_p(95.0)), fmt_opt(s.proc_interval_p(100.0)));
-    println!("procs   age_ms      p50={} p95={} max={}", fmt_opt(s.proc_age_p(50.0)), fmt_opt(s.proc_age_p(95.0)), fmt_opt(s.proc_age_p(100.0)));
+    println!(
+        "metrics interval_ms p50={} p95={} max={}",
+        fmt_opt(s.interval_p(50.0)),
+        fmt_opt(s.interval_p(95.0)),
+        fmt_opt(s.interval_p(100.0))
+    );
+    println!(
+        "metrics age_ms      p50={} p95={} max={}",
+        fmt_opt(s.age_p(50.0)),
+        fmt_opt(s.age_p(95.0)),
+        fmt_opt(s.age_p(100.0))
+    );
+    println!(
+        "procs   interval_ms p50={} p95={} max={}",
+        fmt_opt(s.proc_interval_p(50.0)),
+        fmt_opt(s.proc_interval_p(95.0)),
+        fmt_opt(s.proc_interval_p(100.0))
+    );
+    println!(
+        "procs   age_ms      p50={} p95={} max={}",
+        fmt_opt(s.proc_age_p(50.0)),
+        fmt_opt(s.proc_age_p(95.0)),
+        fmt_opt(s.proc_age_p(100.0))
+    );
     if let Some(m) = &st.metrics {
         match m.gpus.as_deref().filter(|g| !g.is_empty()) {
             Some(gpus) => {
                 for g in gpus {
-                    let temp = g.temperature_c.map(|t| format!("{t:.0}C")).unwrap_or_else(|| "n/a".into());
+                    let temp = g
+                        .temperature_c
+                        .map(|t| format!("{t:.0}C"))
+                        .unwrap_or_else(|| "n/a".into());
                     let used = ebbtop_core::view::bytes(g.mem_used_bytes);
                     let total = ebbtop_core::view::bytes(g.mem_total_bytes);
-                    println!("gpu: {} util={}% vram={used}/{total} temp={temp}",
-                        g.name, g.utilization_gpu_pct);
+                    println!(
+                        "gpu: {} util={}% vram={used}/{total} temp={temp}",
+                        g.name, g.utilization_gpu_pct
+                    );
                 }
             }
             None => println!("gpu: none"),
@@ -99,10 +139,20 @@ async fn main() -> anyhow::Result<()> {
     if let (Some(p), Some(m)) = (&st.procs, &st.metrics) {
         let mut rows = p.rows.clone();
         rows.sort_by(|a, b| b.cpu_usage.total_cmp(&a.cpu_usage));
-        println!("top by cpu at procs sampled_at={} (mem_total={}):", p.sampled_at_ms, m.mem_total);
+        println!(
+            "top by cpu at procs sampled_at={} (mem_total={}):",
+            p.sampled_at_ms, m.mem_total
+        );
         for r in rows.iter().take(5) {
-            println!("  {:>7} {:<20} {:<10} {:<10} cpu={:5.1} mem={:5.1}%", r.pid, r.name, r.user, r.state,
-                r.cpu_usage, r.mem_bytes as f64 * 100.0 / m.mem_total.max(1) as f64);
+            println!(
+                "  {:>7} {:<20} {:<10} {:<10} cpu={:5.1} mem={:5.1}%",
+                r.pid,
+                r.name,
+                r.user,
+                r.state,
+                r.cpu_usage,
+                r.mem_bytes as f64 * 100.0 / m.mem_total.max(1) as f64
+            );
         }
     }
     Ok(())

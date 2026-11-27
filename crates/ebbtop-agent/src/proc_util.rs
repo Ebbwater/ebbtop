@@ -9,7 +9,11 @@ pub fn parse_loadavg(s: &str) -> Option<[f64; 3]> {
 }
 
 pub fn parse_uptime(s: &str) -> Option<u64> {
-    s.split_whitespace().next()?.parse::<f64>().ok().map(|f| f as u64)
+    s.split_whitespace()
+        .next()?
+        .parse::<f64>()
+        .ok()
+        .map(|f| f as u64)
 }
 
 /// /proc/<pid>/cgroup: prefer the unified (v2) entry "0::/path"; fall back to
@@ -39,7 +43,10 @@ pub fn read_cgroup_path(pid: u32) -> Option<String> {
 /// Whole-disk devices only: skip loop/ram/zram and device-mapper (which
 /// would double-count I/O already seen on the physical disk).
 fn wanted(name: &str, whole_disks: &[String]) -> bool {
-    !(name.starts_with("loop") || name.starts_with("ram") || name.starts_with("zram") || name.starts_with("dm-"))
+    !(name.starts_with("loop")
+        || name.starts_with("ram")
+        || name.starts_with("zram")
+        || name.starts_with("dm-"))
         && whole_disks.iter().any(|d| d == name)
 }
 
@@ -91,7 +98,10 @@ pub fn disk_io() -> Vec<DiskIo> {
     #[cfg(target_os = "linux")]
     {
         let whole: Vec<String> = std::fs::read_dir("/sys/block")
-            .map(|rd| rd.filter_map(|e| e.ok()?.file_name().into_string().ok()).collect())
+            .map(|rd| {
+                rd.filter_map(|e| e.ok()?.file_name().into_string().ok())
+                    .collect()
+            })
             .unwrap_or_default();
         return std::fs::read_to_string("/proc/diskstats")
             .map(|s| parse_diskstats(&s, &whole))
@@ -134,7 +144,10 @@ mod tests {
 
     #[test]
     fn loadavg_and_uptime() {
-        assert_eq!(parse_loadavg("0.52 0.58 0.59 1/389 12345\n"), Some([0.52, 0.58, 0.59]));
+        assert_eq!(
+            parse_loadavg("0.52 0.58 0.59 1/389 12345\n"),
+            Some([0.52, 0.58, 0.59])
+        );
         assert_eq!(parse_loadavg("garbage"), None);
         assert_eq!(parse_uptime("453201.77 3539221.48\n"), Some(453201));
     }
@@ -145,7 +158,11 @@ mod tests {
                  259       0 nvme0n1 100 0 2000 10 50 0 4000 20 0 30 30 0 0 0 0 0 0\n\
                  259       1 nvme0n1p1 1 0 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n\
                  252       0 dm-0 90 0 1900 10 40 0 3900 20 0 30 30 0 0 0 0 0 0\n";
-        let whole = vec!["loop0".to_string(), "nvme0n1".to_string(), "dm-0".to_string()];
+        let whole = vec![
+            "loop0".to_string(),
+            "nvme0n1".to_string(),
+            "dm-0".to_string(),
+        ];
         let v = parse_diskstats(s, &whole);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].name, "nvme0n1");
@@ -155,7 +172,10 @@ mod tests {
 
     #[test]
     fn btime_and_start_time_ms() {
-        assert_eq!(parse_btime("cpu  1 2\nbtime 1700000000\nintr 3\n"), Some(1_700_000_000));
+        assert_eq!(
+            parse_btime("cpu  1 2\nbtime 1700000000\nintr 3\n"),
+            Some(1_700_000_000)
+        );
         assert_eq!(parse_btime("cpu  1 2\n"), None);
         // 100 ticks = 1 s, so exact: (1_700_000_000 * 100 + 250) * 10 = start+2.5 s
         assert_eq!(start_time_ms(1_700_000_000, 250), 1_700_000_002_500);
@@ -166,8 +186,13 @@ mod tests {
     fn cgroup_path_v2_v1_and_garbage() {
         // Unified hierarchy (this host) — the "0::" line is the answer.
         assert_eq!(
-            parse_cgroup_path("0::/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service\n"),
-            Some("/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service".to_string())
+            parse_cgroup_path(
+                "0::/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service\n"
+            ),
+            Some(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service"
+                    .to_string()
+            )
         );
         // Mixed hierarchy: prefer "0::" even when a v1 systemd line is present.
         assert_eq!(

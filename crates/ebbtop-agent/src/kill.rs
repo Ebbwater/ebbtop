@@ -52,7 +52,11 @@ pub fn parse_kill_request(text: &str) -> Result<KillRequest, &'static str> {
             let pid: u32 = p.parse().map_err(|_| ERR_GRAMMAR)?;
             let start_time_ms: u64 = s.parse().map_err(|_| ERR_GRAMMAR)?;
             match sig {
-                "TERM" | "INT" => Ok(KillRequest { pid, start_time_ms, signal: if sig == "TERM" { "TERM" } else { "INT" } }),
+                "TERM" | "INT" => Ok(KillRequest {
+                    pid,
+                    start_time_ms,
+                    signal: if sig == "TERM" { "TERM" } else { "INT" },
+                }),
                 _ => Err(ERR_GRAMMAR),
             }
         }
@@ -69,7 +73,12 @@ pub struct ProcTarget {
 }
 
 /// Spec checks 1-5, in order. Pure so it tests without /proc.
-pub fn decide_kill(req: &KillRequest, t: &ProcTarget, self_pid: u32, self_uid: u32) -> Result<(), &'static str> {
+pub fn decide_kill(
+    req: &KillRequest,
+    t: &ProcTarget,
+    self_pid: u32,
+    self_uid: u32,
+) -> Result<(), &'static str> {
     if req.pid == 1 {
         return Err(ERR_PID1);
     }
@@ -117,7 +126,12 @@ fn quote(s: &str) -> String {
 }
 
 fn err_out(pid: u32, signal: &str, err: &str) -> KillOutcome {
-    KillOutcome { ok: false, pid, signal: signal.to_string(), error: Some(err.to_string()) }
+    KillOutcome {
+        ok: false,
+        pid,
+        signal: signal.to_string(),
+        error: Some(err.to_string()),
+    }
 }
 
 // ---- Journal -----------------------------------------------------------
@@ -132,7 +146,10 @@ fn journal_line(line: &str) {
         use std::os::unix::net::UnixDatagram;
         if let Ok(sock) = UnixDatagram::unbound() {
             let msg = format!("PRIORITY=6\nMESSAGE={line}\n");
-            if sock.send_to(msg.as_bytes(), "/run/systemd/journal/socket").is_ok() {
+            if sock
+                .send_to(msg.as_bytes(), "/run/systemd/journal/socket")
+                .is_ok()
+            {
                 return;
             }
         }
@@ -141,18 +158,33 @@ fn journal_line(line: &str) {
 }
 
 pub fn journal_request_line(req: &KillRequest) -> String {
-    format!("ebbtop kill request pid={} start_time_ms={} signal={}", req.pid, req.start_time_ms, req.signal)
+    format!(
+        "ebbtop kill request pid={} start_time_ms={} signal={}",
+        req.pid, req.start_time_ms, req.signal
+    )
 }
 
 pub fn journal_result_line(req: &KillRequest, out: &KillOutcome) -> String {
     match &out.error {
-        None => format!("ebbtop kill result pid={} signal={} ok=true", req.pid, req.signal),
-        Some(e) => format!("ebbtop kill result pid={} signal={} ok=false err={}", req.pid, req.signal, quote(e)),
+        None => format!(
+            "ebbtop kill result pid={} signal={} ok=true",
+            req.pid, req.signal
+        ),
+        Some(e) => format!(
+            "ebbtop kill result pid={} signal={} ok=false err={}",
+            req.pid,
+            req.signal,
+            quote(e)
+        ),
     }
 }
 
 pub fn journal_bad_request_line(text: &str, out: &KillOutcome) -> String {
-    format!("ebbtop kill request raw={} ok=false err={}", quote(text), quote(out.error.as_deref().unwrap_or(ERR_GRAMMAR)))
+    format!(
+        "ebbtop kill request raw={} ok=false err={}",
+        quote(text),
+        quote(out.error.as_deref().unwrap_or(ERR_GRAMMAR))
+    )
 }
 
 // ---- Entry point (called from ws.rs) -------------------------------------
@@ -185,7 +217,12 @@ fn attempt_kill(req: &KillRequest) -> KillOutcome {
     match decide_kill(req, &target, std::process::id(), self_uid) {
         Err(reason) => err_out(req.pid, req.signal, reason),
         Ok(()) => match send_signal(req.pid, sig_num(req.signal)) {
-            Ok(()) => KillOutcome { ok: true, pid: req.pid, signal: req.signal.to_string(), error: None },
+            Ok(()) => KillOutcome {
+                ok: true,
+                pid: req.pid,
+                signal: req.signal.to_string(),
+                error: None,
+            },
             Err(e) => err_out(req.pid, req.signal, &e),
         },
     }
@@ -209,8 +246,13 @@ fn read_target(pid: u32) -> Option<ProcTarget> {
         .lines()
         .find_map(|l| l.strip_prefix("Uid:"))
         .and_then(|v| v.split_whitespace().next()?.parse().ok())?;
-    let start_time_ms = crate::proc_util::start_time_ms(crate::proc_util::boot_btime()?, start_ticks);
-    Some(ProcTarget { ppid, uid, start_time_ms })
+    let start_time_ms =
+        crate::proc_util::start_time_ms(crate::proc_util::boot_btime()?, start_ticks);
+    Some(ProcTarget {
+        ppid,
+        uid,
+        start_time_ms,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -264,7 +306,10 @@ fn raw_syscall(n: i64, a1: i64, a2: i64, a3: i64, a4: i64) -> i64 {
     ret
 }
 
-#[cfg(all(target_os = "linux", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "x86_64", target_arch = "aarch64"))
+))]
 fn raw_syscall(n: i64, _a1: i64, _a2: i64, _a3: i64, _a4: i64) -> i64 {
     let _ = n;
     -38 // -ENOSYS: fail closed on ports we have not written an asm block for
@@ -306,23 +351,42 @@ mod tests {
     use super::*;
 
     fn req(pid: u32, start: u64, signal: &'static str) -> KillRequest {
-        KillRequest { pid, start_time_ms: start, signal }
+        KillRequest {
+            pid,
+            start_time_ms: start,
+            signal,
+        }
     }
 
     #[test]
     fn parses_exact_grammar() {
-        assert_eq!(parse_kill_request("kill:4242:1700000002500:TERM"), Ok(req(4242, 1_700_000_002_500, "TERM")));
+        assert_eq!(
+            parse_kill_request("kill:4242:1700000002500:TERM"),
+            Ok(req(4242, 1_700_000_002_500, "TERM"))
+        );
         assert_eq!(parse_kill_request("kill:7:0:INT"), Ok(req(7, 0, "INT")));
     }
 
     #[test]
     fn refuses_anything_else() {
         for s in [
-            "kill", "kill:", "kill:1", "kill:1:2", "kill:1:2:TERM:extra",
+            "kill",
+            "kill:",
+            "kill:1",
+            "kill:1:2",
+            "kill:1:2:TERM:extra",
             "kill:0:0:TERM", // pid 0 parses; decide handles it (no such process / kernel)
-            "kill:abc:2:TERM", "kill:1:2:KILL", "kill:1:2:term", "kill:1:2:9",
-            "kill:1:-1:TERM", "kill: 1:2:TERM", "Kill:1:2:TERM", " kill:1:2:TERM",
-            "kill:1:2:TERM ", "get_metrics", "kill:99999999999:2:TERM",
+            "kill:abc:2:TERM",
+            "kill:1:2:KILL",
+            "kill:1:2:term",
+            "kill:1:2:9",
+            "kill:1:-1:TERM",
+            "kill: 1:2:TERM",
+            "Kill:1:2:TERM",
+            " kill:1:2:TERM",
+            "kill:1:2:TERM ",
+            "get_metrics",
+            "kill:99999999999:2:TERM",
         ] {
             let r = parse_kill_request(s);
             // pid 0 and huge-pid parse-fail cases split: pid 0 parses, rest refuse.
@@ -338,33 +402,120 @@ mod tests {
     fn checks_in_order() {
         let self_pid = 10_000;
         let self_uid = 1000;
-        let good = ProcTarget { ppid: 1, uid: self_uid, start_time_ms: 555 };
+        let good = ProcTarget {
+            ppid: 1,
+            uid: self_uid,
+            start_time_ms: 555,
+        };
         // happy path
-        assert_eq!(decide_kill(&req(99, 555, "TERM"), &good, self_pid, self_uid), Ok(()));
+        assert_eq!(
+            decide_kill(&req(99, 555, "TERM"), &good, self_pid, self_uid),
+            Ok(())
+        );
         // pid 1 beats everything
-        assert_eq!(decide_kill(&req(1, 0, "TERM"), &ProcTarget { ppid: 0, uid: 0, start_time_ms: 0 }, self_pid, self_uid), Err(ERR_PID1));
+        assert_eq!(
+            decide_kill(
+                &req(1, 0, "TERM"),
+                &ProcTarget {
+                    ppid: 0,
+                    uid: 0,
+                    start_time_ms: 0
+                },
+                self_pid,
+                self_uid
+            ),
+            Err(ERR_PID1)
+        );
         // agent itself (before the ppid check, so it wins over ppid==0)
-        assert_eq!(decide_kill(&req(self_pid, 0, "TERM"), &ProcTarget { ppid: 0, uid: 0, start_time_ms: 0 }, self_pid, self_uid), Err(ERR_SELF));
+        assert_eq!(
+            decide_kill(
+                &req(self_pid, 0, "TERM"),
+                &ProcTarget {
+                    ppid: 0,
+                    uid: 0,
+                    start_time_ms: 0
+                },
+                self_pid,
+                self_uid
+            ),
+            Err(ERR_SELF)
+        );
         // kernel thread (ppid 0)
-        assert_eq!(decide_kill(&req(99, 555, "INT"), &ProcTarget { ppid: 0, uid: self_uid, start_time_ms: 555 }, self_pid, self_uid), Err(ERR_KERNEL));
+        assert_eq!(
+            decide_kill(
+                &req(99, 555, "INT"),
+                &ProcTarget {
+                    ppid: 0,
+                    uid: self_uid,
+                    start_time_ms: 555
+                },
+                self_pid,
+                self_uid
+            ),
+            Err(ERR_KERNEL)
+        );
         // root-owned: uid mismatch
-        assert_eq!(decide_kill(&req(99, 555, "TERM"), &ProcTarget { ppid: 1, uid: 0, start_time_ms: 555 }, self_pid, self_uid), Err(ERR_UID));
+        assert_eq!(
+            decide_kill(
+                &req(99, 555, "TERM"),
+                &ProcTarget {
+                    ppid: 1,
+                    uid: 0,
+                    start_time_ms: 555
+                },
+                self_pid,
+                self_uid
+            ),
+            Err(ERR_UID)
+        );
         // PID reuse: stale start time
-        assert_eq!(decide_kill(&req(99, 556, "TERM"), &good, self_pid, self_uid), Err(ERR_STALE));
+        assert_eq!(
+            decide_kill(&req(99, 556, "TERM"), &good, self_pid, self_uid),
+            Err(ERR_STALE)
+        );
         // uid check beats stale check (order matters)
-        assert_eq!(decide_kill(&req(99, 556, "TERM"), &ProcTarget { ppid: 1, uid: 0, start_time_ms: 555 }, self_pid, self_uid), Err(ERR_UID));
+        assert_eq!(
+            decide_kill(
+                &req(99, 556, "TERM"),
+                &ProcTarget {
+                    ppid: 1,
+                    uid: 0,
+                    start_time_ms: 555
+                },
+                self_pid,
+                self_uid
+            ),
+            Err(ERR_UID)
+        );
     }
 
     #[test]
     fn journal_lines_are_stable_and_token_free() {
         let r = req(4242, 1_700_000_002_500, "TERM");
-        assert_eq!(journal_request_line(&r), "ebbtop kill request pid=4242 start_time_ms=1700000002500 signal=TERM");
-        let ok = KillOutcome { ok: true, pid: 4242, signal: "TERM".into(), error: None };
-        assert_eq!(journal_result_line(&r, &ok), "ebbtop kill result pid=4242 signal=TERM ok=true");
+        assert_eq!(
+            journal_request_line(&r),
+            "ebbtop kill request pid=4242 start_time_ms=1700000002500 signal=TERM"
+        );
+        let ok = KillOutcome {
+            ok: true,
+            pid: 4242,
+            signal: "TERM".into(),
+            error: None,
+        };
+        assert_eq!(
+            journal_result_line(&r, &ok),
+            "ebbtop kill result pid=4242 signal=TERM ok=true"
+        );
         let bad = err_out(4242, "TERM", ERR_STALE);
-        assert_eq!(journal_result_line(&r, &bad), r#"ebbtop kill result pid=4242 signal=TERM ok=false err="stale start_time""#);
+        assert_eq!(
+            journal_result_line(&r, &bad),
+            r#"ebbtop kill result pid=4242 signal=TERM ok=false err="stale start_time""#
+        );
         let raw = journal_bad_request_line("kill:1:2:KILL", &err_out(0, "", ERR_GRAMMAR));
-        assert!(raw.starts_with("ebbtop kill request raw=\"kill:1:2:KILL\" ok=false"), "{raw}");
+        assert!(
+            raw.starts_with("ebbtop kill request raw=\"kill:1:2:KILL\" ok=false"),
+            "{raw}"
+        );
     }
 
     #[test]
@@ -381,12 +532,29 @@ mod tests {
     fn real_refusals_and_signal() {
         // pid 1 and the agent itself are refused before any /proc check.
         let self_pid = std::process::id();
-        assert_eq!(handle_kill_request("kill:1:1:TERM").error.as_deref(), Some(ERR_PID1));
-        assert_eq!(handle_kill_request(&format!("kill:{self_pid}:1:TERM")).error.as_deref(), Some(ERR_SELF));
-        assert_eq!(handle_kill_request("kill:999999:1:TERM").error.as_deref(), Some(ERR_NO_PROC));
-        assert_eq!(handle_kill_request("kill:1:2:KILL").error.as_deref(), Some(ERR_GRAMMAR));
+        assert_eq!(
+            handle_kill_request("kill:1:1:TERM").error.as_deref(),
+            Some(ERR_PID1)
+        );
+        assert_eq!(
+            handle_kill_request(&format!("kill:{self_pid}:1:TERM"))
+                .error
+                .as_deref(),
+            Some(ERR_SELF)
+        );
+        assert_eq!(
+            handle_kill_request("kill:999999:1:TERM").error.as_deref(),
+            Some(ERR_NO_PROC)
+        );
+        assert_eq!(
+            handle_kill_request("kill:1:2:KILL").error.as_deref(),
+            Some(ERR_GRAMMAR)
+        );
 
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().expect("sleep");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep");
         let pid = child.id();
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
         let after = stat.get(stat.rfind(')').unwrap() + 2..).unwrap();
@@ -402,7 +570,11 @@ mod tests {
         let out = handle_kill_request(&format!("kill:{pid}:{start}:TERM"));
         assert!(out.ok && out.error.is_none(), "{out:?}");
         let status = child.wait().unwrap();
-        assert_eq!(std::os::unix::process::ExitStatusExt::signal(&status), Some(15), "{status:?}");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(15),
+            "{status:?}"
+        );
     }
 
     #[cfg(not(target_os = "linux"))]

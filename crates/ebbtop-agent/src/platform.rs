@@ -280,8 +280,8 @@ mod tests {
             "0.0.0.0",
             "::",
             "8.8.8.8",
-            "172.32.0.1",   // just outside 172.16/12
-            "100.128.0.1",  // just outside CGNAT
+            "172.32.0.1",  // just outside 172.16/12
+            "100.128.0.1", // just outside CGNAT
             "203.0.113.7",
             "2001:4860:4860::8888",
         ] {
@@ -366,7 +366,15 @@ mod tests {
     /// a typo must never silently tighten a running host either.
     #[test]
     fn linux_is_permissive_by_default_and_opt_in_only() {
-        for v in [None, Some(""), Some("0"), Some("false"), Some("no"), Some("off"), Some("nonsense")] {
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+            Some("nonsense"),
+        ] {
             assert_eq!(resolve_gate(false, v), GatePolicy::Permissive, "{v:?}");
         }
         for v in ["1", "true", "TRUE", " yes ", "on", "On"] {
@@ -376,7 +384,10 @@ mod tests {
 
     #[test]
     fn cpu_model_ignores_blank_brands() {
-        assert_eq!(cpu_model_from_brand("Apple M3 Pro\n"), Some("Apple M3 Pro".into()));
+        assert_eq!(
+            cpu_model_from_brand("Apple M3 Pro\n"),
+            Some("Apple M3 Pro".into())
+        );
         assert_eq!(cpu_model_from_brand("  "), None);
         assert_eq!(cpu_model_from_brand(""), None);
     }
@@ -387,9 +398,15 @@ mod tests {
     /// labels match Apple Silicon `PMU tdie*` die sensors).
     #[test]
     fn macos_reports_no_cpu_temperature() {
-        assert!(!cpu_temp_reported(true), "macOS must not report a CPU temperature");
+        assert!(
+            !cpu_temp_reported(true),
+            "macOS must not report a CPU temperature"
+        );
         // Linux keeps collecting: this fix must not remove a working metric.
-        assert!(cpu_temp_reported(false), "Linux must keep reporting CPU temperature");
+        assert!(
+            cpu_temp_reported(false),
+            "Linux must keep reporting CPU temperature"
+        );
     }
 
     /// F4: the agent's default state directory must be the one its own
@@ -433,14 +450,45 @@ mod tests {
     #[test]
     fn apfs_container_is_reported_once() {
         let volumes = vec![
-            vol("Macintosh HD", "/", "apfs", 994_662_584_320, 412_316_057_600),
-            vol("Macintosh HD", "/System/Volumes/Data", "apfs", 994_662_584_320, 412_316_057_600),
-            vol("com.apple.os.update-ABC", "/System/Volumes/Update", "apfs", 994_662_584_320, 412_316_057_600),
-            vol("Preboot", "/System/Volumes/Preboot", "apfs", 994_662_584_320, 412_316_057_600),
+            vol(
+                "Macintosh HD",
+                "/",
+                "apfs",
+                994_662_584_320,
+                412_316_057_600,
+            ),
+            vol(
+                "Macintosh HD",
+                "/System/Volumes/Data",
+                "apfs",
+                994_662_584_320,
+                412_316_057_600,
+            ),
+            vol(
+                "com.apple.os.update-ABC",
+                "/System/Volumes/Update",
+                "apfs",
+                994_662_584_320,
+                412_316_057_600,
+            ),
+            vol(
+                "Preboot",
+                "/System/Volumes/Preboot",
+                "apfs",
+                994_662_584_320,
+                412_316_057_600,
+            ),
         ];
         let mut seen = Vec::new();
-        let kept: Vec<&Volume> = volumes.iter().filter(|v| keep_macos_volume(v, &mut seen)).collect();
-        assert_eq!(kept.len(), 1, "one container must produce one row: {kept:?}");
+        let kept: Vec<&Volume> = volumes
+            .iter()
+            .filter(|v| keep_macos_volume(v, &mut seen))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "one container must produce one row: {kept:?}"
+        );
         assert_eq!(kept[0].mount_point, "/");
     }
 
@@ -449,16 +497,50 @@ mod tests {
     #[test]
     fn distinct_volumes_are_kept() {
         let volumes = vec![
-            vol("Macintosh HD", "/", "apfs", 994_662_584_320, 412_316_057_600),
-            vol("Case Sensitive", "/Volumes/Case Sensitive", "apfs", 500_107_862_016, 499_000_000_000),
-            vol("USB", "/Volumes/USB", "msdos", 32_000_000_000, 31_000_000_000),
-            vol("Backup", "/Volumes/Backup", "hfs", 1_000_204_886_016, 900_000_000_000),
+            vol(
+                "Macintosh HD",
+                "/",
+                "apfs",
+                994_662_584_320,
+                412_316_057_600,
+            ),
+            vol(
+                "Case Sensitive",
+                "/Volumes/Case Sensitive",
+                "apfs",
+                500_107_862_016,
+                499_000_000_000,
+            ),
+            vol(
+                "USB",
+                "/Volumes/USB",
+                "msdos",
+                32_000_000_000,
+                31_000_000_000,
+            ),
+            vol(
+                "Backup",
+                "/Volumes/Backup",
+                "hfs",
+                1_000_204_886_016,
+                900_000_000_000,
+            ),
         ];
         let mut seen = Vec::new();
-        let kept: Vec<&Volume> = volumes.iter().filter(|v| keep_macos_volume(v, &mut seen)).collect();
+        let kept: Vec<&Volume> = volumes
+            .iter()
+            .filter(|v| keep_macos_volume(v, &mut seen))
+            .collect();
         assert_eq!(
-            kept.iter().map(|v| v.mount_point.as_str()).collect::<Vec<_>>(),
-            vec!["/", "/Volumes/Case Sensitive", "/Volumes/USB", "/Volumes/Backup"]
+            kept.iter()
+                .map(|v| v.mount_point.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/",
+                "/Volumes/Case Sensitive",
+                "/Volumes/USB",
+                "/Volumes/Backup"
+            ]
         );
     }
 
@@ -471,7 +553,10 @@ mod tests {
             vol("B", "/Volumes/B", "apfs", 500_000_000_000, 400_000_000_000),
         ];
         let mut seen = Vec::new();
-        let kept: Vec<&Volume> = volumes.iter().filter(|v| keep_macos_volume(v, &mut seen)).collect();
+        let kept: Vec<&Volume> = volumes
+            .iter()
+            .filter(|v| keep_macos_volume(v, &mut seen))
+            .collect();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].name, "A");
     }
@@ -485,7 +570,10 @@ mod tests {
             vol("Two", "/Volumes/Two", "hfs", 1, 1),
         ];
         let mut seen = Vec::new();
-        let kept: Vec<&Volume> = volumes.iter().filter(|v| keep_macos_volume(v, &mut seen)).collect();
+        let kept: Vec<&Volume> = volumes
+            .iter()
+            .filter(|v| keep_macos_volume(v, &mut seen))
+            .collect();
         assert_eq!(kept.len(), 2);
     }
 }

@@ -233,11 +233,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Fail closed before binding anything: no listener, no discovery socket,
     // no served frame. On Linux this is a no-op (GatePolicy::Permissive).
-    match ebbtop_agent::platform::startup_policy(
-        policy,
-        bind,
-        state.auth_token.as_deref(),
-    ) {
+    match ebbtop_agent::platform::startup_policy(policy, bind, state.auth_token.as_deref()) {
         Ok(()) => {}
         Err(PolicyError(msg)) => {
             eprintln!("ebbtop-agent: {msg}");
@@ -250,7 +246,8 @@ async fn async_main() -> anyhow::Result<()> {
     // receives broadcasts) and answers only exact probes from private
     // sources; see README "Why discovery is UDP broadcast". The default is
     // per-platform: off for the Mac pilot, on for Linux as before.
-    let cfg = DiscoveryConfig::from_env_or_default(ebbtop_agent::platform::discovery_default(policy));
+    let cfg =
+        DiscoveryConfig::from_env_or_default(ebbtop_agent::platform::discovery_default(policy));
     match discovery::spawn(cfg, state.clone(), ws_port).await {
         Ok(Some(_task)) => println!(
             "ebbtop-agent: discovery responder on udp://{}/{}",

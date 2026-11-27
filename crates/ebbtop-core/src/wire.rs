@@ -339,7 +339,6 @@ pub struct KillResult {
 
 pub fn decode_kill(f: Frame<'_>) -> anyhow::Result<KillResult> {
     json(f)
-
 }
 
 #[cfg(test)]
@@ -375,12 +374,18 @@ mod tests {
     /// decoding, with the field defaulting to None (legacy agent).
     #[test]
     fn metrics_without_cpu_model_decodes_legacy() {
-        assert!(!METRICS.contains("cpu_model"), "fixture must stay legacy-shaped");
+        assert!(
+            !METRICS.contains("cpu_model"),
+            "fixture must stay legacy-shaped"
+        );
         let m = decode_metrics(Frame::Text(METRICS)).unwrap();
         assert_eq!(m.cpu_model, None);
         // Same for an agent that explicitly sends null.
         let explicit = METRICS.replace(r#""gpus":null}"#, r#""gpus":null,"cpu_model":null}"#);
-        assert_eq!(decode_metrics(Frame::Text(&explicit)).unwrap().cpu_model, None);
+        assert_eq!(
+            decode_metrics(Frame::Text(&explicit)).unwrap().cpu_model,
+            None
+        );
     }
 
     /// P3a: a frame from an agent that predates the identity fields still
@@ -411,7 +416,10 @@ mod tests {
         );
         let m = decode_metrics(Frame::Text(&patched)).unwrap();
         assert_eq!(m.agent_version.as_deref(), Some("0.2.8"));
-        assert_eq!(m.boot_nonce.as_deref(), Some("00112233445566778899aabbccddeeff"));
+        assert_eq!(
+            m.boot_nonce.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
     }
 
     #[test]
@@ -421,7 +429,10 @@ mod tests {
             r#""gpus":null,"cpu_model":"Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"}"#,
         );
         let m = decode_metrics(Frame::Text(&s)).unwrap();
-        assert_eq!(m.cpu_model.as_deref(), Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"));
+        assert_eq!(
+            m.cpu_model.as_deref(),
+            Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz")
+        );
     }
 
     #[test]
@@ -462,7 +473,8 @@ mod tests {
                 user: "kyler".into(),
                 state: "Sleeping".into(),
                 start_time_ms: 1_700_000_002_500,
-                cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service".into(),
+                cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service"
+                    .into(),
             }],
             sampled_at_ms: 99,
         };
@@ -494,7 +506,12 @@ mod tests {
         }
         let old = OldProcesses {
             process_count: 1,
-            rows: vec![OldProcess { pid: 7, name: "x".into(), cpu_usage: 1.0, mem_bytes: 2 }],
+            rows: vec![OldProcess {
+                pid: 7,
+                name: "x".into(),
+                cpu_usage: 1.0,
+                mem_bytes: 2,
+            }],
         };
         let p = decode_processes(Frame::Binary(&old.encode_to_vec())).unwrap();
         assert_eq!(p.rows[0].pid, 7);
@@ -505,12 +522,21 @@ mod tests {
 
     #[test]
     fn kill_grammar_and_reply_decode() {
-        assert_eq!(format_kill_request(4242, 1_700_000_002_500, KillSignal::Term), "kill:4242:1700000002500:TERM");
+        assert_eq!(
+            format_kill_request(4242, 1_700_000_002_500, KillSignal::Term),
+            "kill:4242:1700000002500:TERM"
+        );
         assert_eq!(format_kill_request(7, 0, KillSignal::Int), "kill:7:0:INT");
-        let ok = decode_kill(Frame::Text(r#"{"ok":true,"pid":4242,"signal":"TERM","error":null}"#)).unwrap();
+        let ok = decode_kill(Frame::Text(
+            r#"{"ok":true,"pid":4242,"signal":"TERM","error":null}"#,
+        ))
+        .unwrap();
         assert!(ok.ok && ok.pid == 4242 && ok.signal == "TERM" && ok.error.is_none());
         // Large-error gzip variant decodes the same way.
-        let err = decode_kill(Frame::Binary(&gz(br#"{"ok":false,"pid":1,"signal":"","error":"pid 1"}"#))).unwrap();
+        let err = decode_kill(Frame::Binary(&gz(
+            br#"{"ok":false,"pid":1,"signal":"","error":"pid 1"}"#,
+        )))
+        .unwrap();
         assert!(!err.ok && err.error.as_deref() == Some("pid 1"));
         assert!(decode_kill(Frame::Text("nope")).is_err());
     }
@@ -524,8 +550,12 @@ mod tests {
 
     #[test]
     fn process_detail_text_and_gzip_decode_identically() {
-        let a = decode_process_detail(Frame::Text(DETAIL)).unwrap().expect("detail");
-        let b = decode_process_detail(Frame::Binary(&gz(DETAIL.as_bytes()))).unwrap().expect("detail gzip");
+        let a = decode_process_detail(Frame::Text(DETAIL))
+            .unwrap()
+            .expect("detail");
+        let b = decode_process_detail(Frame::Binary(&gz(DETAIL.as_bytes())))
+            .unwrap()
+            .expect("detail gzip");
         assert_eq!(a, b);
         assert_eq!(a.process.pid, 4242);
         assert_eq!(a.process.name, "hottest-proc");
@@ -537,12 +567,16 @@ mod tests {
         assert_eq!(a.process.threads.len(), 1);
         assert_eq!(a.process.threads[0].tid, 4242);
         assert_eq!(a.cached_at, 1762500000);
-        assert_eq!(encode_process_metrics_request(4242), "get_process_metrics:4242");
+        assert_eq!(
+            encode_process_metrics_request(4242),
+            "get_process_metrics:4242"
+        );
     }
 
     #[test]
     fn process_detail_missing_pid_maps_to_none() {
-        let err = r#"{"error":"Process 999999 not found","request":"get_process_metrics","pid":999999}"#;
+        let err =
+            r#"{"error":"Process 999999 not found","request":"get_process_metrics","pid":999999}"#;
         assert_eq!(decode_process_detail(Frame::Text(err)).unwrap(), None);
     }
 
@@ -554,8 +588,11 @@ mod tests {
     #[test]
     fn process_detail_old_agent_payload_with_defaults() {
         // An older agent omits the optional scalars and children/threads.
-        let s = r#"{"process":{"pid":7,"name":"x","cpu_usage":1.5,"mem_bytes":4096},"cached_at":99}"#;
-        let d = decode_process_detail(Frame::Text(s)).unwrap().expect("detail old");
+        let s =
+            r#"{"process":{"pid":7,"name":"x","cpu_usage":1.5,"mem_bytes":4096},"cached_at":99}"#;
+        let d = decode_process_detail(Frame::Text(s))
+            .unwrap()
+            .expect("detail old");
         assert_eq!(d.process.pid, 7);
         assert_eq!(d.process.status, "");
         assert_eq!(d.process.user_id, 0);

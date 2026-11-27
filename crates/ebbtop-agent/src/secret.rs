@@ -127,7 +127,10 @@ mod tests {
     fn token_is_32_bytes_hex() {
         let t = token();
         assert_eq!(t.len(), 64);
-        assert!(t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(
+            t.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
     }
 
     #[test]
