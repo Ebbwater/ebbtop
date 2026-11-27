@@ -72,7 +72,7 @@ jobs:
       - name: Upload the archive and its evidence
         uses: actions/upload-artifact@v4
         with:
-          name: ebbtop-agent-macos-arm64-${{ github.ref_name }}-${{ github.run_number }}
+          name: ebbtop-agent-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/ebbtop-agent-macos-arm64.tar.gz
             dist/ebbtop-agent-macos-arm64.tar.gz.sha256
@@ -83,7 +83,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ebbtop-agent-macos-evidence-${{ github.ref_name }}-${{ github.run_number }}
+          name: ebbtop-agent-macos-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/macos-evidence/**
           if-no-files-found: warn
