@@ -449,7 +449,7 @@ mod tests {
     /// Exactly one row survives, and it is `/`.
     #[test]
     fn apfs_container_is_reported_once() {
-        let volumes = vec![
+        let volumes = [
             vol(
                 "Macintosh HD",
                 "/",
@@ -496,7 +496,7 @@ mod tests {
     /// USB stick are both kept; the System/Volumes filter must not hide them.
     #[test]
     fn distinct_volumes_are_kept() {
-        let volumes = vec![
+        let volumes = [
             vol(
                 "Macintosh HD",
                 "/",
@@ -548,7 +548,7 @@ mod tests {
     /// collapse even when neither is under /System/Volumes.
     #[test]
     fn duplicate_apfs_capacity_collapses() {
-        let volumes = vec![
+        let volumes = [
             vol("A", "/Volumes/A", "apfs", 500_000_000_000, 400_000_000_000),
             vol("B", "/Volumes/B", "apfs", 500_000_000_000, 400_000_000_000),
         ];
@@ -565,7 +565,7 @@ mod tests {
     /// claim: two HFS+ disks are two disks.
     #[test]
     fn equal_capacity_on_non_apfs_is_not_collapsed() {
-        let volumes = vec![
+        let volumes = [
             vol("One", "/Volumes/One", "hfs", 1, 1),
             vol("Two", "/Volumes/Two", "hfs", 1, 1),
         ];

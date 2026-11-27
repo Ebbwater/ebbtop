@@ -70,7 +70,7 @@ pub fn parse_diskstats(s: &str, whole_disks: &[String]) -> Vec<DiskIo> {
 pub fn load_avg() -> Option<[f64; 3]> {
     #[cfg(target_os = "linux")]
     {
-        return parse_loadavg(&std::fs::read_to_string("/proc/loadavg").ok()?);
+        parse_loadavg(&std::fs::read_to_string("/proc/loadavg").ok()?)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -86,7 +86,7 @@ pub fn load_avg() -> Option<[f64; 3]> {
 pub fn uptime_s() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
-        return parse_uptime(&std::fs::read_to_string("/proc/uptime").ok()?);
+        parse_uptime(&std::fs::read_to_string("/proc/uptime").ok()?)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -103,9 +103,9 @@ pub fn disk_io() -> Vec<DiskIo> {
                     .collect()
             })
             .unwrap_or_default();
-        return std::fs::read_to_string("/proc/diskstats")
+        std::fs::read_to_string("/proc/diskstats")
             .map(|s| parse_diskstats(&s, &whole))
-            .unwrap_or_default();
+            .unwrap_or_default()
     }
     #[cfg(not(target_os = "linux"))]
     {

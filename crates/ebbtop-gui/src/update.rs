@@ -11,6 +11,10 @@
 //! alongside, swaps it in keeping a `.bak` copy, and relaunches with
 //! `open` (the caller then quits).
 
+// The apply helpers below are Windows/macOS paths, cfg-selected at their call
+// sites in app.rs; on a Linux dev build they are intentionally dead.
+#![cfg_attr(target_os = "linux", allow(dead_code))]
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -311,9 +315,8 @@ impl UpdateCheck {
                             Err(e) => Err(e),
                             Ok(()) => {
                                 download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx)
-                                    .map_err(|e| {
+                                    .inspect_err(|_e| {
                                         let _ = std::fs::remove_file(&x.dest);
-                                        e
                                     })
                             }
                         }

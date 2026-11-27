@@ -54,7 +54,7 @@ fn has_cjk(s: &str) -> bool {
 /// Any character outside ASCII: an ideograph or the fullwidth punctuation a
 /// Chinese UI uses. A string that is still pure ASCII is English by default.
 fn has_non_ascii(s: &str) -> bool {
-    s.chars().any(|c| !c.is_ascii())
+    !s.is_ascii()
 }
 
 fn is_cjk(c: char) -> bool {
@@ -1834,7 +1834,7 @@ fn l10n_screenshots() {
         );
 
         // The minimum window size, the densest layout.
-        let mut small = dash_in(loc);
+        let small = dash_in(loc);
         shot(
             &format!("{tag}-dashboard-480x420.png"),
             small,

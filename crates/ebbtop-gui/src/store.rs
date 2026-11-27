@@ -426,9 +426,8 @@ pub fn endpoint_shape(url: &str) -> String {
         .map(|(_, p)| format!("/{}", p.split(['?', '#']).next().unwrap_or("")))
         .unwrap_or_else(|| "/ws".to_string());
     let port_desc = match port {
-        Some(p) if p == "45976" => "default port",
+        Some("45976") | None => "default port",
         Some(_) => "custom port",
-        None => "default port",
     };
     format!("{scheme}, {port_desc}, {path}")
 }
@@ -736,9 +735,11 @@ mod tests {
 
     #[test]
     fn skipped_version_roundtrips() {
-        let mut c = Config::default();
-        c.update_last_check_ms = 1700000000000;
-        c.update_skipped = "v0.3.0".into();
+        let c = Config {
+            update_last_check_ms: 1700000000000,
+            update_skipped: "v0.3.0".into(),
+            ..Default::default()
+        };
         let back = parse_config(&serde_json::to_string(&c).expect("serialize"));
         assert_eq!(c, back);
     }

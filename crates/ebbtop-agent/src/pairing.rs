@@ -535,17 +535,17 @@ mod tests {
         // Not a process-global env test: just assert the documented default
         // shape so a rename of the directory is a deliberate change.
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        if let Some(h) = home {
-            if std::env::var_os("EBBTOP_STATE_DIR").is_none() {
-                assert!(state_dir().starts_with(&h));
-                // Per-platform, and it must agree with the installer that
-                // creates (and purges) the directory: see
-                // `platform::default_state_dir`.
-                if cfg!(target_os = "macos") {
-                    assert!(state_dir().ends_with("Library/Application Support/ebbtop-agent"));
-                } else {
-                    assert!(state_dir().ends_with("services/ebbtop-agent"));
-                }
+        if let Some(h) = home
+            && std::env::var_os("EBBTOP_STATE_DIR").is_none()
+        {
+            assert!(state_dir().starts_with(&h));
+            // Per-platform, and it must agree with the installer that
+            // creates (and purges) the directory: see
+            // `platform::default_state_dir`.
+            if cfg!(target_os = "macos") {
+                assert!(state_dir().ends_with("Library/Application Support/ebbtop-agent"));
+            } else {
+                assert!(state_dir().ends_with("services/ebbtop-agent"));
             }
         }
     }

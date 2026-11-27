@@ -348,32 +348,31 @@ pub async fn collect_fast_metrics(state: &AppState) -> Metrics {
     // the documented null is produced by this code path rather than by hoping
     // sysinfo finds no matching sensor (its IOHID scan does match Apple Silicon
     // "PMU tdie*" die sensors).
-    let cpu_temp_c = if !crate::platform::cpu_temp_reported(cfg!(target_os = "macos")) {
-        None
-    } else if !temp_enabled() {
-        None
-    } else if let Some(cached) = TEMP.get_fresh(TTL) {
-        cached
-    } else {
-        let val = {
-            let mut components = state.components.lock().await;
-            refresh_components_if_stale(&mut components);
-            components.iter().find_map(|c| {
-                let l = c.label().to_ascii_lowercase();
-                if l.contains("cpu")
-                    || l.contains("package")
-                    || l.contains("tctl")
-                    || l.contains("tdie")
-                {
-                    c.temperature()
-                } else {
-                    None
-                }
-            })
+    let cpu_temp_c =
+        if !crate::platform::cpu_temp_reported(cfg!(target_os = "macos")) || !temp_enabled() {
+            None
+        } else if let Some(cached) = TEMP.get_fresh(TTL) {
+            cached
+        } else {
+            let val = {
+                let mut components = state.components.lock().await;
+                refresh_components_if_stale(&mut components);
+                components.iter().find_map(|c| {
+                    let l = c.label().to_ascii_lowercase();
+                    if l.contains("cpu")
+                        || l.contains("package")
+                        || l.contains("tctl")
+                        || l.contains("tdie")
+                    {
+                        c.temperature()
+                    } else {
+                        None
+                    }
+                })
+            };
+            TEMP.set(val);
+            val
         };
-        TEMP.set(val);
-        val
-    };
 
     // Networks with reusable name cache
     let networks = {

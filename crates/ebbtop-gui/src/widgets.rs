@@ -131,38 +131,38 @@ pub fn graph(
             }
         }
     }
-    if resp.hovered() && n > 0 {
-        if let Some(ptr) = resp.interact_pointer_pos() {
-            if rect.contains(ptr) && w > 0.0 {
-                let slot = (((ptr.x - rect.left()) / w).floor() as usize).min(slots - 1);
-                if slot >= slots - n {
-                    let k = slot - (slots - n);
-                    let v = vals[vals.len() - n + k];
-                    let x = rect.left() + (slot as f32 + 0.5) * w;
-                    p.line_segment(
-                        [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                        Stroke::new(1.0, ACCENT),
-                    );
-                    let font = egui::TextStyle::Monospace.resolve(ui.style());
-                    let txt = if max == 100.0 {
-                        format!("{v:.1}%")
-                    } else {
-                        format!("{v:.0}")
-                    };
-                    let galley = p.layout_no_wrap(txt, font, TEXT);
-                    let pos = pos2(
-                        (x + 4.0)
-                            .min((rect.right() - galley.size().x - 4.0).max(rect.left() + 2.0)),
-                        rect.top() + 2.0,
-                    );
-                    p.rect_filled(
-                        Rect::from_min_size(pos - vec2(2.0, 1.0), galley.size() + vec2(4.0, 2.0)),
-                        2.0,
-                        BG,
-                    );
-                    p.galley(pos, galley, TEXT);
-                }
-            }
+    if resp.hovered()
+        && n > 0
+        && let Some(ptr) = resp.interact_pointer_pos()
+        && rect.contains(ptr)
+        && w > 0.0
+    {
+        let slot = (((ptr.x - rect.left()) / w).floor() as usize).min(slots - 1);
+        if slot >= slots - n {
+            let k = slot - (slots - n);
+            let v = vals[vals.len() - n + k];
+            let x = rect.left() + (slot as f32 + 0.5) * w;
+            p.line_segment(
+                [pos2(x, rect.top()), pos2(x, rect.bottom())],
+                Stroke::new(1.0, ACCENT),
+            );
+            let font = egui::TextStyle::Monospace.resolve(ui.style());
+            let txt = if max == 100.0 {
+                format!("{v:.1}%")
+            } else {
+                format!("{v:.0}")
+            };
+            let galley = p.layout_no_wrap(txt, font, TEXT);
+            let pos = pos2(
+                (x + 4.0).min((rect.right() - galley.size().x - 4.0).max(rect.left() + 2.0)),
+                rect.top() + 2.0,
+            );
+            p.rect_filled(
+                Rect::from_min_size(pos - vec2(2.0, 1.0), galley.size() + vec2(4.0, 2.0)),
+                2.0,
+                BG,
+            );
+            p.galley(pos, galley, TEXT);
         }
     }
     rect

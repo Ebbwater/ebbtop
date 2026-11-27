@@ -11,7 +11,7 @@
 //! 3. not a kernel thread (ppid == 0 in /proc/<pid>/stat)
 //! 4. the process uid equals the agent uid (so root-owned rows are refused)
 //! 5. start_time_ms matches the process's current start time (PID reuse)
-//! Then the signal is sent via pidfd_open + pidfd_send_signal.
+//!    Then the signal is sent via pidfd_open + pidfd_send_signal.
 //!
 //! Every request and its result is written to the journal. The auth token
 //! never appears here: it travels in the URL query string, not in the
@@ -325,7 +325,7 @@ fn send_signal(pid: u32, signum: i32) -> Result<(), String> {
     // From here the fd is owned; dropping the File closes it.
     let file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd as i32) };
     // pidfd_send_signal(pidfd, sig, siginfo=NULL, mask=empty) = syscall 424.
-    let r = raw_syscall(424, fd as i64, signum as i64, 0, 0);
+    let r = raw_syscall(424, fd, signum as i64, 0, 0);
     drop(file);
     if r < 0 {
         Err(format!("pidfd_send_signal: {}", err_text(-r)))

@@ -371,6 +371,7 @@ pub enum PairAction {
 
 /// Code entry for one chosen host: a name for the source, the address it will
 /// pair with, the digits the user is typing, and the last classified failure.
+#[derive(Default)]
 pub struct Pairing {
     pub name: String,
     pub url: String,
@@ -559,21 +560,6 @@ impl Pairing {
             ui.add(egui::Label::new(RichText::new(text).color(w::WARN)).wrap());
         }
         action
-    }
-}
-
-impl Default for Pairing {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            url: String::new(),
-            code: String::new(),
-            busy: false,
-            error: None,
-            msg: None,
-            msg_key: None,
-            rx: None,
-        }
     }
 }
 

@@ -1049,10 +1049,8 @@ impl App {
                     )
                 };
                 ui.label(RichText::new(txt).monospace().color(col));
-            } else if !narrow {
-                if let Some(note) = &self.kill_note {
-                    ui.label(RichText::new(note).monospace().color(w::DIM));
-                }
+            } else if !narrow && let Some(note) = &self.kill_note {
+                ui.label(RichText::new(note).monospace().color(w::DIM));
             }
             // Release check outcome: an available release gets a prompt
             // button; a failed check is a quiet note (spec: retry next
@@ -2942,10 +2940,8 @@ impl App {
                 {
                     p.start();
                 }
-                if pair_cancel {
-                    if let Some(ob) = self.onboard.as_mut() {
-                        ob.pair = None;
-                    }
+                if pair_cancel && let Some(ob) = self.onboard.as_mut() {
+                    ob.pair = None;
                 }
                 if open_logs
                     && let Err(e) = store::open_logs()
@@ -3536,20 +3532,20 @@ impl App {
             UpdateStatus::Idle => l10n::text(loc, Key::UpdatesNeverChecked).to_string(),
             UpdateStatus::Checking => l10n::text(loc, Key::UpdatesChecking).to_string(),
             UpdateStatus::Available { version, .. } => {
-                l10n::fmt(loc, Key::UpdatesAvailable, &[&version])
+                l10n::fmt(loc, Key::UpdatesAvailable, &[version])
             }
-            UpdateStatus::UpToDate { version } => l10n::fmt(loc, Key::UpdatesUpToDate, &[&version]),
-            UpdateStatus::Failed(e) => l10n::fmt(loc, Key::UpdatesFailed, &[&e]),
+            UpdateStatus::UpToDate { version } => l10n::fmt(loc, Key::UpdatesUpToDate, &[version]),
+            UpdateStatus::Failed(e) => l10n::fmt(loc, Key::UpdatesFailed, &[e]),
             UpdateStatus::Accepted { version, .. } => {
-                l10n::fmt(loc, Key::UpdatesApproved, &[&version])
+                l10n::fmt(loc, Key::UpdatesApproved, &[version])
             }
             UpdateStatus::Downloading { version, done } => l10n::fmt(
                 loc,
                 Key::UpdatesDownloading,
-                &[&version, &(done / 1_000_000).to_string()],
+                &[version, &(done / 1_000_000).to_string()],
             ),
             UpdateStatus::Ready { version, .. } => {
-                l10n::fmt(loc, Key::UpdatesReadyRestart, &[&version])
+                l10n::fmt(loc, Key::UpdatesReadyRestart, &[version])
             }
         };
         ui.label(RichText::new(status).monospace().color(w::DIM));
@@ -3594,21 +3590,19 @@ impl App {
         }
         let mut act = Act::None;
         let mut open = self.update_open;
-        let title: &str;
-        match self.update.status() {
+
+        let title: &str = match self.update.status() {
             UpdateStatus::Available { .. } | UpdateStatus::Accepted { .. } => {
-                title = l10n::text(loc, Key::UpdateAvailTitle)
+                l10n::text(loc, Key::UpdateAvailTitle)
             }
-            UpdateStatus::Downloading { .. } => {
-                title = l10n::text(loc, Key::UpdateDownloadingTitle)
-            }
-            UpdateStatus::Ready { .. } => title = l10n::text(loc, Key::UpdateRestartTitle),
-            UpdateStatus::Failed(_) => title = l10n::text(loc, Key::UpdateFailedTitle),
+            UpdateStatus::Downloading { .. } => l10n::text(loc, Key::UpdateDownloadingTitle),
+            UpdateStatus::Ready { .. } => l10n::text(loc, Key::UpdateRestartTitle),
+            UpdateStatus::Failed(_) => l10n::text(loc, Key::UpdateFailedTitle),
             _ => {
                 self.update_open = false;
                 return;
             }
-        }
+        };
         // Fixed id: the title is localized, and window identity must not depend
         // on the locale.
         egui::Window::new(title)
@@ -3624,7 +3618,7 @@ impl App {
                         ui.label(l10n::fmt(
                             loc,
                             Key::UpdateAvailBody,
-                            &[&version, update::current_version()],
+                            &[version, update::current_version()],
                         ));
                         ui.horizontal(|ui| {
                             if ui.button(l10n::text(loc, Key::BtnDownload)).clicked() {
@@ -3639,11 +3633,11 @@ impl App {
                         ui.label(l10n::fmt(
                             loc,
                             Key::UpdateDownloadingBody,
-                            &[&version, &(done / 1_000_000).to_string()],
+                            &[version, &(done / 1_000_000).to_string()],
                         ));
                     }
                     UpdateStatus::Ready { version, .. } => {
-                        ui.label(l10n::fmt(loc, Key::UpdateReadyBody, &[&version]));
+                        ui.label(l10n::fmt(loc, Key::UpdateReadyBody, &[version]));
                         ui.horizontal(|ui| {
                             if ui.button(l10n::text(loc, Key::BtnRestartUpdate)).clicked() {
                                 act = Act::Restart;
@@ -4501,9 +4495,11 @@ mod tests {
 
     #[test]
     fn collapsed_panels_hide_content_but_keep_title() {
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
-        cfg.collapsed_gpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            collapsed_gpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 1920.0, 1080.0);
@@ -4559,8 +4555,10 @@ mod tests {
     /// `> gpu` with no model anywhere while collapsed.
     #[test]
     fn gpu_header_shows_model_when_collapsed() {
-        let mut cfg = Config::default();
-        cfg.collapsed_gpu = true;
+        let cfg = Config {
+            collapsed_gpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 1920.0, 1080.0);
@@ -4604,8 +4602,10 @@ mod tests {
     /// `panel`) leaves this compiling and fails on the model assertion.
     #[test]
     fn cpu_header_shows_model_when_collapsed() {
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 1920.0, 1080.0);
@@ -4654,8 +4654,10 @@ mod tests {
     /// and the window still renders end to end.
     #[test]
     fn headers_show_label_alone_without_model() {
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         {
@@ -5001,9 +5003,11 @@ mod tests {
         // still fits there), so elision is genuinely exercised.
         const LONG: &str = "Intel(R) Xeon(R) Platinum 8480C CPU @ 2.00GHz \
 (preproduction qualification sample, 2 sockets, microcode 0x2b000590, all-core turbo 3.80GHz)";
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
-        cfg.collapsed_gpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            collapsed_gpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         app.shared()
@@ -5627,11 +5631,13 @@ mod tests {
 
     #[test]
     fn status_bar_names_source_without_metrics() {
-        let mut cfg = Config::default();
-        cfg.sources = vec![store::Source {
-            name: "solo".into(),
-            url: "ws://s/ws".into(),
-        }];
+        let cfg = Config {
+            sources: vec![store::Source {
+                name: "solo".into(),
+                url: "ws://s/ws".into(),
+            }],
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         let t = render(&mut app, 960.0, 1000.0);
         assert!(
@@ -5652,11 +5658,13 @@ mod tests {
 
     #[test]
     fn status_bar_hides_picker_with_one_source() {
-        let mut cfg = Config::default();
-        cfg.sources = vec![store::Source {
-            name: "solo".into(),
-            url: "ws://s/ws".into(),
-        }];
+        let cfg = Config {
+            sources: vec![store::Source {
+                name: "solo".into(),
+                url: "ws://s/ws".into(),
+            }],
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         let t = render(&mut app, 960.0, 1000.0);
         assert!(
@@ -5867,8 +5875,10 @@ mod tests {
 
     #[test]
     fn proc_detail_collapses_like_other_panels() {
-        let mut cfg = Config::default();
-        cfg.collapsed_proc_detail = true;
+        let cfg = Config {
+            collapsed_proc_detail: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         app.selected = Some(4242);
@@ -6390,9 +6400,11 @@ mod tests {
         // model can appear, so this is the visual proof for the collapsed state.
         {
             let (w, h) = (960.0f32, 1040.0f32);
-            let mut cfg = Config::default();
-            cfg.collapsed_cpu = true;
-            cfg.collapsed_gpu = true;
+            let cfg = Config {
+                collapsed_cpu: true,
+                collapsed_gpu: true,
+                ..Default::default()
+            };
             let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
             app.onboard = None;
             fake_state(&app, client::now_ms());
@@ -6501,7 +6513,7 @@ mod tests {
     fn store_screenshots() {
         let dir =
             std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
-        let mut shot = |name: &str, mut app: App| {
+        let shot = |name: &str, mut app: App| {
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1366.0, 768.0))
                 .wgpu()
@@ -7008,7 +7020,7 @@ mod tests {
             .find(|(s, _)| s == "p00-7")
             .map(|(_, r)| r.center().y);
         assert!(
-            proc_y_after.map_or(true, |y| y < proc_y_before - 1.0),
+            proc_y_after.is_none_or(|y| y < proc_y_before - 1.0),
             "proc table should have scrolled under the wheel"
         );
         // The workloads body did NOT follow: its first row stays put.
@@ -7488,11 +7500,13 @@ mod tests {
 
     #[test]
     fn support_summary_from_the_app_carries_no_token_or_address() {
-        let mut cfg = Config::default();
-        cfg.sources = vec![store::Source {
-            name: "k-server".into(),
-            url: format!("ws://10.9.9.9:45976/ws?token={SENTINEL}"),
-        }];
+        let cfg = Config {
+            sources: vec![store::Source {
+                name: "k-server".into(),
+                url: format!("ws://10.9.9.9:45976/ws?token={SENTINEL}"),
+            }],
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some(SENTINEL.to_string()), TokenSource::Env, None);
         // An auth refusal whose detail quotes the connect URL: both the
         // address and the token must be gone from the summary.
