@@ -31,11 +31,12 @@ locale: the translations are compiled into `ebbtop.exe` and the package carries
 no PRI resource, so the declared languages describe the client's capability to
 the Store rather than switching the app by system language.
 
-**The listing text in this document is English only.** Product name, short
-description, description, feature list and screenshot captions have not been
-translated, and translated Store listing copy (including any Chinese listing)
-is out of scope for v0.3.0. Submit the English listing; the extra package
-languages add language coverage, not translated storefront text.
+The listing text below is provided for all three storefront languages:
+`en-US`, `zh-CN` and `zh-TW`. Terminology follows the app's own strings in
+`crates/ebbtop-gui/src/l10n.rs`, for example `进程` / `處理程序` for process,
+`工作负载` / `工作負載` for workload and `实时` / `即時` for LIVE, so each
+storefront reads the way the installed app does. Each language has its own
+short description, full description, What's new text and screenshot captions.
 
 ## Product name
 
@@ -44,7 +45,7 @@ languages add language coverage, not translated storefront text.
 ## Short description (max 270 characters)
 
 ```
-Monitor your own Linux hosts from Windows: CPU, memory, network, disk and a sortable, filterable process table with per-process detail. One small agent per host, a WebSocket over your tailnet, VPN or LAN, and a token you hold. No cloud, no telemetry.
+Monitor your own Linux and Apple Silicon Mac hosts from Windows: CPU, memory, network, disk and a sortable, filterable process table. One small agent per host, a WebSocket over your tailnet, VPN or LAN, and a token you hold. No cloud, no telemetry.
 ```
 
 ## Description
@@ -52,31 +53,31 @@ Monitor your own Linux hosts from Windows: CPU, memory, network, disk and a sort
 Written in the README's "Start Here" voice: what it does, then what you need.
 
 ```
-EbbTop is a native, btop-style monitor for the Linux machines you already run.
+EbbTop is a native, btop-style monitor for the machines you already run: Linux x86-64 hosts and Apple Silicon Macs (macOS 13+).
 
-Point it at your own hosts and watch them live: CPU with per-core meters and temperature, memory and swap, network and disk throughput, GPU load and VRAM, plus a sortable, filterable process table with a per-process detail inspector (command line, working directory, children, threads, CPU and memory history). Processes are grouped by workload, so a systemd service or a container shows up as one row with its own totals.
+Point it at your own hosts and watch them live: CPU with per-core meters, memory and swap, network and disk capacity, plus a sortable, filterable process table with a per-process detail inspector (command line, working directory, children, threads, CPU and memory history). On Linux hosts you also get per-core temperature, per-disk throughput, GPU load and VRAM, and processes grouped by workload, so a systemd service or a container shows up as one row with its own totals. On Apple Silicon Macs, values macOS does not expose, including temperature, GPU metrics, per-disk throughput and cgroups, are shown as unavailable rather than guessed.
 
 It is built for a handful of machines you own, not a fleet in someone's cloud.
 
 HOW IT WORKS
 
-A small agent runs on each Linux host. It answers one WebSocket with metrics, the process table and on-demand process detail. The desktop app connects to as many hosts as you like, keeps one token per host in the Windows credential store, and reconnects on its own.
+A small agent runs on each host you add, Linux or macOS. It answers one WebSocket with metrics, the process table and on-demand process detail. The desktop app connects to as many hosts as you like, keeps one token per host in the Windows credential store, and reconnects on its own.
 
 Pairing takes a minute. Run `ebbtop-agent --pair` on the host, type the six-digit code it prints into EbbTop, and the app stores the read-only token it issues. Static addresses and tokens work too, for hosts on a tailnet or another subnet.
 
 WHAT IT DOES NOT DO
 
 - No cloud account, no sign-in, no telemetry. The app talks only to the hosts you configure.
-- Read-only monitoring. The one action it can take is an explicit, confirmed SIGTERM/SIGINT to a process owned by your own user, chosen by you in the table. There are no container or service controls.
+- Read-only monitoring. On Linux hosts the one action it can take is an explicit, confirmed SIGTERM/SIGINT to a process owned by your own user, chosen by you in the table; the macOS agent reports terminate as unsupported. There are no container or service controls.
 - No SSH, no agent on the Windows side, no background service on your PC.
 
 WHAT YOU NEED
 
 - Windows 10 version 1809 (build 17763) or newer, or Windows 11, x64.
-- The EbbTop agent on each Linux host you want to monitor (x86-64, glibc 2.39 or newer, systemd user session). Install it with the one-line script or the tarball from the project's Releases page; the agent is a normal systemd user service and writes a token only you can read.
-- A private path between the PC and the hosts: the same LAN, a VPN, or a tailnet. EbbTop is not a public relay and needs no port forwarding.
+- The EbbTop agent on each Linux host you want to monitor (x86-64, glibc 2.39 or newer, systemd user session), or on each Apple Silicon Mac (macOS 13 or newer, per-user LaunchAgent). One published one-line script installs either package; it chooses from `uname` before downloading. No root or administrator rights are needed for the per-user service. The agent writes a token only you can read.
+- A private path between the PC and the hosts: the same LAN, a VPN, or a tailnet. EbbTop is not a public relay and needs no port forwarding. The macOS agent requires a token and refuses a public bind address.
 
-Free and open source (MIT). The GitHub Releases page stays available for the Windows ZIP (the same app, without the Store's automatic updates), the Linux agent and the macOS build.
+Free and open source (MIT). The GitHub Releases page stays available for the Windows ZIP (the same app, without the Store's automatic updates), the Linux agent, the macOS agent and the macOS desktop build.
 ```
 
 ## Localized listing copy: zh-CN (Simplified, Mainland China)
@@ -84,42 +85,42 @@ Free and open source (MIT). The GitHub Releases page stays available for the Win
 Paste into the Partner Center listing for `zh-CN`. Terminology follows the
 app's own strings (`进程` for process, `工作负载` for workload,
 `实时` for LIVE), so the storefront matches what the user sees after install.
-The short description is 108 characters, inside the 270 limit.
+The short description is 137 characters, inside the 270 limit.
 
 ### zh-CN short description
 
 ```
-在 Windows 上监控你自己的 Linux 主机：CPU、内存、网络、磁盘，以及可排序、可筛选的进程表和进程详情。每台主机一个小型代理，通过局域网、VPN 或 tailnet 通信，令牌由你保管。无云端、无遥测。
+在 Windows 上监控自己的 Linux 或 Apple Silicon Mac（macOS 13+）主机：CPU、内存、网络、磁盘，以及可排序、可筛选的进程表和进程详情。每台主机一个小型代理，通过局域网、VPN 或 tailnet 通信，令牌由你保管。无云端、无遥测。
 ```
 
 ### zh-CN description
 
 ```
-EbbTop 是一款原生的类 btop 监控工具，用于监控你自己运行的 Linux 机器。
+EbbTop 是一款原生的类 btop 监控工具，用于监控你自己运行的 Linux 主机和 Apple Silicon Mac（macOS 13 或更新版本）。
 
-连接你自己的主机并实时查看：CPU 每核占用与温度、内存与交换分区、网络与磁盘吞吐、GPU 占用与显存，以及一个可排序、可筛选的进程表，附带进程详情面板（命令行、工作目录、子进程、线程、CPU 与内存历史曲线）。进程按工作负载归组，因此一个 systemd 服务或一个容器会显示为一行，并带有自己的合计值。
+连接你自己的主机并实时查看：CPU 每核占用、内存与交换分区、网络与磁盘容量，以及一个可排序、可筛选的进程表，附带进程详情面板（命令行、工作目录、子进程、线程、CPU 与内存历史曲线）。在 Linux 主机上还可以查看每核温度、每磁盘吞吐、GPU 占用与显存，以及按工作负载归组的进程；一个 systemd 服务或一个容器会显示为一行，并带有自己的合计值。macOS 不提供的数值（温度、GPU 指标、每磁盘吞吐和 cgroups）会显示为不可用，而不会猜测。
 
 它为少数几台你自己拥有的机器而做，而不是为云上的机器集群而做。
 
 工作原理
 
-每台 Linux 主机上运行一个很小的代理，通过一个 WebSocket 返回指标、进程表以及按需请求的进程详情。桌面应用可以连接任意多台主机，每台主机一个令牌，保存在 Windows 凭据管理器中，断线后会自动重连。
+每台 Linux 或 macOS 主机上运行一个很小的代理，通过一个 WebSocket 返回指标、进程表以及按需请求的进程详情。桌面应用可以连接任意多台主机，每台主机一个令牌，保存在 Windows 凭据管理器中，断线后会自动重连。
 
-配对只需一分钟。在主机上运行 ebbtop-agent --pair，把它打印的六位数字输入 EbbTop，应用会保存它签发的只读令牌。也可以直接填写地址和令牌，适用于 tailnet 或其他网段上的主机。
+配对只需一分钟。在主机上运行 ebbtop-agent --pair，把它打印的六位数字输入 EbbTop，应用会保存它签发的只读令牌。也可以直接填写地址和令牌，适用于 tailnet 或其他网段上的主机。macOS 代理要求非空令牌，并拒绝公网绑定地址。
 
 它不做什么
 
 - 没有云端账号，没有登录，没有遥测。应用只连接你配置的主机。
-- 只读监控。唯一能执行的操作，是你在进程表中选中的、属于你自己用户的进程，经过确认后发送 SIGTERM 或 SIGINT。没有任何容器或服务控制功能。
+- 只读监控。在 Linux 主机上，唯一能执行的操作，是你在进程表中选中的、属于你自己用户的进程，经过确认后发送 SIGTERM 或 SIGINT；macOS 代理不支持终止进程。没有任何容器或服务控制功能。
 - 没有 SSH，Windows 端不安装代理，你的电脑上也没有后台服务。
 
 你需要准备
 
 - Windows 10 版本 1809（内部版本 17763）或更新版本，或 Windows 11，x64。
-- 在每台要监控的 Linux 主机上安装 EbbTop 代理（x86-64、glibc 2.39 或更新版本、systemd 用户会话）。用项目 Releases 页面的一行安装脚本或压缩包安装；代理是一个普通的 systemd 用户服务，它写出的令牌只有你能读取。
-- 电脑与主机之间的私有网络通路：同一局域网、VPN 或 tailnet。EbbTop 不是公共中继，也不需要端口转发。
+- 每台要监控的 Linux 主机（x86-64、glibc 2.39 或更新版本、systemd 用户会话），或每台 Apple Silicon Mac（macOS 13 或更新版本，按用户的 LaunchAgent）。同一个一行安装脚本会根据系统选择对应安装包，无需 root 或管理员权限；代理写出的令牌只有你能读取。
+- 电脑与主机之间的私有网络通路：同一局域网、VPN 或 tailnet。EbbTop 不是公共中继，也不需要端口转发。macOS 代理要求令牌，并拒绝公网绑定地址。
 
-免费且开源（MIT 许可证）。GitHub Releases 页面继续提供 Windows ZIP（同一个应用，但没有 Store 的自动更新）、Linux 代理和 macOS 版本。
+免费且开源（MIT 许可证）。GitHub Releases 页面继续提供 Windows ZIP（同一个应用，但没有 Store 的自动更新）、Linux 代理、macOS 代理和 macOS 桌面版本。
 ```
 
 ### zh-CN What's new
@@ -127,7 +128,8 @@ EbbTop 是一款原生的类 btop 监控工具，用于监控你自己运行的 
 ```
 首个 Store 版本。
 
-- 为每台添加的主机提供实时面板：CPU、内存、网络、磁盘、GPU 与工作负载汇总。
+- 每台添加的主机都有实时面板：CPU、内存、网络、磁盘和进程表；Linux 主机还提供 GPU 与工作负载汇总。
+- 支持 Apple Silicon Mac（macOS 13+）主机，安装使用同一个一行脚本。
 - 可排序、可筛选的进程表，附带进程详情面板。
 - 六位数字配对码；只读令牌保存在 Windows 凭据管理器中。
 - 界面支持英文、简体中文和繁体中文。
@@ -143,37 +145,37 @@ app's `zh-Hant-TW` strings.
 ### zh-TW short description
 
 ```
-在 Windows 上監控你自己的 Linux 主機：CPU、記憶體、網路、磁碟，以及可排序、可篩選的處理程序表與詳細資料。每台主機一個小型代理，透過區域網路、VPN 或 tailnet 通訊，權杖由你保管。無雲端、無遙測。
+在 Windows 上監控自己的 Linux 或 Apple Silicon Mac（macOS 13+）主機：CPU、記憶體、網路、磁碟，以及可排序、可篩選的處理程序表與詳細資料。每台主機一個小型代理程式，透過區域網路、VPN 或 tailnet 通訊，權杖由你保管。無雲端、無遙測。
 ```
 
 ### zh-TW description
 
 ```
-EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 Linux 機器。
+EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 Linux 主機和 Apple Silicon Mac（macOS 13 或更新版本）。
 
-連線到你自己的主機並即時檢視：CPU 每核心使用率與溫度、記憶體與置換空間、網路與磁碟吞吐量、GPU 使用率與視訊記憶體，以及一個可排序、可篩選的處理程序表，附處理程序詳細資料面板（命令列、工作目錄、子處理程序、執行緒、CPU 與記憶體歷史曲線）。處理程序依工作負載分組，因此一個 systemd 服務或一個容器會顯示為一列，並帶有自己的合計值。
+連線到你自己的主機並即時檢視：CPU 每核心使用率、記憶體與置換空間、網路與磁碟容量，以及一個可排序、可篩選的處理程序表，附處理程序詳細資料面板（命令列、工作目錄、子處理程序、執行緒、CPU 與記憶體歷史曲線）。在 Linux 主機上還可檢視每核心溫度、每磁碟吞吐量、GPU 使用率與視訊記憶體，以及依工作負載分組的處理程序；一個 systemd 服務或一個容器會顯示為一列，並帶有自己的合計值。macOS 不提供的數值（溫度、GPU 指標、每磁碟吞吐量和 cgroups）會顯示為無法使用，而不會猜測。
 
 它是為少數幾台你自己擁有的機器而做，而不是為雲端上的機器叢集。
 
 運作方式
 
-每台 Linux 主機上執行一個很小的代理，透過一個 WebSocket 回傳指標、處理程序表以及隨選的處理程序詳細資料。桌面應用程式可以連線任意多台主機，每台主機一個權杖，儲存在 Windows 認證管理員中，連線中斷後會自動重新連線。
+每台 Linux 或 macOS 主機上執行一個很小的代理程式，透過一個 WebSocket 回傳指標、處理程序表以及隨選的處理程序詳細資料。桌面應用程式可以連線任意多台主機，每台主機一個權杖，儲存在 Windows 認證管理員中，連線中斷後會自動重新連線。
 
-配對只需一分鐘。在主機上執行 ebbtop-agent --pair，將它顯示的六位數字輸入 EbbTop，應用程式會儲存它簽發的唯讀權杖。也可以直接填入位址和權杖，適用於 tailnet 或其他網段上的主機。
+配對只需一分鐘。在主機上執行 ebbtop-agent --pair，將它顯示的六位數字輸入 EbbTop，應用程式會儲存它簽發的唯讀權杖。也可以直接填入位址和權杖，適用於 tailnet 或其他網段上的主機。macOS 代理程式要求非空權杖，並拒絕公用位址綁定。
 
 它不做什麼
 
 - 沒有雲端帳號，沒有登入，沒有遙測。應用程式只連線你設定的主機。
-- 唯讀監控。唯一能執行的動作，是你在處理程序表中選取、屬於你自己使用者的處理程序，經確認後送出 SIGTERM 或 SIGINT。沒有任何容器或服務控制功能。
-- 沒有 SSH，Windows 端不安裝代理，你的電腦上也沒有背景服務。
+- 唯讀監控。在 Linux 主機上，唯一能執行的動作，是你在處理程序表中選取、屬於你自己使用者的處理程序，經確認後送出 SIGTERM 或 SIGINT；macOS 代理程式不支援終止處理程序。沒有任何容器或服務控制功能。
+- 沒有 SSH，Windows 端不安裝代理程式，你的電腦上也沒有背景服務。
 
 你需要準備
 
 - Windows 10 版本 1809（組建 17763）或更新版本，或 Windows 11，x64。
-- 在每台要監控的 Linux 主機上安裝 EbbTop 代理（x86-64、glibc 2.39 或更新版本、systemd 使用者工作階段）。用專案 Releases 頁面的一行安裝指令或壓縮檔安裝；代理是一個一般的 systemd 使用者服務，它寫出的權杖只有你能讀取。
-- 電腦與主機之間的私有網路通路：同一個區域網路、VPN 或 tailnet。EbbTop 不是公共中繼，也不需要連接埠轉送。
+- 每台要監控的 Linux 主機（x86-64、glibc 2.39 或更新版本、systemd 使用者工作階段），或每台 Apple Silicon Mac（macOS 13 或更新版本，每位使用者的 LaunchAgent）。同一個一行安裝指令會依系統選擇對應套件，不需要 root 或系統管理員權限；代理程式寫出的權杖只有你能讀取。
+- 電腦與主機之間的私有網路通路：同一個區域網路、VPN 或 tailnet。EbbTop 不是公共中繼，也不需要連接埠轉送。macOS 代理程式要求權杖，並拒絕公用綁定位址。
 
-免費且開源（MIT 授權）。GitHub Releases 頁面繼續提供 Windows ZIP（同一個應用程式，但沒有 Store 的自動更新）、Linux 代理和 macOS 版本。
+免費且開源（MIT 授權）。GitHub Releases 頁面繼續提供 Windows ZIP（同一個應用程式，但沒有 Store 的自動更新）、Linux 代理程式、macOS 代理程式和 macOS 桌面版本。
 ```
 
 ### zh-TW What's new
@@ -181,7 +183,8 @@ EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 
 ```
 首個 Store 版本。
 
-- 為每台新增的主機提供即時面板：CPU、記憶體、網路、磁碟、GPU 與工作負載彙總。
+- 為每台新增的主機提供即時面板：CPU、記憶體、網路、磁碟和處理程序表；Linux 主機另提供 GPU 與工作負載彙總。
+- 支援 Apple Silicon Mac（macOS 13+）主機，安裝使用同一個一行指令。
 - 可排序、可篩選的處理程序表，附處理程序詳細資料面板。
 - 六位數字配對碼；唯讀權杖儲存在 Windows 認證管理員中。
 - 介面支援英文、簡體中文和繁體中文。
@@ -193,7 +196,8 @@ EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 
 ```
 First Store release.
 
-- Live dashboard for every host you add: CPU, memory, network, disk, GPU and workload roll-up.
+- Live dashboard for every host you add: CPU, memory, network, disk and the process table, with GPU and workload roll-up on Linux hosts.
+- Apple Silicon Mac hosts (macOS 13+) alongside Linux x86-64 hosts, installed by the same one-line script.
 - Sortable, filterable process table with a per-process detail inspector.
 - Pairing with a six-digit code; read-only tokens kept in the Windows credential store.
 - The Store build updates through the Microsoft Store.
@@ -202,10 +206,11 @@ First Store release.
 ## Product features (up to 20 bullets, Partner Center "Product features")
 
 ```
-Live CPU, memory, network, disk and GPU panels
+Live CPU, memory, network and disk panels; GPU on Linux hosts
+Apple Silicon Mac hosts (macOS 13+) as well as Linux x86-64 hosts
 Sortable, filterable process table
 Per-process detail: command, working directory, children, threads, CPU and memory graphs
-Workload grouping by systemd unit and container
+Workload grouping by systemd unit and container on Linux hosts
 Multiple hosts in one window, switchable inline
 Pairing with a six-digit code (read-only token)
 Tokens kept in the Windows credential store
@@ -228,7 +233,7 @@ scene shows, in the language of the listing they belong to.
 
 | Image | Caption |
 |---|---|
-| `dashboard-en.png` | Live dashboard for one host: CPU with per-core meters and temperature, memory and swap, network and disk throughput, GPU load and VRAM, the workload roll-up, and the process table. Status reads LIVE. |
+| `dashboard-en.png` | Live dashboard for one Linux host: CPU with per-core meters and temperature, memory and swap, network and disk throughput, GPU load and VRAM, the workload roll-up, and the process table. Status reads LIVE. |
 | `process-detail-en.png` | The process detail inspector: command line with Copy, CPU time, virtual memory, start time, working directory, executable, child processes, top threads, and CPU and memory history graphs for the selected process. |
 | `pairing-discovered.png` | First run: EbbTop finds the agents on your own network, showing each host name, agent version and address. |
 | `pairing-code.png` | Pairing with a six-digit code: the app exchanges the code for a read-only token and stores it, so no token is typed by hand. |
@@ -237,19 +242,19 @@ scene shows, in the language of the listing they belong to.
 
 | Image | Caption |
 |---|---|
-| `dashboard-zh-cn.png` | 单台主机的实时面板：CPU 每核占用与温度、内存与交换分区、网络与磁盘吞吐、GPU 占用与显存、工作负载汇总，以及进程表。状态显示为“实时”。 |
+| `dashboard-zh-cn.png` | 单台 Linux 主机的实时面板：CPU 每核占用与温度、内存与交换分区、网络与磁盘吞吐、GPU 占用与显存、工作负载汇总，以及进程表。状态显示为“实时”。 |
 | `process-detail-zh-cn.png` | 进程详情面板：命令行与复制按钮、CPU 时间、虚拟内存、启动时间、工作目录、可执行文件、子进程、主要线程，以及所选进程的 CPU 与内存历史曲线。 |
 
 **zh-TW**
 
 | Image | Caption |
 |---|---|
-| `dashboard-zh-tw.png` | 單台主機的即時面板：CPU 每核心使用率與溫度、記憶體與置換空間、網路與磁碟吞吐量、GPU 使用率與視訊記憶體、工作負載彙總，以及處理程序表。狀態顯示為「即時」。 |
+| `dashboard-zh-tw.png` | 單台 Linux 主機的即時面板：CPU 每核心使用率與溫度、記憶體與置換空間、網路與磁碟吞吐量、GPU 使用率與視訊記憶體、工作負載彙總，以及處理程序表。狀態顯示為「即時」。 |
 | `process-detail-zh-tw.png` | 處理程序詳細資料面板：命令列與複製按鈕、CPU 時間、虛擬記憶體、啟動時間、工作目錄、執行檔、子處理程序、主要執行緒，以及所選處理程序的 CPU 與記憶體歷史曲線。 |
 
 | File | Scene | Listing language |
 |---|---|---|
-| `ebbtop-store-1366x768-dashboard-en.png` | Dashboard: CPU, memory, network, GPU, disk, workloads, process table, LIVE | en-US |
+| `ebbtop-store-1366x768-dashboard-en.png` | Dashboard (Linux host): CPU, memory, network, GPU, disk, workloads, process table, LIVE | en-US |
 | `ebbtop-store-1366x768-process-detail-en.png` | A selected process: detail inspector with command line, CPU time, memory, cwd/exe, children, threads and two history graphs | en-US |
 | `ebbtop-store-1366x768-pairing-discovered.png` | Pairing wizard: agents found on this network | en-US |
 | `ebbtop-store-1366x768-pairing-code.png` | Pairing wizard: the six-digit code step | en-US |
@@ -387,24 +392,30 @@ with no EbbTop agent anywhere and sees only the first-run wizard. Paste this int
 **Submission options -> Notes for certification** so the reviewer knows why.
 
 ```
-EbbTop is a monitor for the customer's own Linux machines, not a hosted service.
-The Windows app has no account, no sign-in and no server of its own: it connects
-over the customer's LAN, VPN or tailnet to a small agent the customer installs on
-each Linux host.
+EbbTop is a monitor for the customer's own Linux and Apple Silicon Mac machines,
+not a hosted service. The Windows app has no account, no sign-in and no server
+of its own: it connects over the customer's LAN, VPN or tailnet to a small
+agent the customer installs on each host.
 
 A reviewer testing on a clean machine therefore sees the first-run wizard with no
 hosts listed, which is the correct empty state. Nothing is wrong and no
 configuration is missing on Microsoft's side. To see a populated dashboard:
 
-1. Use any Linux machine (a VM is fine) on the same network as the test PC.
-2. On that Linux host, run the one-line installer from our public repository:
+1. Use any Linux machine (a VM is fine) or an Apple Silicon Mac (macOS 13+) on
+   the same network as the test PC.
+2. On that host, run the one-line installer from our public repository:
    curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
-   It installs a systemd user service and prints a host address and a token path.
+   It chooses the package from `uname`, installs a per-user systemd service or
+   LaunchAgent, and prints a host address and a token path.
 3. On the Windows PC, in the EbbTop wizard, type that address (format
    ws://<address>:45976/ws) and paste the token from the printed path, then Test
    and Save and connect. The dashboard reads LIVE within about a second.
+   On macOS the token is at `~/Library/Application Support/ebbtop-agent/ebbtop.token`;
+   the agent requires a token and refuses a public bind address. Alternatively
+   run `~/Library/Application Support/ebbtop-agent/bin/ebbtop-agent --pair` on
+   the Mac and enter the six-digit code.
 
-Without a Linux host, the four screenshots on the listing show the populated
+Without a host, the four screenshots on the listing show the populated
 dashboard, the process table, and both steps of the pairing wizard; they are
 rendered from the shipping build, not mocked up.
 
@@ -414,16 +425,18 @@ delivers updates; the GitHub download build is the one with the updater. There i
 no telemetry, no analytics and no crash reporting in either build.
 
 The one write action in the app is an explicit, confirmed SIGTERM or SIGINT sent
-to a process owned by the same user who runs the agent; it cannot signal root
-processes, PID 1, kernel threads, or another user's processes, and Store-era
-clients receive read-only tokens that are refused that action.
+by a Linux agent to a process owned by the same user who runs it; it cannot
+signal root processes, PID 1, kernel threads, or another user's processes. The
+macOS agent reports terminate as unsupported, and paired read-only tokens are
+refused that action.
 ```
 
 ## Store listing keywords / search terms
 
 ```
-system monitor, process monitor, linux, remote monitoring, btop, htop, task
-manager, server monitor, homelab, tailscale, process table, resource monitor
+system monitor, process monitor, linux, macos, apple silicon, remote monitoring,
+btop, htop, task manager, server monitor, homelab, tailscale, process table,
+resource monitor
 ```
 
 ## Support and additional information
@@ -435,7 +448,7 @@ manager, server monitor, homelab, tailscale, process table, resource monitor
 | Privacy policy | `https://ebbwater.net/ebbtop/privacy.html` |
 | License | MIT (`LICENSE` in the repository) |
 | Source code | `https://github.com/Ebbwater/ebbtop` |
-| System requirements | Windows 10 1809+ / Windows 11, x64; a Linux host running the EbbTop agent for each machine monitored |
+| System requirements | Windows 10 1809+ / Windows 11, x64; for each machine monitored, a Linux x86-64 host (glibc 2.39+, systemd user) or an Apple Silicon Mac (macOS 13+, per-user LaunchAgent) running the EbbTop agent |
 | Age rating | Lowest tier; see the questionnaire guidance above |
 
 ## Pricing and availability
