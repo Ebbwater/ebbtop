@@ -234,6 +234,26 @@ Public raw URL after publication:
 https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-1080x1080-box-art.png
 ```
 
+## App tile icons (1:1)
+
+Three opaque PNG app tiles, each rendered natively at its own size from the
+approved app icon source, not resized from a larger PNG:
+
+- `docs/store-art/ebbtop-store-app-tile-300x300.png`
+- `docs/store-art/ebbtop-store-app-tile-150x150.png`
+- `docs/store-art/ebbtop-store-app-tile-71x71.png`
+
+These are listing tile icons. The MSIX package's `StoreLogo` sizes are
+generated separately by `deploy/windows/msix/make-assets.py`.
+
+Public raw URLs after publication:
+
+```
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-app-tile-300x300.png
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-app-tile-150x150.png
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-app-tile-71x71.png
+```
+
 ## Poster art (portrait, 2:3)
 
 Poster art is provided at both requested sizes, rendered natively from the
