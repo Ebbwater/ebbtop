@@ -135,8 +135,15 @@ if unzip -Z1 "$ZIP" | grep -Eq '(\.env$|\.token$|\.pem$|\.key$)'; then
   echo "the zip carries a secret-shaped member" >&2
   exit 1
 fi
-magic="$(unzip -p "$ZIP" "EbbTop.app/Contents/MacOS/ebbtop" | head -c 4 | od -An -tx1 | tr -d ' \n')"
+# Extract the binary to a file before reading its magic: piping the whole
+# payload into `head -c 4` makes some unzip builds die of SIGPIPE, and with
+# pipefail that would abort the script.
+EXEBIN="$(mktemp)"
+trap 'rm -f -- "$EXEBIN"' EXIT
+unzip -p "$ZIP" "EbbTop.app/Contents/MacOS/ebbtop" > "$EXEBIN"
+magic="$(head -c 4 "$EXEBIN" | od -An -tx1 | tr -d ' \n')"
 [[ "$magic" == "cffaedfe" ]] || { echo "the packaged binary is not an arm64 Mach-O (magic $magic)" >&2; exit 1; }
+rm -f -- "$EXEBIN"
 short="$(plutil -extract CFBundleShortVersionString raw -o - "$CONTENTS/Info.plist")"
 [[ "$short" == "$VERSION" ]] || { echo "Info.plist CFBundleShortVersionString is $short, not $VERSION" >&2; exit 1; }
 

@@ -229,8 +229,12 @@ if [[ "${SKIP_MACGUI:-0}" != "1" ]]; then
     die "the bundle zip carries a secret-shaped member"
   fi
   # The binary must be an arm64 Mach-O (magic cffaedfe), read back out of the
-  # packed bytes rather than trusted from the run.
-  magic="$(unzip -p "$MACGUI_SRC" "EbbTop.app/Contents/MacOS/ebbtop" | head -c 4 | od -An -tx1 | tr -d ' \n')"
+  # packed bytes rather than trusted from the run. Extract to a file first:
+  # piping the 27 MB payload into `head -c 4` makes unzip die of SIGPIPE on
+  # Linux, and with pipefail that kills this script (exit 141).
+  EXEBIN="$WORK/packed-ebbtop"
+  unzip -p "$MACGUI_SRC" "EbbTop.app/Contents/MacOS/ebbtop" > "$EXEBIN"
+  magic="$(head -c 4 "$EXEBIN" | od -An -tx1 | tr -d ' \n')"
   [[ "$magic" == "cffaedfe" ]] || die "the packaged ebbtop binary is not an arm64 Mach-O (magic $magic)"
   # Info.plist must state this release's version; parse the XML rather than
   # grep a substring out of it. A plist dict interleaves <key> and value
