@@ -196,7 +196,11 @@ verify_package() {
     esac
     count=$((count + 1))
   done < "$dir/SHA256SUMS"
-  (( count == ${#PKG_SUMMED[@]} )) || die "SHA256SUMS must cover exactly ${#PKG_SUMMED[@]} files ($PKG_SUMMED), found $count"
+  # PKG_SUMMED is a plain string, not an array: this installer runs under
+  # Bash 3.2 (macOS stock bash), so count it by word splitting.
+  expected=0
+  for m in $PKG_SUMMED; do expected=$((expected + 1)); done
+  (( count == expected )) || die "SHA256SUMS must cover exactly $expected files ($PKG_SUMMED), found $count"
   for member in $PKG_SUMMED; do
     grep -q "  $member\$" "$dir/SHA256SUMS" || die "SHA256SUMS does not cover '$member'"
   done
