@@ -234,6 +234,27 @@ Public raw URL after publication:
 https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-1080x1080-box-art.png
 ```
 
+## Poster art (portrait, 2:3)
+
+Poster art is provided at both requested sizes, rendered natively from the
+brand master and the shipped English dashboard screenshot:
+
+- `docs/store-art/ebbtop-store-720x1080-poster.png` (720x1080)
+- `docs/store-art/ebbtop-store-1440x2160-poster.png` (1440x2160)
+
+Both are opaque PNG with the graphite ground, the Ledger mark, the Exo 2
+Medium wordmark, and no baked-in caption beyond the dashboard card.
+
+Note: these two sizes are 2:3, not 9:16. True 9:16 would be 720x1280 and
+1440x2560. Confirm the Partner Center requirement before upload.
+
+Public raw URLs after publication:
+
+```
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-720x1080-poster.png
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-1440x2160-poster.png
+```
+
 ## Screenshots
 
 Eleven images, all exactly 1366x768, in `docs/store-screenshots/`. The English
