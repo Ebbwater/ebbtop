@@ -124,8 +124,9 @@ would be caught by the font-coverage test, not by this assertion.)
 - **Native Windows verification.** UIA exposure of the localized AccessKit
   names, CJK rasterization through Windows/DirectX, the localized MSIX and a
   fresh install/WACK run remain integration work (Captain + the Windows lane).
-- **Store listing, installer text, in-product documentation** and any
-  announcement/voice text.
+- **Installer text and in-product documentation**, and any announcement/voice
+  text. Store listing copy is separate and is maintained in
+  `docs/store-listing.md` for en-US, zh-CN and zh-TW.
 - **Locale autodetection.** The language is a stored setting with an explicit
   picker; the OS locale is not consulted.
 - **Spanish and Hong Kong.** Deferred; a stored value for either resolves to
