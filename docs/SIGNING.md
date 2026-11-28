@@ -130,6 +130,24 @@ What the Microsoft signature means: the bytes match the package we submitted
 and Microsoft vouches they have not been altered since. It is not an audit of
 the source.
 
+### Certification result for 0.3.1
+
+The `wack-gate` job ran on the release tag `v0.3.1`
+(`6093214060aaa8a0da84c8db134e80535690169b`) in hosted run `45924465424`, and
+the report it produced is the evidence for this submission:
+
+- `OVERALL_RESULT="PASS"`, 24 tests, 23 PASS, 1 FAIL.
+- The single FAIL is again `Blocked executables` (`OPTIONAL="TRUE"`), with the
+  same message class as 0.3.0: `CreateProcessW` (the `explorer /select` logs
+  open), `cmd.exe` (Rust std's `Command` support), and the substring matches
+  `cSI`/`ReG`. The 0.3.0 analysis above applies unchanged; the desktop
+  application binary is the same feature set rebuilt at this version.
+- The published package is `EbbTop-0.3.1-x64.msix`, sha256
+  `1daa719101591d71ba750967c5865b6a2197ffd8daba6c0a87e93ee2e09769d6`, version
+  `0.3.1.0`, unsigned. **That digest is the one to compare against the file
+  uploaded to Partner Center**, and the release API reports it as
+  `assets[].digest`.
+
 ## Build provenance
 
 Every package comes from the project's public GitHub Actions workflow at the
@@ -201,6 +219,7 @@ stops.
 |---|---|---|
 | `ebbtop.exe`, `ebbtop-probe.exe`, `EbbTop-Windows-x64.zip`, `install.ps1`, `setup.ps1` (GitHub Releases) | none | `SHA256SUMS` over HTTPS |
 | `ebbtop-agent-linux-x86_64.tar.gz` (GitHub Releases) | none | release digest plus the archive's internal manifest |
+| `ebbtop-agent-macos-arm64.tar.gz` (GitHub Releases, since 0.3.1) | none | release digest plus the archive's internal manifest |
 | `EbbTop.app.zip` (macOS, GitHub Releases) | ad-hoc only | `SHA256SUMS` over HTTPS |
 | `EbbTop-<version>-x64.msix` (Microsoft Store) | Microsoft, by Store re-signing at publish time | MSIX block map plus the Store signature |
 | Any artifact not listed above | none | — |

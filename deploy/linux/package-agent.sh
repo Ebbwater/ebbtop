@@ -22,8 +22,8 @@ NAME=ebbtop-agent-linux-x86_64
 TARGET_TRIPLE=x86_64-unknown-linux-gnu
 DIST="$ROOT/dist"
 BIN="${EBBTOP_AGENT_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/release/ebbtop-agent}"
-MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh)
-PAYLOAD=(BUILD ebbtop-agent ebbtop-agent.service)
+MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES)
+PAYLOAD=(BUILD ebbtop-agent ebbtop-agent.service THIRD-PARTY-NOTICES)
 
 log() { echo "package-agent: $*"; }
 die() { echo "package-agent: $*" >&2; exit 1; }
@@ -76,6 +76,9 @@ trap 'rm -rf -- "$stage"' EXIT
 install -m 755 "$BIN" "$stage/ebbtop-agent"
 install -m 755 "$ROOT/deploy/install-agent.sh" "$stage/install-agent.sh"
 install -m 644 "$ROOT/deploy/ebbtop-agent.service" "$stage/ebbtop-agent.service"
+# License attribution for the crates compiled into the binary (cargo-about;
+# regenerate in the same commit as any dependency change).
+install -m 644 "$ROOT/THIRD-PARTY-NOTICES" "$stage/THIRD-PARTY-NOTICES"
 
 # BUILD is self-describing metadata: version and commit, nothing host-specific.
 {

@@ -52,6 +52,9 @@ cp deploy/windows/setup.ps1 dist/
 # every non-Store artifact (loose assets and the ZIP), and the checksums
 # cover it.
 cp crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt dist/
+# License attribution for the crates compiled into the executables
+# (cargo-about; regenerate in the same commit as any dependency change).
+cp THIRD-PARTY-NOTICES dist/
 # Refuse to ship an exe that needs a non-system DLL. bcrypt.dll is inbox
 # since Vista (like the bcryptprimitives.dll already listed): rustls/ring
 # uses BCryptGenRandom on Windows, so the updater's verified-download stack
@@ -77,7 +80,7 @@ python3 deploy/windows/versioninfo.py \
   --require-file-description "EbbTop connection probe" \
   dist/ebbtop-probe.exe
 # Checksums cover the bytes as built, so they follow the metadata gate.
-(cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt > SHA256SUMS)
+(cd dist && sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt THIRD-PARTY-NOTICES > SHA256SUMS)
 {
   echo "version $VERSION"
   echo "commit $(git rev-parse --short HEAD)$(git diff --quiet || echo -dirty)"

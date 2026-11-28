@@ -177,7 +177,7 @@ fi
 # --- stage the set ----------------------------------------------------------
 mkdir -p "$OUT"
 install -m 644 "$WIN/ebbtop.exe" "$WIN/ebbtop-probe.exe" \
-  "$WIN/install.ps1" "$WIN/setup.ps1" "$WIN/LICENSE-OFL.txt" \
+  "$WIN/install.ps1" "$WIN/setup.ps1" "$WIN/LICENSE-OFL.txt" "$WIN/THIRD-PARTY-NOTICES" \
   "$WIN/EbbTop-Windows-x64.zip" "$WIN/BUILD" "$WIN/VERSIONINFO.txt" "$OUT/"
 install -m 755 deploy/bootstrap/ebbtop-install.sh "$OUT/ebbtop-install.sh"
 install -m 644 "$MSIX" "$OUT/EbbTop-${VERSION}-x64.msix"
@@ -190,7 +190,7 @@ install -m 644 "$WACK" "$OUT/wack-report.xml"
 # agent archive and the shared bootstrap are in it: a Mac user installs exactly
 # the bytes these lines name, from the same release.
 ( cd "$OUT" && sha256sum \
-    ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt \
+    ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt THIRD-PARTY-NOTICES \
     EbbTop-Windows-x64.zip ebbtop-agent-linux-x86_64.tar.gz \
     ebbtop-agent-macos-arm64.tar.gz \
     ebbtop-install.sh "EbbTop-${VERSION}-x64.msix" > SHA256SUMS )
