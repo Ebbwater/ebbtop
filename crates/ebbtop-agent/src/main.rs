@@ -22,6 +22,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use ebbtop_agent::args;
 use ebbtop_agent::discovery::{self, DiscoveryConfig};
 use ebbtop_agent::pairing::{self, CODE_TTL_MS, PairingStore};
 use ebbtop_agent::platform::{GatePolicy, PolicyError};
@@ -29,17 +30,19 @@ use ebbtop_agent::probe::{self, ProbeConfig};
 use ebbtop_agent::server;
 use ebbtop_agent::state::AppState;
 
+/// The real argv, snapshotted once: the parsing lives in
+/// [`ebbtop_agent::args`] where the integration tests exercise it directly.
+static ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+fn argv() -> &'static [String] {
+    ARGS.get_or_init(|| std::env::args().collect())
+}
+
 fn arg_flag(name: &str) -> bool {
-    std::env::args().any(|a| a == name)
+    args::arg_flag(argv(), name)
 }
 fn arg_value(name: &str) -> Option<String> {
-    let mut it = std::env::args();
-    while let Some(a) = it.next() {
-        if a == name {
-            return it.next();
-        }
-    }
-    None
+    args::arg_value(argv(), name)
 }
 
 /// The gate this build applies.
@@ -65,22 +68,18 @@ fn gate_policy() -> GatePolicy {
 
 /// Listen address from --bind, EBBTOP_BIND, or SOCKTOP_BIND (compat).
 fn bind_ip() -> anyhow::Result<std::net::IpAddr> {
-    let s = arg_value("--bind")
-        .or_else(|| std::env::var("EBBTOP_BIND").ok())
-        .or_else(|| std::env::var("SOCKTOP_BIND").ok())
-        .unwrap_or_else(|| "0.0.0.0".to_string());
-    s.parse()
-        .map_err(|e| anyhow::anyhow!("invalid bind address {s:?}: {e}"))
+    let env = std::env::var("EBBTOP_BIND")
+        .ok()
+        .or_else(|| std::env::var("SOCKTOP_BIND").ok());
+    args::parse_bind(argv(), env.as_deref()).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Port from --port/-p, EBBTOP_PORT, or SOCKTOP_PORT (compat). Default 3000.
 fn port() -> u16 {
-    arg_value("--port")
-        .or_else(|| arg_value("-p"))
-        .or_else(|| std::env::var("EBBTOP_PORT").ok())
-        .or_else(|| std::env::var("SOCKTOP_PORT").ok())
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(3000)
+    let env = std::env::var("EBBTOP_PORT")
+        .ok()
+        .or_else(|| std::env::var("SOCKTOP_PORT").ok());
+    args::parse_port(argv(), env.as_deref())
 }
 
 fn main() -> anyhow::Result<()> {

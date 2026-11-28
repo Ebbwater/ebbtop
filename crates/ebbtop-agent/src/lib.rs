@@ -1,5 +1,6 @@
 //! Library interface for ebbtop_agent functionality.
 
+pub mod args;
 pub mod discovery;
 pub mod envfile;
 pub mod gpu;
