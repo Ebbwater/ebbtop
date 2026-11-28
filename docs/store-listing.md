@@ -219,6 +219,21 @@ Private-network first: LAN, VPN or tailnet
 Free and open source (MIT)
 ```
 
+## Box art (1:1)
+
+Partner Center's 1:1 box art is
+`docs/store-art/ebbtop-store-1080x1080-box-art.png`, exactly 1080x1080 PNG.
+It is rendered at native resolution from the approved app icon source
+(`crates/ebbtop-gui/assets/brand/svg/ebbtop-app-icon.svg`) through the repo's
+brand builder, not upscaled from a smaller PNG. The tile is fully opaque,
+with the graphite ground and the teal and frost mark. No text is baked in.
+
+Public raw URL after publication:
+
+```
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-1080x1080-box-art.png
+```
+
 ## Screenshots
 
 Eleven images, all exactly 1366x768, in `docs/store-screenshots/`. The English
