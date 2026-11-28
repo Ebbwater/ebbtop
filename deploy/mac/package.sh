@@ -2,13 +2,16 @@
 # EbbTop.app bundle builder, run ON the Mac (not on the Linux build host).
 # Builds the release binary, converts the brand-pack PNG ladder to
 # EbbTop.icns with iconutil, and assembles dist/EbbTop.app so EbbTop
-# launches from Finder / the Dock with no terminal.
+# launches from Finder / the Dock with no terminal. It then zips the bundle
+# to dist/EbbTop.app.zip — the exact asset name the desktop updater on
+# macOS downloads and verifies against the release's SHA256SUMS.
 #
 # Usage (on the Mac, from the repo root):
 #   bash deploy/mac/package.sh
-# Result: dist/EbbTop.app — `open dist/EbbTop.app`, or drag it to
-# /Applications. First launch may need right-click > Open (unsigned
-# local build; the script ad-hoc signs it to reduce friction).
+# Result: dist/EbbTop.app and dist/EbbTop.app.zip (+ .sha256). `open
+# dist/EbbTop.app`, or drag it to /Applications. First launch may need
+# System Settings > Privacy & Security > Open Anyway (the bundle is
+# ad-hoc signed; macOS Sequoia removed the right-click > Open bypass).
 #
 # No network, no secret: reads only the repo's brand PNGs and the
 # locally built binary. Never touches the credential store.
@@ -107,8 +110,38 @@ EOF
 if codesign -s - --deep --force "$APP" 2>/dev/null; then
   echo "ad-hoc signed"
 else
-  echo "codesign skipped (first launch: right-click > Open)"
+  echo "codesign skipped (first launch: System Settings > Privacy & Security > Open Anyway)"
 fi
 
+# --- the release artifact ----------------------------------------------------
+# The updater on macOS downloads exactly "EbbTop.app.zip" from the release and
+# verifies it against SHA256SUMS, so the name is part of the contract. ditto,
+# not zip: it preserves the bundle's resource forks and symlinks and keeps the
+# top-level directory, so the unzipped result is EbbTop.app/, ready to move to
+# /Applications.
+ZIP="dist/EbbTop.app.zip"
+echo "== release zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+
+# Prove the artifact here, where it was built; assemble.sh re-checks the same
+# rules against the hosted run's bytes before anything is published.
+unzip -tq "$ZIP" > /dev/null || { echo "the zip does not unzip cleanly" >&2; exit 1; }
+first="$(unzip -Z1 "$ZIP" | head -n 1)"
+[[ "$first" == "EbbTop.app/"* ]] || { echo "the zip's first member is $first, not EbbTop.app/" >&2; exit 1; }
+for part in "EbbTop.app/Contents/Info.plist" "EbbTop.app/Contents/MacOS/ebbtop" "EbbTop.app/Contents/Resources/EbbTop.icns"; do
+  unzip -Z1 "$ZIP" | grep -qx "$part" || { echo "the zip is missing $part" >&2; exit 1; }
+done
+if unzip -Z1 "$ZIP" | grep -Eq '(\.env$|\.token$|\.pem$|\.key$)'; then
+  echo "the zip carries a secret-shaped member" >&2
+  exit 1
+fi
+magic="$(unzip -p "$ZIP" "EbbTop.app/Contents/MacOS/ebbtop" | head -c 4 | od -An -tx1 | tr -d ' \n')"
+[[ "$magic" == "cffaedfe" ]] || { echo "the packaged binary is not an arm64 Mach-O (magic $magic)" >&2; exit 1; }
+short="$(plutil -extract CFBundleShortVersionString raw -o - "$CONTENTS/Info.plist")"
+[[ "$short" == "$VERSION" ]] || { echo "Info.plist CFBundleShortVersionString is $short, not $VERSION" >&2; exit 1; }
+
+( cd dist && shasum -a 256 "$(basename "$ZIP")" > "$(basename "$ZIP").sha256" )
 echo "built: $APP (EbbTop $VERSION)"
+echo "artifact: $ZIP"
+cat "$ZIP.sha256"
 echo "launch: open \"$APP\"   (or drag it to /Applications)"

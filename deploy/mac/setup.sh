@@ -74,13 +74,13 @@ sign_state() {
   if codesign -dv "$app" >/dev/null 2>&1; then
     out="$(codesign -dv "$app" 2>&1 || true)"
     if grep -q 'Signature=adhoc' <<<"$out"; then
-      printf 'ad-hoc signed (Gatekeeper: right-click > Open on first launch)'
+      printf 'ad-hoc signed (Gatekeeper: first launch may need System Settings > Privacy & Security > Open Anyway)'
     else
       printf 'signed (%s)' "$(sed -n 's/^Authority=//p' <<<"$out" | head -n 1)"
     fi
     return 0
   fi
-  printf 'not signed (Gatekeeper: right-click > Open on first launch)'
+  printf 'not signed (Gatekeeper: first launch may need System Settings > Privacy & Security > Open Anyway)'
 }
 
 source_names() {
@@ -281,7 +281,7 @@ install() {
   if command -v codesign >/dev/null 2>&1; then
     codesign --verify --deep --strict "$app" >/dev/null 2>&1 &&
       wz_ok "codesign verifies" ||
-      wz_warn "codesign does not verify: right-click > Open on first launch still works for a local build"
+      wz_warn "codesign does not verify: first launch may need System Settings > Privacy & Security > Open Anyway"
   fi
   if ((OPEN_APP)); then
     wz_step "launch"

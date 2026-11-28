@@ -156,7 +156,10 @@ tagged release commit in
 
 - The `windows-x64`, `store-package` and `wack-gate` jobs run on GitHub-hosted
   runners (`ubuntu-latest`, `windows-latest`), triggered by `v*` tags or manual
-  dispatch only, so nothing runs for an ordinary push.
+  dispatch only, so nothing runs for an ordinary push. The `macos-agent` and
+  `macos-gui` jobs run the same way on hosted Apple Silicon (`macos-15`);
+  release assembly takes their run ids and verifies their bytes against the
+  tag before anything is staged.
 - The workflow and the scripts it runs (`deploy/cross-build-windows.sh`,
   `deploy/windows/msix/package-msix.sh`, `deploy/windows/msix/make-assets.py`,
   `deploy/windows/msix/verify-msix.py`) live in the repository and are
