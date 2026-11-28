@@ -96,7 +96,7 @@ enum SettingsTab {
 
 /// First-run wizard state. Present while the user has no sources and has
 /// not skipped; the Sources tab is the re-run path afterwards.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Onboard {
     name: String,
     url: String,
@@ -123,6 +123,27 @@ struct Onboard {
     /// Source name the issued token was stored under (so a later rename can
     /// drop the stale entry).
     issued_name: Option<String>,
+}
+
+impl std::fmt::Debug for Onboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the typed token or the pairing-issued one: a debug print can
+        // reach a log (same rule as `Pairing`/`PairOutcome` in discovery.rs).
+        f.debug_struct("Onboard")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("token", &(!self.token.is_empty()).then_some("***"))
+            .field("msg", &self.msg)
+            .field("testing", &self.testing)
+            .field("tested", &self.tested.as_ref().map(|(n, _, _)| n))
+            .field("probe_for", &self.probe_for.as_ref().map(|(n, _, _)| n))
+            .field("failure", &self.failure)
+            .field("discovery", &self.discovery)
+            .field("pair", &self.pair)
+            .field("issued", &self.issued.as_ref().map(|_| "***"))
+            .field("issued_name", &self.issued_name)
+            .finish()
+    }
 }
 
 impl Onboard {
@@ -229,6 +250,10 @@ pub struct App {
     /// gets the bundled CJK faces. A locale switch reinstalls on the next
     /// frame; widget ids are positional, so nothing else has to move.
     fonts_locale: Option<Locale>,
+    /// The top splitter changed `top_frac` since the last config write. The
+    /// drag updates the fraction every frame (in memory) but the config write
+    /// happens once, on release — not a JSON serialize + rename per frame.
+    splitter_dirty: bool,
 }
 
 fn local_time(ms: u64) -> String {
@@ -430,6 +455,7 @@ impl App {
             pair_msg: None,
             font_notice_open: false,
             fonts_locale: None,
+            splitter_dirty: false,
         }
     }
 
@@ -556,22 +582,33 @@ impl App {
         #[cfg(not(feature = "store"))]
         {
             if self.update.poll() {
+                // Persist the check time only when a *check* finished (the
+                // three arms below). poll() also fires for download-progress
+                // transitions, and rewriting config.json at frame rate for
+                // the length of a download was needless IO churn.
+                let mut check_finished = false;
                 match self.update.status() {
-                    UpdateStatus::Available { version, .. } => store::append_log(&format!(
-                        "update available {version} (current {})",
-                        version::current_version()
-                    )),
+                    UpdateStatus::Available { version, .. } => {
+                        store::append_log(&format!(
+                            "update available {version} (current {})",
+                            version::current_version()
+                        ));
+                        check_finished = true;
+                    }
                     UpdateStatus::UpToDate { version } => {
                         store::append_log(&format!("update check up to date {version}"));
+                        check_finished = true;
                     }
                     UpdateStatus::Failed(e) => {
-                        store::append_log(&format!("update check failed: {e}"))
+                        store::append_log(&format!("update check failed: {e}"));
+                        check_finished = true;
                     }
                     _ => {}
                 }
-                // Persist the check time so the 24 h cadence survives restarts.
-                self.cfg.update_last_check_ms = client::now_ms();
-                let _ = store::save_config(&self.cfg);
+                if check_finished {
+                    self.cfg.update_last_check_ms = client::now_ms();
+                    let _ = store::save_config(&self.cfg);
+                }
             }
             if self.update_auto && self.update.due() {
                 self.update.start(update::fetch_latest_release);
@@ -661,9 +698,17 @@ impl App {
                         let d = resp.drag_delta().y;
                         if d.abs() > 0.0 && total_h > 0.0 {
                             let nf = (self.cfg.top_frac + d / total_h).clamp(0.25, 0.75);
-                            self.cfg.top_frac = nf;
-                            let _ = store::save_config(&self.cfg);
+                            if nf != self.cfg.top_frac {
+                                self.cfg.top_frac = nf;
+                                self.splitter_dirty = true;
+                            }
                         }
+                    }
+                    // One config write per drag, on release with the final
+                    // fraction — not one serialize + rename per drag frame.
+                    if resp.drag_stopped() && self.splitter_dirty {
+                        self.splitter_dirty = false;
+                        let _ = store::save_config(&self.cfg);
                     }
                 }
                 // Detail pane sits between the top boxes and the process

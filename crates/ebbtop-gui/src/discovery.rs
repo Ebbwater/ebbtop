@@ -169,12 +169,25 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 
 /// What a successful exchange hands back. `token` is a secret: it is written
 /// to the credential store and kept in memory, never rendered or logged.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct PairOutcome {
     pub token: String,
     pub host: String,
     pub agent_version: String,
     pub scope: String,
+}
+
+impl std::fmt::Debug for PairOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the token: a debug print can reach a log (same rule as
+        // `Pairing`'s Debug below).
+        f.debug_struct("PairOutcome")
+            .field("token", &"***")
+            .field("host", &self.host)
+            .field("agent_version", &self.agent_version)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// A finished or in-flight scan, plus the list it produced. One instance per
