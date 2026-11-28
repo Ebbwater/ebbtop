@@ -42,9 +42,10 @@ REQUIRED_ASSETS = [
     "install.ps1",
     "setup.ps1",
 ]
-# Shipped since 0.3.1 (Apple Silicon agent). A release set always carries
-# the file; the site's checksum table gains its row at the next page edit.
-OPTIONAL_ASSETS = ["ebbtop-agent-macos-arm64.tar.gz"]
+# Shipped since 0.3.1 (Apple Silicon agent) and 0.3.2 (desktop bundle).
+# A release set always carries the files; the site's checksum table gains
+# their rows at the next page edit.
+OPTIONAL_ASSETS = ["ebbtop-agent-macos-arm64.tar.gz", "EbbTop.app.zip"]
 
 
 def digest(name):

@@ -12,24 +12,29 @@
 # tarball), and writes dist/release/SHA256SUMS over the whole set.
 #
 # Usage:
-#   bash deploy/release/assemble.sh <windows-build-run-id> [macos-agent-run-id]
-#   EBBTOP_MACOS_RUN=<id> bash deploy/release/assemble.sh <windows-run-id>
+#   bash deploy/release/assemble.sh <windows-build-run-id> [macos-agent-run-id] [macos-gui-run-id]
+#   EBBTOP_MACOS_RUN=<id> EBBTOP_MACOS_GUI_RUN=<id> bash deploy/release/assemble.sh <windows-run-id>
 #
-#   The macOS run id may also be given by environment. If neither is given the
+#   The macOS run ids may also be given by environment. If either is missing the
 #   assembly REFUSES: a release without the Apple Silicon archive would silently
-#   leave the published curl installer unable to serve Macs.
+#   leave the published curl installer unable to serve Macs, and one without the
+#   desktop bundle would silently break the macOS in-app updater (whose asset is
+#   exactly EbbTop.app.zip).
 #
 # Environment:
 #   EBBTOP_REPO      default Ebbwater/ebbtop
 #   SKIP_AGENT=1     reuse an existing dist/release/ebbtop-agent-linux-x86_64.tar.gz
 #   SKIP_MAC=1       reuse an existing dist/release/ebbtop-agent-macos-arm64.tar.gz
-#                    (only for a local dry run; the release path must not use it)
+#   SKIP_MACGUI=1    reuse an existing dist/release/EbbTop.app.zip
+#                    (SKIP_* are only for a local dry run; the release path
+#                    must not use them)
 set -euo pipefail
 
 REPO="${EBBTOP_REPO:-Ebbwater/ebbtop}"
 VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
-RUN_ID="${1:?usage: assemble.sh <windows-build-run-id> [macos-agent-run-id]}"
+RUN_ID="${1:?usage: assemble.sh <windows-build-run-id> [macos-agent-run-id] [macos-gui-run-id]}"
 MAC_RUN="${2:-${EBBTOP_MACOS_RUN:-}}"
+MAC_GUI_RUN="${3:-${EBBTOP_MACOS_GUI_RUN:-}}"
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/dist/release"
@@ -151,7 +156,7 @@ if [[ "${SKIP_MAC:-0}" != "1" ]]; then
   # about to be published under our name, and the bootstrap will verify it at
   # install time with the same rules.
   mapfile -t mac_members < <(tar -tzf "$SRC" | LC_ALL=C sort)
-  mac_expected="$(printf '%s\n' BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh | LC_ALL=C sort)"
+  mac_expected="$(printf '%s\n' BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES | LC_ALL=C sort)"
   [[ "$(printf '%s\n' "${mac_members[@]}")" == "$mac_expected" ]] \
     || die "the Mac archive's member set is ${mac_members[*]}"
   EXTRACT="$WORK/mac-x"
@@ -174,6 +179,87 @@ if [[ "${SKIP_MAC:-0}" != "1" ]]; then
 fi
 [[ -f "$MAC_AGENT" ]] || die "no Mac agent archive at $MAC_AGENT"
 
+# --- the macOS desktop bundle, from the macos-gui run ------------------------
+# Same rule as the agent archive: only a real Mac can produce it (cargo for
+# aarch64-apple-darwin, iconutil, codesign), so only a hosted run's bytes may
+# ship. The in-app updater on macOS downloads exactly the asset name
+# EbbTop.app.zip and verifies it against SHA256SUMS, so a release without this
+# file makes every mac client's update check fail — a missing run id is a
+# refusal rather than a warning.
+MACGUI_ZIP="$OUT/EbbTop.app.zip"
+if [[ "${SKIP_MACGUI:-0}" != "1" ]]; then
+  [[ -n "$MAC_GUI_RUN" ]] \
+    || die "no macos-gui run id: pass it as the third argument or set EBBTOP_MACOS_GUI_RUN. The desktop bundle must come from a native run on $COMMIT (SKIP_MACGUI=1 is for a local dry run only)"
+  MACGUIRUN="$(gh api "repos/$REPO/actions/runs/$MAC_GUI_RUN")" \
+    || die "cannot read the macos-gui run $MAC_GUI_RUN"
+  MACGUI_SHA="$(jq -r .head_sha <<<"$MACGUIRUN")"
+  MACGUI_CONC="$(jq -r .conclusion <<<"$MACGUIRUN")"
+  [[ "$MACGUI_SHA" == "$COMMIT" ]] \
+    || die "macos-gui run $MAC_GUI_RUN was built from $MACGUI_SHA, not $COMMIT"
+  [[ "$MACGUI_CONC" == "success" ]] \
+    || die "macos-gui run $MAC_GUI_RUN concluded '$MACGUI_CONC', not success"
+
+  log "downloading the macos-gui artifact"
+  gh api "repos/$REPO/actions/runs/$MAC_GUI_RUN/artifacts" \
+    --jq '.artifacts[] | select(.expired == false) | "\(.name)"' > "$WORK/macgui-artifacts.txt"
+  MACGUI_ART="$(grep -m1 '^EbbTop-app-' "$WORK/macgui-artifacts.txt" || true)"
+  [[ -n "$MACGUI_ART" ]] || die "macos-gui run $MAC_GUI_RUN has no EbbTop-app artifact"
+  gh run download "$MAC_GUI_RUN" -R "$REPO" -n "$MACGUI_ART" -D "$WORK/macgui"
+  MACGUI_SRC="$(find "$WORK/macgui" -name 'EbbTop.app.zip' -type f | head -n 1)"
+  [[ -n "$MACGUI_SRC" ]] || die "the macos-gui artifact carries no EbbTop.app.zip"
+
+  # The sidecar from the run must agree with the downloaded bytes.
+  MACGUI_SIDECAR="$(find "$WORK/macgui" -name 'EbbTop.app.zip.sha256' -type f | head -n 1)"
+  [[ -n "$MACGUI_SIDECAR" ]] || die "the macos-gui artifact carries no EbbTop.app.zip.sha256 sidecar"
+  want="$(cut -d' ' -f1 "$MACGUI_SIDECAR")"
+  got="$(sha256sum "$MACGUI_SRC" | cut -d' ' -f1)"
+  [[ "$want" == "$got" ]] || die "EbbTop.app.zip does not match its .sha256 sidecar"
+
+  # The zip is about to be published under our name: prove its shape here,
+  # the same rules the packaging script proved on the Mac.
+  unzip -tq "$MACGUI_SRC" > /dev/null || die "EbbTop.app.zip does not unzip cleanly"
+  mapfile -t zip_members < <(unzip -Z1 "$MACGUI_SRC")
+  [[ "${zip_members[0]}" == "EbbTop.app/"* || "${zip_members[0]}" == "EbbTop.app/" ]] \
+    || die "the bundle zip's first member is ${zip_members[0]}, not EbbTop.app/"
+  for part in "EbbTop.app/Contents/Info.plist" "EbbTop.app/Contents/MacOS/ebbtop" "EbbTop.app/Contents/Resources/EbbTop.icns"; do
+    [[ " ${zip_members[*]} " == *" $part "* ]] \
+      || die "the bundle zip is missing $part"
+  done
+  if grep -Eq '(\.env$|\.token$|\.pem$|\.key$)' <<<"${zip_members[*]}"; then
+    die "the bundle zip carries a secret-shaped member"
+  fi
+  # The binary must be an arm64 Mach-O (magic cffaedfe), read back out of the
+  # packed bytes rather than trusted from the run.
+  magic="$(unzip -p "$MACGUI_SRC" "EbbTop.app/Contents/MacOS/ebbtop" | head -c 4 | od -An -tx1 | tr -d ' \n')"
+  [[ "$magic" == "cffaedfe" ]] || die "the packaged ebbtop binary is not an arm64 Mach-O (magic $magic)"
+  # Info.plist must state this release's version; parse the XML rather than
+  # grep a substring out of it. A plist dict interleaves <key> and value
+  # elements, so walk the child list pairwise — indexing by the key list's
+  # enumerate index would land on the next key, not the value.
+  python3 - "$MACGUI_SRC" "$VERSION" <<'PY'
+import sys, zipfile, xml.etree.ElementTree as ET
+src, want = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as z:
+    plist = ET.fromstring(z.read("EbbTop.app/Contents/Info.plist"))
+def get(key):
+    for d in plist.findall("dict"):
+        children = list(d)
+        for j, el in enumerate(children):
+            if el.tag == "key" and el.text == key and j + 1 < len(children):
+                return children[j + 1].text
+    return None
+short = get("CFBundleShortVersionString")
+if short != want:
+    sys.exit(f"assemble: bundle CFBundleShortVersionString is {short}, not {want}")
+print(f"assemble: bundle version {short}, executable {get('CFBundleExecutable')}")
+PY
+
+  mkdir -p "$OUT"
+  install -m 644 "$MACGUI_SRC" "$MACGUI_ZIP"
+  install -m 644 "$MACGUI_SIDECAR" "$MACGUI_ZIP.sha256"
+fi
+[[ -f "$MACGUI_ZIP" ]] || die "no macOS bundle at $MACGUI_ZIP"
+
 # --- stage the set ----------------------------------------------------------
 mkdir -p "$OUT"
 install -m 644 "$WIN/ebbtop.exe" "$WIN/ebbtop-probe.exe" \
@@ -192,7 +278,7 @@ install -m 644 "$WACK" "$OUT/wack-report.xml"
 ( cd "$OUT" && sha256sum \
     ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt THIRD-PARTY-NOTICES \
     EbbTop-Windows-x64.zip ebbtop-agent-linux-x86_64.tar.gz \
-    ebbtop-agent-macos-arm64.tar.gz \
+    ebbtop-agent-macos-arm64.tar.gz EbbTop.app.zip \
     ebbtop-install.sh "EbbTop-${VERSION}-x64.msix" > SHA256SUMS )
 ( cd "$OUT" && sha256sum --strict --quiet -c SHA256SUMS )
 

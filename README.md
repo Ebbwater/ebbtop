@@ -237,7 +237,7 @@ Config: `%APPDATA%\ebbtop\config.json` (sources, graph window, interface, disk p
 
 ### macOS client
 
-Easiest: download `EbbTop.app.zip` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases), then, from the repo, `bash deploy/mac/setup.sh install --from ~/Downloads/EbbTop.app.zip`. That unpacks it, installs to `/Applications` (or `~/Applications` when that is not writable), clears the quarantine flag and verifies the signature; without `--from` it uses `dist/`, and it offers a local build when neither exists. `bash deploy/mac/setup.sh uninstall` reverses it. Manual route: unzip and `open EbbTop.app` (first launch may need right-click > Open — the bundle is ad-hoc signed). Then onboard with the host URL and token as below.
+Easiest: download `EbbTop.app.zip` from the [Releases page](https://github.com/Ebbwater/ebbtop/releases), then, from the repo, `bash deploy/mac/setup.sh install --from ~/Downloads/EbbTop.app.zip`. That unpacks it, installs to `/Applications` (or `~/Applications` when that is not writable), clears the quarantine flag and verifies the signature; without `--from` it uses `dist/`, and it offers a local build when neither exists. `bash deploy/mac/setup.sh uninstall` reverses it. Manual route: unzip and `open EbbTop.app` — first launch may need **System Settings > Privacy & Security > Open Anyway** (the bundle is ad-hoc signed; macOS Sequoia removed the right-click > Open bypass). Then onboard with the host URL and token as below.
 
 Or build from source. Same workspace, no VM and no exe change: `ebbtop` builds natively on Apple
 Silicon (`aarch64-apple-darwin`). `ebbtop-core` has no

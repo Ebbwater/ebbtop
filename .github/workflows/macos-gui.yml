@@ -1,0 +1,67 @@
+name: macos-gui
+
+# Native Apple Silicon build and package for the EbbTop desktop app.
+#
+# Why this job exists: only a real Mac can produce the bundle — cargo for
+# aarch64-apple-darwin, iconutil for the .icns, codesign for the ad-hoc
+# signature — and deploy/mac/package.sh refuses to run anywhere else. It
+# packages dist/EbbTop.app and zips it to dist/EbbTop.app.zip, the exact
+# asset name the desktop updater on macOS downloads and verifies against
+# the release's SHA256SUMS (ebbtop-core/src/update.rs MACOS_ASSET).
+#
+# Release wiring: deploy/release/assemble.sh takes this run's id as its
+# third argument and refuses anything whose Info.plist version or binary
+# magic disagrees with the tagged commit, so a release can only contain a
+# bundle a real Mac built and this job's own checks passed. Until 0.3.2 no
+# release carried the bundle, which made every macOS update check fail.
+#
+# Runner: GitHub-hosted Apple Silicon — a standard runner, free for public
+# repositories (the same one macos-agent uses).
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-package:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Host identity
+        run: |
+          uname -a
+          sw_vers
+          echo "arch: $(uname -m)"
+          # A Rosetta runner would build an x86_64 binary into an arm64-named
+          # bundle; package.sh checks the Mach-O magic too, but refuse early.
+          if [ "$(uname -m)" != "arm64" ]; then
+            echo "::error::this job must run on native arm64, not $(uname -m)"
+            exit 1
+          fi
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Unit tests (gui)
+        run: cargo test --locked -p ebbtop-gui
+
+      - name: Package the bundle and the release zip
+        run: bash deploy/mac/package.sh
+
+      - name: Upload the bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EbbTop-app-${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
+          path: |
+            dist/EbbTop.app.zip
+            dist/EbbTop.app.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
