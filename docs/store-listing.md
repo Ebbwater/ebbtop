@@ -121,6 +121,8 @@ EbbTop 是一款原生的类 btop 监控工具，用于监控你自己运行的 
 - 电脑与主机之间的私有网络通路：同一局域网、VPN 或 tailnet。EbbTop 不是公共中继，也不需要端口转发。macOS 代理要求令牌，并拒绝公网绑定地址。
 
 免费且开源（MIT 许可证）。GitHub Releases 页面继续提供 Windows ZIP（同一个应用，但没有 Store 的自动更新）、Linux 代理、macOS 代理和 macOS 桌面版本。
+
+EbbTop 由汐度（Ebbwater）开发。
 ```
 
 ### zh-CN What's new
@@ -176,6 +178,8 @@ EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 
 - 電腦與主機之間的私有網路通路：同一個區域網路、VPN 或 tailnet。EbbTop 不是公共中繼，也不需要連接埠轉送。macOS 代理程式要求權杖，並拒絕公用綁定位址。
 
 免費且開源（MIT 授權）。GitHub Releases 頁面繼續提供 Windows ZIP（同一個應用程式，但沒有 Store 的自動更新）、Linux 代理程式、macOS 代理程式和 macOS 桌面版本。
+
+EbbTop 由汐度（Ebbwater）開發。
 ```
 
 ### zh-TW What's new
@@ -217,6 +221,62 @@ Tokens kept in the Windows credential store
 No account, no cloud relay, no telemetry
 Private-network first: LAN, VPN or tailnet
 Free and open source (MIT)
+```
+
+## Box art (1:1)
+
+Partner Center's 1:1 box art is
+`docs/store-art/ebbtop-store-1080x1080-box-art.png`, exactly 1080x1080 PNG.
+It is rendered at native resolution from the approved app icon source
+(`crates/ebbtop-gui/assets/brand/svg/ebbtop-app-icon.svg`) through the repo's
+brand builder, not upscaled from a smaller PNG. The tile is fully opaque,
+with the graphite ground and the teal and frost mark. No text is baked in.
+
+Public raw URL after publication:
+
+```
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-1080x1080-box-art.png
+```
+
+## App tile icons (1:1)
+
+Three opaque PNG app tiles, each rendered natively at its own size from the
+approved app icon source, not resized from a larger PNG:
+
+- `docs/store-art/ebbtop-store-app-tile-300x300.png`
+- `docs/store-art/ebbtop-store-app-tile-150x150.png`
+- `docs/store-art/ebbtop-store-app-tile-71x71.png`
+
+These are listing tile icons. The MSIX package's `StoreLogo` sizes are
+generated separately by `deploy/windows/msix/make-assets.py`.
+
+Public raw URLs after publication:
+
+```
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-app-tile-300x300.png
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-app-tile-150x150.png
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-app-tile-71x71.png
+```
+
+## Poster art (portrait, 2:3)
+
+Poster art is provided at both requested sizes, rendered natively from the
+brand master and the shipped English dashboard screenshot:
+
+- `docs/store-art/ebbtop-store-720x1080-poster.png` (720x1080)
+- `docs/store-art/ebbtop-store-1440x2160-poster.png` (1440x2160)
+
+Both are opaque PNG with the graphite ground, the Ledger mark, the Exo 2
+Medium wordmark, and no baked-in caption beyond the dashboard card.
+
+Note: these two sizes are 2:3, not 9:16. True 9:16 would be 720x1280 and
+1440x2560. Confirm the Partner Center requirement before upload.
+
+Public raw URLs after publication:
+
+```
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-720x1080-poster.png
+https://github.com/Ebbwater/ebbtop/raw/main/docs/store-art/ebbtop-store-1440x2160-poster.png
 ```
 
 ## Screenshots
