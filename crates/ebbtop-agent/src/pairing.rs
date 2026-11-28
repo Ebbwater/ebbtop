@@ -19,9 +19,11 @@
 //! same WebSocket gate as the operator's manual token but cannot reach the
 //! `kill:` path. The manual token keeps every capability it has today.
 
+use std::collections::HashMap;
 use std::io::{self, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +43,17 @@ pub const MAX_CLIENTS: usize = 64;
 pub const SCOPE_READ_ONLY: &str = "read_only";
 /// Scope of the operator's manual token (unchanged behaviour, `kill:` allowed).
 pub const SCOPE_FULL: &str = "full";
+
+/// `/pair` rate limits. The endpoint is unauthenticated by design (the code
+/// is the credential), so a flood of wrong guesses must not turn into a
+/// fsync storm on the agent's state directory — each refused guess costs a
+/// read+write+fsync of `pairing.json`, and unbounded requests would stall
+/// the metrics path for real clients. Shape mirrors
+/// `discovery::RateLimit`; the gaps are the strict pair-side values.
+pub const PAIR_SOURCE_MIN_GAP: Duration = Duration::from_secs(1);
+pub const PAIR_GLOBAL_MIN_GAP: Duration = Duration::from_millis(100);
+pub const PAIR_MAX_TRACKED_SOURCES: usize = 1024;
+pub const PAIR_TRACK_TTL: Duration = Duration::from_secs(60);
 
 pub const PAIR_FILE: &str = "pairing.json";
 pub const CLIENTS_FILE: &str = "clients.json";
@@ -351,6 +364,85 @@ impl PairingStore {
     }
 }
 
+/// Per-source and global token bucket for `POST /pair`. One exchange per
+/// [`PAIR_SOURCE_MIN_GAP`] per source address and one per
+/// [`PAIR_GLOBAL_MIN_GAP`] overall, tracking at most
+/// [`PAIR_MAX_TRACKED_SOURCES`] sources with the same prune-then-drop-oldest
+/// rule as the discovery responder, so a spoofed-source flood cannot lock
+/// real clients out forever. Pure and `Instant`-parameterised so it is
+/// testable without a clock.
+pub struct PairRateLimit {
+    per_source: HashMap<IpAddr, Instant>,
+    last_global: Option<Instant>,
+    source_gap: Duration,
+    global_gap: Duration,
+}
+
+impl Default for PairRateLimit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PairRateLimit {
+    /// The shipped gaps ([`PAIR_SOURCE_MIN_GAP`], [`PAIR_GLOBAL_MIN_GAP`]).
+    pub fn new() -> Self {
+        Self::with_gaps(PAIR_SOURCE_MIN_GAP, PAIR_GLOBAL_MIN_GAP)
+    }
+
+    /// Explicit gaps: the test harness serves the production router with
+    /// zero gaps so back-to-back posts in one test do not trip the limiter;
+    /// the shipped gaps are pinned by [`Self::new`] and the HTTP test.
+    pub fn with_gaps(source_gap: Duration, global_gap: Duration) -> Self {
+        Self {
+            per_source: HashMap::new(),
+            last_global: None,
+            source_gap,
+            global_gap,
+        }
+    }
+
+    /// May this source send an exchange at `now`? Records the request when
+    /// true, so the caller commits by calling, not by calling twice.
+    pub fn allow(&mut self, source: IpAddr, now: Instant) -> bool {
+        if let Some(last) = self.last_global
+            && now.saturating_duration_since(last) < self.global_gap
+        {
+            return false;
+        }
+        if let Some(last) = self.per_source.get(&source)
+            && now.saturating_duration_since(*last) < self.source_gap
+        {
+            return false;
+        }
+        if self.per_source.len() >= PAIR_MAX_TRACKED_SOURCES {
+            self.prune(now);
+        }
+        self.per_source.insert(source, now);
+        self.last_global = Some(now);
+        true
+    }
+
+    /// Drop expired entries; if the map is still full, drop the oldest half.
+    fn prune(&mut self, now: Instant) {
+        self.per_source
+            .retain(|_, at| now.saturating_duration_since(*at) < PAIR_TRACK_TTL);
+        if self.per_source.len() >= PAIR_MAX_TRACKED_SOURCES {
+            let mut ages: Vec<(IpAddr, Instant)> =
+                self.per_source.iter().map(|(k, v)| (*k, *v)).collect();
+            ages.sort_by_key(|(_, at)| *at);
+            for (ip, _) in ages.into_iter().take(PAIR_MAX_TRACKED_SOURCES / 2) {
+                self.per_source.remove(&ip);
+            }
+        }
+    }
+
+    /// How many sources are currently tracked (test/observability).
+    pub fn tracked(&self) -> usize {
+        self.per_source.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +452,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PairingStore::new(dir.path());
         (dir, store)
+    }
+
+    #[test]
+    fn pair_rate_limit_is_per_source_and_global() {
+        use std::net::IpAddr;
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let t0 = Instant::now();
+        let mut l = PairRateLimit::new();
+        assert!(l.allow(ip("10.0.0.5"), t0));
+        // same source inside the gap, and a different source inside the
+        // global gap, are both refused
+        assert!(!l.allow(
+            ip("10.0.0.5"),
+            t0 + PAIR_SOURCE_MIN_GAP - Duration::from_millis(1)
+        ));
+        assert!(!l.allow(ip("10.0.0.6"), t0 + Duration::from_millis(1)));
+        // after the global gap a different source passes
+        assert!(l.allow(ip("10.0.0.6"), t0 + PAIR_GLOBAL_MIN_GAP));
+        // the first source passes again after its own gap
+        assert!(l.allow(
+            ip("10.0.0.5"),
+            t0 + PAIR_SOURCE_MIN_GAP + PAIR_GLOBAL_MIN_GAP
+        ));
+    }
+
+    #[test]
+    fn pair_rate_limit_never_grows_past_the_cap() {
+        use std::net::IpAddr;
+        let t0 = Instant::now();
+        let mut l = PairRateLimit::new();
+        // one allowed request per source: the global gap forces spacing
+        for n in 0..(PAIR_MAX_TRACKED_SOURCES + 64) as u32 {
+            let at = t0 + PAIR_GLOBAL_MIN_GAP * (n + 1);
+            let src: IpAddr = format!("10.{}.{}.{}", (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff)
+                .parse()
+                .unwrap();
+            let _ = l.allow(src, at);
+        }
+        assert!(
+            l.tracked() <= PAIR_MAX_TRACKED_SOURCES,
+            "tracked sources must stay capped: {}",
+            l.tracked()
+        );
     }
 
     #[test]

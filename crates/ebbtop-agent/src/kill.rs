@@ -11,7 +11,10 @@
 //! 3. not a kernel thread (ppid == 0 in /proc/<pid>/stat)
 //! 4. the process uid equals the agent uid (so root-owned rows are refused)
 //! 5. start_time_ms matches the process's current start time (PID reuse)
-//!    Then the signal is sent via pidfd_open + pidfd_send_signal.
+//!    Then the process is pinned with pidfd_open, the /proc reads are
+//!    repeated against the pinned pid and the checks re-run, and only then
+//!    is the signal sent via pidfd_send_signal — so a pid recycled between
+//!    the first read and the pin is refused, not signalled.
 //!
 //! Every request and its result is written to the journal. The auth token
 //! never appears here: it travels in the URL query string, not in the
@@ -39,7 +42,8 @@ pub const ERR_STALE: &str = "stale start_time";
 #[allow(dead_code)]
 pub const ERR_PLATFORM: &str = "kill unsupported on this platform";
 /// ebbtop P3a: a `/pair`-issued token is read-only; the request never reaches
-/// the checks above (and is not journalled as a kill attempt).
+/// the checks above, but the attempt is journalled
+/// ([`journal_read_only_refusal`]) so the audit covers every kill-shaped frame.
 pub const ERR_READ_ONLY_SCOPE: &str = "read-only token scope";
 
 /// Strict grammar: `kill:<pid>:<start_time_ms>:<TERM|INT>`, nothing else.
@@ -140,7 +144,7 @@ fn err_out(pid: u32, signal: &str, err: &str) -> KillOutcome {
 /// systemd host; the old `/run/systemd/journal/syslog` compat socket is
 /// absent on this one). Fallback is stderr, which the unit forwards to the
 /// journal anyway when running under systemd. Never includes the token.
-fn journal_line(line: &str) {
+pub(crate) fn journal_line(line: &str) {
     #[cfg(unix)]
     {
         use std::os::unix::net::UnixDatagram;
@@ -187,6 +191,19 @@ pub fn journal_bad_request_line(text: &str, out: &KillOutcome) -> String {
     )
 }
 
+/// Journal line for a kill-shaped frame from a read-only (enrolled) client:
+/// same shape as a bad request, so `journalctl -g "ebbtop kill"` shows every
+/// attempt. The frame text is quoted and capped; it cannot contain the token
+/// (that travels in the URL query string) and no client-supplied secret
+/// exists in the grammar.
+pub fn journal_read_only_refusal(text: &str) -> String {
+    format!(
+        "ebbtop kill request raw={} ok=false err={}",
+        quote(text),
+        quote(ERR_READ_ONLY_SCOPE)
+    )
+}
+
 // ---- Entry point (called from ws.rs) -------------------------------------
 
 /// Parse, journal, check, signal, journal, reply. Synchronous: a few small
@@ -214,17 +231,37 @@ fn attempt_kill(req: &KillRequest) -> KillOutcome {
     let Some(self_uid) = self_uid() else {
         return err_out(req.pid, req.signal, ERR_NO_PROC);
     };
-    match decide_kill(req, &target, std::process::id(), self_uid) {
-        Err(reason) => err_out(req.pid, req.signal, reason),
-        Ok(()) => match send_signal(req.pid, sig_num(req.signal)) {
-            Ok(()) => KillOutcome {
-                ok: true,
-                pid: req.pid,
-                signal: req.signal.to_string(),
-                error: None,
-            },
-            Err(e) => err_out(req.pid, req.signal, &e),
+    if let Err(reason) = decide_kill(req, &target, std::process::id(), self_uid) {
+        return err_out(req.pid, req.signal, reason);
+    }
+    // Pin the pid before doing anything else: from here the fd refers to this
+    // exact process, even if it exits and its pid is recycled mid-check.
+    let pinned = match pin_pid(req.pid) {
+        Ok(f) => f,
+        Err(e) if e == ERR_NO_PROC => return err_out(req.pid, req.signal, ERR_NO_PROC),
+        Err(e) => return err_out(req.pid, req.signal, &e),
+    };
+    // Re-read /proc/<pid> and re-run the checks against the pinned pid. The
+    // old order (check, then pin) left a window where the target could exit
+    // and its pid be recycled before pidfd_open — the signal would then go to
+    // the new owner, exactly what start_time_ms exists to prevent. Now a
+    // recycled pid fails the start_time (or uid/ppid/existence) re-check.
+    match read_target(req.pid) {
+        Some(t2) => {
+            if let Err(reason) = decide_kill(req, &t2, std::process::id(), self_uid) {
+                return err_out(req.pid, req.signal, reason);
+            }
+        }
+        None => return err_out(req.pid, req.signal, ERR_NO_PROC),
+    }
+    match send_to_pidfd(&pinned, sig_num(req.signal)) {
+        Ok(()) => KillOutcome {
+            ok: true,
+            pid: req.pid,
+            signal: req.signal.to_string(),
+            error: None,
         },
+        Err(e) => err_out(req.pid, req.signal, &e),
     }
 }
 
@@ -315,18 +352,27 @@ fn raw_syscall(n: i64, _a1: i64, _a2: i64, _a3: i64, _a4: i64) -> i64 {
     -38 // -ENOSYS: fail closed on ports we have not written an asm block for
 }
 
+/// Pin the process with pidfd_open (syscall 434). The returned `File` owns
+/// the fd; from this point the pid cannot be recycled under us. An `ESRCH`
+/// open (the pid is already gone) maps to the stable `no such process`
+/// reason; other failures keep the `pidfd_open: …` text.
 #[cfg(target_os = "linux")]
-fn send_signal(pid: u32, signum: i32) -> Result<(), String> {
-    // pidfd_open(pid, flags=0) = syscall 434.
+fn pin_pid(pid: u32) -> Result<std::fs::File, String> {
     let fd = raw_syscall(434, pid as i64, 0, 0, 0);
     if fd < 0 {
+        if -fd == 2 {
+            return Err(ERR_NO_PROC.to_string());
+        }
         return Err(format!("pidfd_open: {}", err_text(-fd)));
     }
-    // From here the fd is owned; dropping the File closes it.
-    let file = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd as i32) };
-    // pidfd_send_signal(pidfd, sig, siginfo=NULL, mask=empty) = syscall 424.
+    Ok(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd as i32) })
+}
+
+/// pidfd_send_signal(pidfd, sig, siginfo=NULL, mask=empty) = syscall 424.
+#[cfg(target_os = "linux")]
+fn send_to_pidfd(pinned: &std::fs::File, signum: i32) -> Result<(), String> {
+    let fd = std::os::fd::AsRawFd::as_raw_fd(pinned) as i64;
     let r = raw_syscall(424, fd, signum as i64, 0, 0);
-    drop(file);
     if r < 0 {
         Err(format!("pidfd_send_signal: {}", err_text(-r)))
     } else {
@@ -516,6 +562,16 @@ mod tests {
             raw.starts_with("ebbtop kill request raw=\"kill:1:2:KILL\" ok=false"),
             "{raw}"
         );
+    }
+
+    #[test]
+    fn read_only_refusal_line_is_stable_and_token_free() {
+        let line = journal_read_only_refusal("kill:4242:1700000002500:TERM");
+        assert_eq!(
+            line,
+            r#"ebbtop kill request raw="kill:4242:1700000002500:TERM" ok=false err="read-only token scope""#
+        );
+        assert!(!line.contains("token="), "no credential material: {line}");
     }
 
     #[test]

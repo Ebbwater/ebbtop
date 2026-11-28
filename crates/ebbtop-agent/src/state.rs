@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use sysinfo::{Components, Disks, Networks, System};
 use tokio::sync::Mutex;
 
+use crate::secret;
+
 pub type SharedSystem = Arc<Mutex<System>>;
 pub type SharedComponents = Arc<Mutex<Components>>;
 pub type SharedDisks = Arc<Mutex<Disks>>;
@@ -77,6 +79,10 @@ pub struct AppState {
     /// Serialises `/pair` exchanges so two concurrent requests cannot both
     /// consume one code.
     pub pair_lock: Arc<tokio::sync::Mutex<()>>,
+    /// `/pair` per-source and global rate limit: the endpoint is
+    /// unauthenticated by design, so a wrong-guess flood must not become a
+    /// fsync storm on the state directory.
+    pub pair_rate: Arc<std::sync::Mutex<crate::pairing::PairRateLimit>>,
     // GPU negative cache (probe once). gpu_checked=true after first attempt; gpu_present reflects result.
     pub gpu_checked: Arc<AtomicBool>,
     pub gpu_present: Arc<AtomicBool>,
@@ -210,6 +216,7 @@ impl AppState {
                 .filter(|s| !s.is_empty()),
             pairing: Arc::new(crate::pairing::PairingStore::new(dir)),
             pair_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pair_rate: Arc::new(std::sync::Mutex::new(crate::pairing::PairRateLimit::new())),
             gpu_checked: Arc::new(AtomicBool::new(false)),
             gpu_present: Arc::new(AtomicBool::new(false)),
             cache_metrics: Arc::new(Mutex::new(CacheEntry::new())),
@@ -223,19 +230,27 @@ impl AppState {
     /// Decide what a connection may do, from the token it presented.
     ///
     /// The operator's manual token keeps exactly the behaviour it had before
-    /// P3a (`Some(expected)` and an equal query token, or no token configured
-    /// at all, which the original gate treated as "auth not required"). The
-    /// only addition is the enrollment store: a token issued through
-    /// `/pair` authenticates as [`AuthScope::ReadOnly`].
+    /// P3a (`Some(expected)` and an equal query token) — but the compare is
+    /// length-independent constant time (the same helper `/pair` uses), so the
+    /// network-facing gate does not leak a prefix match. The only addition is
+    /// the enrollment store: a token issued through `/pair` authenticates as
+    /// [`AuthScope::ReadOnly`].
+    ///
+    /// No token configured is no longer the legacy "auth not required, full
+    /// scope": it serves read-only only. `platform::startup_policy` already
+    /// refuses to start a tokenless agent on anything but loopback, so this
+    /// scope only ever applies to a loopback dev run — and even there the
+    /// kill path needs a real token.
     pub fn authenticate(&self, presented: Option<&str>) -> Option<AuthScope> {
         match (self.auth_token.as_deref(), presented) {
-            (Some(expected), Some(t)) if t == expected => Some(AuthScope::Full),
+            (Some(expected), Some(t)) if secret::constant_time_eq(t, expected) => {
+                Some(AuthScope::Full)
+            }
             (Some(_), Some(t)) if self.pairing.authenticate(t).is_some() => {
                 Some(AuthScope::ReadOnly)
             }
-            // Unchanged legacy path: no EBBTOP_TOKEN configured means the
-            // original agent accepted every connection.
-            (None, _) => Some(AuthScope::Full),
+            // Tokenless (loopback-only, enforced at startup): read-only.
+            (None, _) => Some(AuthScope::ReadOnly),
             _ => None,
         }
     }
@@ -283,12 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn no_configured_token_keeps_the_legacy_open_gate() {
+    fn no_configured_token_serves_read_only_only() {
         let dir = tempfile::tempdir().unwrap();
         let mut st = AppState::with_pairing_dir(dir.path());
         st.auth_token = None;
-        assert_eq!(st.authenticate(None), Some(AuthScope::Full));
-        assert_eq!(st.authenticate(Some("anything")), Some(AuthScope::Full));
+        assert_eq!(st.authenticate(None), Some(AuthScope::ReadOnly));
+        assert_eq!(st.authenticate(Some("anything")), Some(AuthScope::ReadOnly));
+        // The kill path is never reachable without a configured token.
+        assert!(!st.authenticate(None).unwrap().allows_kill());
     }
 
     #[test]

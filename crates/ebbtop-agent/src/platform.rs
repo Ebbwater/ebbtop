@@ -7,8 +7,8 @@
 //! * **Startup policy** ([`startup_policy`]) — the Mac agent must fail closed:
 //!   a nonempty token and a loopback-or-private bind, with broadcast
 //!   discovery off unless the operator turns it on. Linux keeps its existing
-//!   behaviour exactly (no policy is applied there), so the OpenGate legacy
-//!   path the Linux agent has always had is untouched.
+//!   behaviour (any bind with a token), with one fail-closed exception: a
+//!   tokenless agent refuses non-loopback binds, and serves read-only only.
 //! * **Portable readings** ([`cpu_model_from_brand`], [`keep_macos_volume`]) —
 //!   the values the Mac agent can report honestly, and the ones it must
 //!   report as unavailable rather than guess.
@@ -61,38 +61,53 @@ pub fn bind_is_local(bind: IpAddr) -> bool {
 pub enum GatePolicy {
     /// Apply the fail-closed rules (the Mac agent).
     Enforce,
-    /// Leave the historical behaviour alone (the Linux agent).
+    /// The Linux agent: the historical behaviour with a token configured,
+    /// plus the tokenless fail-closed rule (loopback binds only).
     Permissive,
 }
 
 /// Startup checks. `Err` is a refusal: the agent must not serve.
 ///
 /// In [`GatePolicy::Enforce`]:
-/// * the token must be present and nonempty — the agent's
-///   [`crate::state::AppState::authenticate`] treats "no token configured"
-///   as "no authentication required", which is safe for a Linux box the
-///   operator reached over a tailnet and unacceptable for a laptop;
+/// * the token must be present and nonempty — an unauthenticated listener is
+///   unacceptable on a laptop that joins untrusted networks;
 /// * the bind address must be loopback or private ([`bind_is_local`]).
 ///
-/// In [`GatePolicy::Permissive`] nothing is checked: this is the Linux agent
-/// the existing installers, unit file and documentation describe.
+/// In [`GatePolicy::Permissive`] (the Linux agent the installed units,
+/// installers and README describe) the historical behaviour stands — any bind
+/// address with a token configured starts — with one fail-closed exception:
+/// **a tokenless agent must not serve on a non-loopback bind.** Every
+/// shipped install path mints a token, so this only ever fires for a bare
+/// `cargo run` or a hand-written unit, which is exactly where the old open
+/// gate handed full scope (kill included) to anyone on the segment while the
+/// discovery responder announced the agent's presence. A loopback bind still
+/// starts (the zero-config dev loop), and [`crate::state::AppState::authenticate`]
+/// serves tokenless connections read-only only.
 pub fn startup_policy(
     policy: GatePolicy,
     bind: IpAddr,
     token: Option<&str>,
 ) -> Result<(), PolicyError> {
-    if policy == GatePolicy::Permissive {
+    let token_ok = matches!(token, Some(t) if !t.trim().is_empty());
+    if policy == GatePolicy::Permissive && token_ok {
         return Ok(());
     }
-    match token {
-        Some(t) if !t.trim().is_empty() => {}
-        _ => {
-            return Err(PolicyError(
-                "refusing to start without a token: set a nonempty EBBTOP_TOKEN in the agent's \
-                 agent.env (the Mac agent never serves unauthenticated)"
-                    .into(),
-            ));
+    if !token_ok && policy == GatePolicy::Permissive {
+        if bind.is_loopback() {
+            return Ok(());
         }
+        return Err(PolicyError(format!(
+            "refusing to start with no token on bind address {bind}: a tokenless agent must not \
+             answer on a network. Set a nonempty EBBTOP_TOKEN in the agent's agent.env (the \
+             installer does), or bind 127.0.0.1 for a local-only, read-only run."
+        )));
+    }
+    if !token_ok {
+        return Err(PolicyError(
+            "refusing to start without a token: set a nonempty EBBTOP_TOKEN in the agent's \
+             agent.env (the Mac agent never serves unauthenticated)"
+                .into(),
+        ));
     }
     if !bind_is_local(bind) {
         return Err(PolicyError(format!(
@@ -313,15 +328,36 @@ mod tests {
         assert!(err.0.contains("untrusted"), "{err}");
     }
 
-    /// Linux is untouched: the historical open gate and any bind address
-    /// still start, which is what the installed units and docs describe.
+    /// Linux with a token is untouched: the historical behaviour and any bind
+    /// address still start, which is what the installed units and docs describe.
     #[test]
-    fn permissive_applies_no_policy() {
+    fn permissive_with_a_token_applies_no_policy() {
         for bind in ["0.0.0.0", "8.8.8.8", "127.0.0.1"] {
-            for token in [None, Some(""), Some("tok")] {
+            assert!(
+                startup_policy(GatePolicy::Permissive, ip(bind), Some("tok")).is_ok(),
+                "permissive must not refuse {bind}"
+            );
+        }
+    }
+
+    /// Fail closed, permissively: a tokenless Linux agent may serve only on
+    /// loopback (the zero-config dev run, read-only by scope). Anything wider
+    /// refuses with the operator-facing next step. A blank token is no token.
+    #[test]
+    fn permissive_refuses_a_tokenless_non_loopback_bind() {
+        for bind in ["0.0.0.0", "8.8.8.8", "192.168.1.50", "100.64.0.5", "::"] {
+            for token in [None, Some(""), Some("   ")] {
+                let err = startup_policy(GatePolicy::Permissive, ip(bind), token)
+                    .expect_err("tokenless non-loopback must refuse");
+                assert!(err.0.contains("no token"), "{err}");
+                assert!(err.0.contains(bind), "{err}");
+            }
+        }
+        for bind in ["127.0.0.1", "::1"] {
+            for token in [None, Some(""), Some("   ")] {
                 assert!(
                     startup_policy(GatePolicy::Permissive, ip(bind), token).is_ok(),
-                    "permissive must not refuse {bind}"
+                    "tokenless loopback dev run must start: {bind}"
                 );
             }
         }

@@ -263,10 +263,11 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Plain ws:// only. Tailnet provides the transport security; the token
     // in the query string is the gate. No TLS listener by design.
+    // ConnectInfo is required so /pair can rate-limit per source address.
     let addr = SocketAddr::new(bind, ws_port);
     println!("ebbtop-agent: Listening on ws://{addr}/ws");
     axum_server::bind(addr)
-        .serve(server::router(state).into_make_service())
+        .serve(server::router(state).into_make_service_with_connect_info::<SocketAddr>())
         .await?;
     Ok(())
 }

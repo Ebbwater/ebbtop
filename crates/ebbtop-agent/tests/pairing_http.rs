@@ -29,11 +29,24 @@ async fn start() -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let mut state = AppState::with_pairing_dir(dir.path());
     state.auth_token = Some(MANUAL_TOKEN.into());
+    // Zero pair-rate gaps: these tests post back-to-back from one source and
+    // exercise the enrollment rules, not the limiter (which has its own
+    // end-to-end test below and unit tests in pairing.rs).
+    state.pair_rate = std::sync::Arc::new(std::sync::Mutex::new(
+        ebbtop_agent::pairing::PairRateLimit::with_gaps(
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        ),
+    ));
     let app = server::router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
     });
     Harness {
         _dir: dir,
@@ -355,4 +368,64 @@ async fn pairing_writes_files_next_to_the_agent_state() {
     assert!(left.contains(&CLIENTS_FILE.to_string()));
     let raw_clients = std::fs::read_to_string(h.state.pairing.clients_file()).unwrap();
     assert!(!raw_clients.contains(&pending.code));
+}
+
+#[tokio::test]
+async fn pair_requests_are_rate_limited_per_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::with_pairing_dir(dir.path());
+    state.auth_token = Some(MANUAL_TOKEN.into());
+    // Tiny but nonzero gaps so the third rapid post is refused in real time.
+    state.pair_rate = std::sync::Arc::new(std::sync::Mutex::new(
+        ebbtop_agent::pairing::PairRateLimit::with_gaps(
+            std::time::Duration::from_millis(250),
+            std::time::Duration::from_millis(50),
+        ),
+    ));
+    let app = server::router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+    // A minted code exists so refusals are the limiter's, not the store's.
+    let _pending = state.pairing.mint().unwrap();
+    let (first, _, body1) = post(addr, "/pair", r#"{"code":"000000"}"#).await;
+    assert_ne!(first, 429, "first request must pass the limiter: {body1}");
+    let (second, _, _) = post(addr, "/pair", r#"{"code":"000000"}"#).await;
+    assert_eq!(second, 429, "a rapid second request is rate-limited");
+    let (third, _, body3) = post(addr, "/pair", r#"{"code":"000000"}"#).await;
+    assert_eq!(third, 429, "body: {body3}");
+    assert!(body3.contains("slow down"), "body: {body3}");
+    // After the source gap the source passes again.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let (later, _, _) = post(addr, "/pair", r#"{"code":"000000"}"#).await;
+    assert_ne!(later, 429, "after the gap the source is served again");
+}
+
+#[tokio::test]
+async fn an_oversized_label_is_refused_before_any_exchange() {
+    let h = start().await;
+    let pending = h.state.pairing.mint().unwrap();
+    let label = "x".repeat(129);
+    let (status, _, body) = post(
+        h.addr,
+        "/pair",
+        &format!(r#"{{"code":"{}","label":"{label}"}}"#, pending.code),
+    )
+    .await;
+    assert_eq!(status, 400, "body: {body}");
+    assert!(body.contains("label too long"), "body: {body}");
+    // The refusal must not burn the enrollment: the right code still works.
+    let (ok, _, body) = post(
+        h.addr,
+        "/pair",
+        &format!(r#"{{"code":"{}","label":"ok"}}"#, pending.code),
+    )
+    .await;
+    assert_eq!(ok, 200, "body: {body}");
 }
