@@ -121,6 +121,8 @@ EbbTop 是一款原生的类 btop 监控工具，用于监控你自己运行的 
 - 电脑与主机之间的私有网络通路：同一局域网、VPN 或 tailnet。EbbTop 不是公共中继，也不需要端口转发。macOS 代理要求令牌，并拒绝公网绑定地址。
 
 免费且开源（MIT 许可证）。GitHub Releases 页面继续提供 Windows ZIP（同一个应用，但没有 Store 的自动更新）、Linux 代理、macOS 代理和 macOS 桌面版本。
+
+EbbTop 由汐度（Ebbwater）开发。
 ```
 
 ### zh-CN What's new
@@ -176,6 +178,8 @@ EbbTop 是一款原生的類 btop 監控工具，用來監控你自己執行的 
 - 電腦與主機之間的私有網路通路：同一個區域網路、VPN 或 tailnet。EbbTop 不是公共中繼，也不需要連接埠轉送。macOS 代理程式要求權杖，並拒絕公用綁定位址。
 
 免費且開源（MIT 授權）。GitHub Releases 頁面繼續提供 Windows ZIP（同一個應用程式，但沒有 Store 的自動更新）、Linux 代理程式、macOS 代理程式和 macOS 桌面版本。
+
+EbbTop 由汐度（Ebbwater）開發。
 ```
 
 ### zh-TW What's new
