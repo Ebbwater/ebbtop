@@ -758,7 +758,10 @@ pub fn failure_next_action(locale: Locale, d: &ebbtop_core::client::Diagnosis) -
 pub fn pair_failure_keys(kind: ebbtop_core::pairing::PairFailure) -> (Key, Key) {
     use ebbtop_core::pairing::PairFailure as P;
     match kind {
-        P::NoPendingCode => (Key::PairNoPendingCodeHeadline, Key::PairNoPendingCodeNextAction),
+        P::NoPendingCode => (
+            Key::PairNoPendingCodeHeadline,
+            Key::PairNoPendingCodeNextAction,
+        ),
         P::InvalidCode => (Key::PairInvalidCodeHeadline, Key::PairInvalidCodeNextAction),
         P::ExpiredCode => (Key::PairExpiredCodeHeadline, Key::PairExpiredCodeNextAction),
         P::LockedOut => (Key::PairLockedOutHeadline, Key::PairLockedOutNextAction),
@@ -771,10 +774,7 @@ pub fn pair_failure_keys(kind: ebbtop_core::pairing::PairFailure) -> (Key, Key) 
 }
 
 /// Localized headline for a classified pairing failure.
-pub fn pair_failure_headline(
-    locale: Locale,
-    e: &ebbtop_core::pairing::PairError,
-) -> &'static str {
+pub fn pair_failure_headline(locale: Locale, e: &ebbtop_core::pairing::PairError) -> &'static str {
     text(locale, pair_failure_keys(e.kind).0)
 }
 
@@ -797,17 +797,17 @@ pub fn pair_failure_next_action(
 /// never translated, so this is what keeps it from turning into tofu.
 pub fn font_definitions(locale: Locale) -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
-    fonts
-        .font_data
-        .insert(FONT_ZH_HANS_NAME.to_owned(), Arc::new(FontData::from_static(FONT_ZH_HANS)));
-    fonts
-        .font_data
-        .insert(FONT_ZH_HANT_NAME.to_owned(), Arc::new(FontData::from_static(FONT_ZH_HANT)));
+    fonts.font_data.insert(
+        FONT_ZH_HANS_NAME.to_owned(),
+        Arc::new(FontData::from_static(FONT_ZH_HANS)),
+    );
+    fonts.font_data.insert(
+        FONT_ZH_HANT_NAME.to_owned(),
+        Arc::new(FontData::from_static(FONT_ZH_HANT)),
+    );
 
     let order: [&str; 4] = match locale {
-        Locale::ZhHantTw => {
-            [FONT_ZH_HANT_NAME, FONT_ZH_HANS_NAME, "Ubuntu-Light", "Hack"]
-        }
+        Locale::ZhHantTw => [FONT_ZH_HANT_NAME, FONT_ZH_HANS_NAME, "Ubuntu-Light", "Hack"],
         _ => [FONT_ZH_HANS_NAME, FONT_ZH_HANT_NAME, "Ubuntu-Light", "Hack"],
     };
     // Appended, never inserted at the front: the Latin faces keep their glyphs
@@ -834,7 +834,11 @@ mod tests {
     #[test]
     fn locale_ids_round_trip() {
         for loc in Locale::ALL {
-            assert_eq!(Locale::from_config(loc.id()), loc, "{loc:?} id must round-trip");
+            assert_eq!(
+                Locale::from_config(loc.id()),
+                loc,
+                "{loc:?} id must round-trip"
+            );
         }
         assert_eq!(Locale::default(), Locale::English);
         assert_eq!(Locale::from_config(""), Locale::English);
@@ -858,10 +862,24 @@ mod tests {
     #[test]
     fn english_error_text_matches_core() {
         use ebbtop_core::client::ProbeFailure as P;
-        for kind in [P::AuthRefused, P::Unreachable, P::Timeout, P::NotAgent, P::Ambiguous] {
+        for kind in [
+            P::AuthRefused,
+            P::Unreachable,
+            P::Timeout,
+            P::NotAgent,
+            P::Ambiguous,
+        ] {
             let (h, n) = failure_keys(kind);
-            assert_eq!(text(Locale::English, h), kind.headline(), "{kind:?} headline drift");
-            assert_eq!(text(Locale::English, n), kind.next_action(), "{kind:?} next_action drift");
+            assert_eq!(
+                text(Locale::English, h),
+                kind.headline(),
+                "{kind:?} headline drift"
+            );
+            assert_eq!(
+                text(Locale::English, n),
+                kind.next_action(),
+                "{kind:?} next_action drift"
+            );
         }
     }
 }

@@ -8,15 +8,20 @@
 use axum::{
     Json, Router,
     extract::rejection::JsonRejection,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use std::net::SocketAddr;
 
 use crate::pairing::{PAIR_PATH, PairError, PairRequest, PairResponse, now_ms};
 use crate::state::AppState;
 use crate::ws;
+
+/// Longest `/pair` label persisted into `clients.json`, which is re-read on
+/// every WebSocket upgrade: a huge label would live there forever.
+const MAX_LABEL_CHARS: usize = 128;
 
 /// Build the router. `main` serves it with `axum_server`; tests serve it on
 /// an ephemeral loopback port, so what the tests exercise is the production
@@ -49,19 +54,57 @@ fn status_for(e: PairError) -> StatusCode {
 ///
 /// The code is read from the JSON body only. It is not logged, not echoed in
 /// an error, and not accepted from the query string (a `?code=` request has
-/// no body field and is refused as a bad request).
-async fn pair_handler(State(state): State<AppState>, body: Result<Json<PairRequest>, JsonRejection>) -> Response {
+/// no body field and is refused as a bad request). Requests are rate-limited
+/// per source address and globally (the endpoint is unauthenticated by
+/// design; the code is the credential), and the exchange itself runs on the
+/// blocking pool: each wrong guess does a read+write+fsync of
+/// `pairing.json`, which must never stall the async metrics path.
+async fn pair_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    body: Result<Json<PairRequest>, JsonRejection>,
+) -> Response {
+    // Rate limit first and always (even for malformed bodies): a flood must
+    // be cheap to refuse. A poisoned limiter denies rather than admits.
+    let allowed = state
+        .pair_rate
+        .lock()
+        .map(|mut rl| rl.allow(addr.ip(), std::time::Instant::now()))
+        .unwrap_or(false);
+    if !allowed {
+        return no_store(
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({ "error": "too many pair requests; slow down" }),
+        );
+    }
     let Ok(Json(req)) = body else {
         return no_store(
             StatusCode::BAD_REQUEST,
             serde_json::json!({ "error": "bad pair request" }),
         );
     };
+    if req
+        .label
+        .as_deref()
+        .is_some_and(|l| l.chars().count() > MAX_LABEL_CHARS)
+    {
+        return no_store(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({ "error": "label too long" }),
+        );
+    }
     // One exchange at a time: two concurrent requests must not both consume
-    // the same pending code.
+    // the same pending code. The exchange is blocking file I/O (fsync), so
+    // run it on the blocking pool, not a runtime worker.
     let _guard = state.pair_lock.lock().await;
-    match state.pairing.exchange(&req.code, req.label.as_deref(), now_ms()) {
-        Ok(rec) => no_store(
+    let pairing = state.pairing.clone();
+    let code = req.code;
+    let label = req.label;
+    let outcome =
+        tokio::task::spawn_blocking(move || pairing.exchange(&code, label.as_deref(), now_ms()))
+            .await;
+    match outcome {
+        Ok(Ok(rec)) => no_store(
             StatusCode::OK,
             serde_json::json!(PairResponse {
                 token: rec.token,
@@ -71,18 +114,19 @@ async fn pair_handler(State(state): State<AppState>, body: Result<Json<PairReque
                 scope: rec.scope,
             }),
         ),
-        Err(e) => no_store(status_for(e), serde_json::json!({ "error": e.reason() })),
+        Ok(Err(e)) => no_store(status_for(e), serde_json::json!({ "error": e.reason() })),
+        // The blocking task itself died (join error): a 5xx that names
+        // nothing about the code or the store contents.
+        Err(_) => no_store(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({ "error": "pair exchange failed" }),
+        ),
     }
 }
 
 /// JSON response that a proxy must never cache: the body can carry a token.
 fn no_store(status: StatusCode, body: serde_json::Value) -> Response {
-    (
-        status,
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(body),
-    )
-        .into_response()
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
 }
 
 #[cfg(test)]
@@ -94,7 +138,13 @@ mod tests {
         assert_eq!(status_for(PairError::NoPendingCode), StatusCode::NOT_FOUND);
         assert_eq!(status_for(PairError::WrongCode), StatusCode::FORBIDDEN);
         assert_eq!(status_for(PairError::Expired), StatusCode::FORBIDDEN);
-        assert_eq!(status_for(PairError::TooManyAttempts), StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(status_for(PairError::StateIo), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            status_for(PairError::TooManyAttempts),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            status_for(PairError::StateIo),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }

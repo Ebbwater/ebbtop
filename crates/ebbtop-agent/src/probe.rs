@@ -79,8 +79,8 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     msg.extend_from_slice(&bit_len.to_be_bytes());
 
     let mut w = [0u32; 80];
-    for chunk in msg.chunks_exact(64) {
-        for (i, word) in chunk.chunks_exact(4).enumerate() {
+    for chunk in msg.as_chunks::<64>().0 {
+        for (i, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for i in 16..80 {
@@ -125,12 +125,24 @@ fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -257,7 +269,8 @@ pub fn run(cfg: &ProbeConfig) -> ProbeOutcome {
         .lines()
         .find_map(|l| {
             let (k, v) = l.split_once(':')?;
-            k.trim().eq_ignore_ascii_case("sec-websocket-accept")
+            k.trim()
+                .eq_ignore_ascii_case("sec-websocket-accept")
                 .then(|| v.trim().to_string())
         })
         .unwrap_or_default();
@@ -353,10 +366,13 @@ pub fn run(cfg: &ProbeConfig) -> ProbeOutcome {
                 return if frames == 0 {
                     ProbeOutcome::Denied
                 } else {
-                    ProbeOutcome::Ok { frames, body: String::new() }
+                    ProbeOutcome::Ok {
+                        frames,
+                        body: String::new(),
+                    }
                 };
             }
-            0x0 | 0x1 | 0x2 => {
+            0x0..=0x2 => {
                 // Only a metrics-shaped or `get_disks`/`get_processes` body
                 // counts; an empty frame from some other server must not be
                 // reported as a healthy agent. A process-detail or error reply
@@ -397,14 +413,20 @@ mod tests {
     /// checked against.
     #[test]
     fn accept_key_matches_rfc6455_example() {
-        assert_eq!(accept_key("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+        assert_eq!(
+            accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
+            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+        );
     }
 
     #[test]
     fn sha1_known_vectors() {
         let hex = |d: [u8; 20]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
         assert_eq!(hex(sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(hex(sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex(sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
         assert_eq!(
             hex(sha1(b"The quick brown fox jumps over the lazy dog")),
             "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
@@ -422,8 +444,14 @@ mod tests {
 
     #[test]
     fn addresses_split() {
-        assert_eq!(split_host_port("127.0.0.1:45976").unwrap(), ("127.0.0.1".into(), 45976));
-        assert_eq!(split_host_port("[::1]:45976").unwrap(), ("::1".into(), 45976));
+        assert_eq!(
+            split_host_port("127.0.0.1:45976").unwrap(),
+            ("127.0.0.1".into(), 45976)
+        );
+        assert_eq!(
+            split_host_port("[::1]:45976").unwrap(),
+            ("::1".into(), 45976)
+        );
         assert!(split_host_port("127.0.0.1").is_err());
         assert!(split_host_port(":45976").is_err());
         assert!(split_host_port("host:notaport").is_err());
@@ -431,7 +459,10 @@ mod tests {
 
     #[test]
     fn probe_outcome_lines_and_codes() {
-        let ok = |frames: usize| ProbeOutcome::Ok { frames, body: String::new() };
+        let ok = |frames: usize| ProbeOutcome::Ok {
+            frames,
+            body: String::new(),
+        };
         assert_eq!(ok(1).line(), "probe: ok frames=1");
         assert_eq!(ProbeOutcome::Denied.line(), "probe: denied");
         assert_eq!(ok(2).exit_code(), 0);

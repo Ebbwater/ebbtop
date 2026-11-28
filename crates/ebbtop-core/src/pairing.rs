@@ -181,7 +181,11 @@ pub fn pair_url(base: &str) -> Result<String, String> {
         "wss" => u
             .set_scheme("https")
             .map_err(|_| "cannot map wss:// to https://".to_string())?,
-        other => return Err(format!("pairing needs a ws:// or wss:// address, not {other:?}")),
+        other => {
+            return Err(format!(
+                "pairing needs a ws:// or wss:// address, not {other:?}"
+            ));
+        }
     }
     u.set_path(PAIR_PATH);
     u.set_query(None);
@@ -360,19 +364,28 @@ impl PairError {
     /// pass in case a proxy or a future agent echoes a query.
     pub fn from_status(status: u16, body: &str) -> Self {
         let detail = scrub_pair_detail(&format!("HTTP {status}: {}", body.trim()));
-        Self { kind: PairFailure::classify_status(status, &detail), detail }
+        Self {
+            kind: PairFailure::classify_status(status, &detail),
+            detail,
+        }
     }
 
     /// From a transport error string (never contains the code: the code
     /// travels in the body, not the URL).
     pub fn from_transport(err: &str) -> Self {
         let detail = scrub_pair_detail(err);
-        Self { kind: PairFailure::classify_transport(&detail), detail }
+        Self {
+            kind: PairFailure::classify_transport(&detail),
+            detail,
+        }
     }
 
     /// From a 2xx body that is not a usable [`PairResponse`].
     pub fn bad_reply(what: &str) -> Self {
-        Self { kind: PairFailure::Ambiguous, detail: scrub_pair_detail(what) }
+        Self {
+            kind: PairFailure::Ambiguous,
+            detail: scrub_pair_detail(what),
+        }
     }
 
     pub fn headline(&self) -> &'static str {
@@ -562,9 +575,10 @@ mod tests {
     #[test]
     fn foreign_json_is_not_a_discovery_reply() {
         assert!(serde_json::from_str::<DiscoveryResponse>(r#"{"hello":"world"}"#).is_err());
-        let mut r: DiscoveryResponse =
-            serde_json::from_str(r#"{"ebbtop_discovery":2,"name":"x","agent_version":"1","nonce":"n"}"#)
-                .unwrap();
+        let mut r: DiscoveryResponse = serde_json::from_str(
+            r#"{"ebbtop_discovery":2,"name":"x","agent_version":"1","nonce":"n"}"#,
+        )
+        .unwrap();
         assert!(!r.is_current());
         r.ebbtop_discovery = DISCOVERY_PROTOCOL;
         assert!(r.is_current());
@@ -577,10 +591,12 @@ mod tests {
         assert_eq!(req.code, "123456");
         assert_eq!(req.label.as_deref(), Some("laptop"));
         // label is optional
-        assert!(serde_json::from_str::<PairRequest>(r#"{"code":"123456"}"#)
-            .unwrap()
-            .label
-            .is_none());
+        assert!(
+            serde_json::from_str::<PairRequest>(r#"{"code":"123456"}"#)
+                .unwrap()
+                .label
+                .is_none()
+        );
 
         let resp: PairResponse = serde_json::from_str(
             r#"{"token":"aa","host":"k-server","agent_version":"0.2.8","nonce":"n","scope":"read_only"}"#,
@@ -650,35 +666,70 @@ mod tests {
 
     #[test]
     fn pair_url_is_the_same_host_on_plain_http_with_no_query() {
-        assert_eq!(pair_url("ws://10.0.0.5:45976/ws").as_deref(), Ok("http://10.0.0.5:45976/pair"));
+        assert_eq!(
+            pair_url("ws://10.0.0.5:45976/ws").as_deref(),
+            Ok("http://10.0.0.5:45976/pair")
+        );
         // Bare host, custom port and a token-bearing URL all reduce to the
         // endpoint: the code never rides a query string.
-        assert_eq!(pair_url("k-server").as_deref(), Ok("http://k-server:45976/pair"));
-        assert_eq!(pair_url("ws://h:9000/custom").as_deref(), Ok("http://h:9000/pair"));
+        assert_eq!(
+            pair_url("k-server").as_deref(),
+            Ok("http://k-server:45976/pair")
+        );
+        assert_eq!(
+            pair_url("ws://h:9000/custom").as_deref(),
+            Ok("http://h:9000/pair")
+        );
         assert_eq!(
             pair_url("ws://h:45976/ws?token=leak").as_deref(),
             Ok("http://h:45976/pair")
         );
-        assert_eq!(pair_url("wss://h/ws").as_deref(), Ok("https://h:45976/pair"));
+        assert_eq!(
+            pair_url("wss://h/ws").as_deref(),
+            Ok("https://h:45976/pair")
+        );
         assert!(pair_url("http://h/ws").is_err(), "scheme must be ws/wss");
     }
 
     #[test]
     fn each_refusal_status_maps_to_its_own_class() {
-        assert_eq!(PairFailure::classify_status(404, "no pending pairing code"), PairFailure::NoPendingCode);
-        assert_eq!(PairFailure::classify_status(403, "invalid pairing code"), PairFailure::InvalidCode);
-        assert_eq!(PairFailure::classify_status(403, "pairing code expired"), PairFailure::ExpiredCode);
-        assert_eq!(PairFailure::classify_status(429, "too many attempts"), PairFailure::LockedOut);
-        assert_eq!(PairFailure::classify_status(400, "bad pair request"), PairFailure::BadRequest);
+        assert_eq!(
+            PairFailure::classify_status(404, "no pending pairing code"),
+            PairFailure::NoPendingCode
+        );
+        assert_eq!(
+            PairFailure::classify_status(403, "invalid pairing code"),
+            PairFailure::InvalidCode
+        );
+        assert_eq!(
+            PairFailure::classify_status(403, "pairing code expired"),
+            PairFailure::ExpiredCode
+        );
+        assert_eq!(
+            PairFailure::classify_status(429, "too many attempts"),
+            PairFailure::LockedOut
+        );
+        assert_eq!(
+            PairFailure::classify_status(400, "bad pair request"),
+            PairFailure::BadRequest
+        );
         // An unknown status is not guessed into a definite class.
-        assert_eq!(PairFailure::classify_status(500, "boom"), PairFailure::Ambiguous);
-        assert_eq!(PairFailure::classify_status(200, ""), PairFailure::Ambiguous);
+        assert_eq!(
+            PairFailure::classify_status(500, "boom"),
+            PairFailure::Ambiguous
+        );
+        assert_eq!(
+            PairFailure::classify_status(200, ""),
+            PairFailure::Ambiguous
+        );
     }
 
     #[test]
     fn transport_failures_reuse_the_e4_evidence_rules() {
         assert_eq!(
-            PairFailure::classify_transport("error sending request: Connection refused (os error 111)"),
+            PairFailure::classify_transport(
+                "error sending request: Connection refused (os error 111)"
+            ),
             PairFailure::Unreachable
         );
         assert_eq!(
@@ -689,7 +740,10 @@ mod tests {
             PairFailure::classify_transport("HTTP format error: invalid status"),
             PairFailure::NotAgent
         );
-        assert_eq!(PairFailure::classify_transport("something new"), PairFailure::Ambiguous);
+        assert_eq!(
+            PairFailure::classify_transport("something new"),
+            PairFailure::Ambiguous
+        );
     }
 
     #[test]
@@ -697,12 +751,20 @@ mod tests {
         // The failure paths must never echo the submitted code back.
         const CODE: &str = "424242";
         let e = PairError::from_status(403, "invalid pairing code");
-        assert!(!e.log_line().contains(CODE), "code in the log line: {}", e.log_line());
+        assert!(
+            !e.log_line().contains(CODE),
+            "code in the log line: {}",
+            e.log_line()
+        );
         assert_eq!(e.kind, PairFailure::InvalidCode);
 
         // A future agent that echoes a query cannot leak one either.
         let e = PairError::from_status(400, "bad request ?code=424242");
-        assert!(!e.detail.contains(CODE), "code survived scrub: {}", e.detail);
+        assert!(
+            !e.detail.contains(CODE),
+            "code survived scrub: {}",
+            e.detail
+        );
 
         // Every class says what happened and what to do, and no two classes
         // share a headline (a user must be able to tell them apart).
@@ -721,14 +783,30 @@ mod tests {
         let mut tags = std::collections::HashSet::new();
         for k in all {
             assert!(!k.headline().is_empty());
-            assert!(k.next_action().len() > 40, "{} has no concrete action", k.tag());
-            assert!(headlines.insert(k.headline()), "duplicate headline: {}", k.headline());
+            assert!(
+                k.next_action().len() > 40,
+                "{} has no concrete action",
+                k.tag()
+            );
+            assert!(
+                headlines.insert(k.headline()),
+                "duplicate headline: {}",
+                k.headline()
+            );
             assert!(tags.insert(k.tag()), "duplicate tag: {}", k.tag());
         }
         // The code-minting classes all point at the one action that fixes
         // them, and the network classes do not.
-        for k in [PairFailure::NoPendingCode, PairFailure::ExpiredCode, PairFailure::LockedOut] {
-            assert!(k.next_action().contains("--pair"), "{} must say how to mint a code", k.tag());
+        for k in [
+            PairFailure::NoPendingCode,
+            PairFailure::ExpiredCode,
+            PairFailure::LockedOut,
+        ] {
+            assert!(
+                k.next_action().contains("--pair"),
+                "{} must say how to mint a code",
+                k.tag()
+            );
         }
         assert!(!PairFailure::Unreachable.next_action().contains("--pair"));
     }
@@ -744,7 +822,11 @@ mod tests {
         assert_eq!(e.kind, PairFailure::Ambiguous);
         let e = pair_response("<html>proxy</html>").expect_err("non-JSON must be refused");
         assert_eq!(e.kind, PairFailure::Ambiguous);
-        assert!(!e.detail.contains("token=a"), "detail not scrubbed: {}", e.detail);
+        assert!(
+            !e.detail.contains("token=a"),
+            "detail not scrubbed: {}",
+            e.detail
+        );
     }
 
     #[test]
@@ -754,8 +836,18 @@ mod tests {
         assert_eq!(r.port, 45976);
         // Not our protocol, no name, empty, oversized: never listed.
         assert!(decode_discovery_reply(br#"{"hello":"world"}"#).is_none());
-        assert!(decode_discovery_reply(br#"{"ebbtop_discovery":2,"name":"x","agent_version":"1","nonce":"n"}"#).is_none());
-        assert!(decode_discovery_reply(br#"{"ebbtop_discovery":1,"name":"  ","agent_version":"1","nonce":"n"}"#).is_none());
+        assert!(
+            decode_discovery_reply(
+                br#"{"ebbtop_discovery":2,"name":"x","agent_version":"1","nonce":"n"}"#
+            )
+            .is_none()
+        );
+        assert!(
+            decode_discovery_reply(
+                br#"{"ebbtop_discovery":1,"name":"  ","agent_version":"1","nonce":"n"}"#
+            )
+            .is_none()
+        );
         assert!(decode_discovery_reply(b"").is_none());
         let big = format!(
             r#"{{"ebbtop_discovery":1,"name":"x","agent_version":"1","nonce":"{}"}}"#,
@@ -778,12 +870,16 @@ mod tests {
         let a = DiscoveredAgent::from_reply(v4("10.0.0.5"), &reply);
         assert_eq!(a.url(), "ws://10.0.0.5:45977/ws");
         // The three facts a picker needs are all on the row.
-        assert_eq!((a.name.as_str(), a.agent_version.as_str(), a.host(), a.port),
-                   ("k-server", "0.2.8", "10.0.0.5".to_string(), 45977));
+        assert_eq!(
+            (a.name.as_str(), a.agent_version.as_str(), a.host(), a.port),
+            ("k-server", "0.2.8", "10.0.0.5".to_string(), 45977)
+        );
 
         // A responder that predates `port` still preflights to the default.
-        let legacy: DiscoveryResponse =
-            serde_json::from_str(r#"{"ebbtop_discovery":1,"name":"pi","agent_version":"0.2.7","nonce":"n"}"#).unwrap();
+        let legacy: DiscoveryResponse = serde_json::from_str(
+            r#"{"ebbtop_discovery":1,"name":"pi","agent_version":"0.2.7","nonce":"n"}"#,
+        )
+        .unwrap();
         let a = DiscoveredAgent::from_reply(v4("192.168.1.22"), &legacy);
         assert_eq!(a.port, crate::client::AGENT_PORT);
         assert_eq!(a.url(), "ws://192.168.1.22:45976/ws");

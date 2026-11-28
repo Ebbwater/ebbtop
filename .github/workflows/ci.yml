@@ -21,5 +21,19 @@ jobs:
       - name: Test (core, agent, gui)
         run: cargo test --locked -p ebbtop-core -p ebbtop-agent -p ebbtop-gui
 
+      # Same gate the release profile implies: zero warnings is the bar the
+      # tree already meets, so a regression is caught before it lands. The
+      # components install themselves: a self-hosted runner may carry a bare
+      # rustup toolchain (rustc + cargo only).
+      - name: Clippy (zero warnings)
+        run: |
+          rustup component add clippy
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: rustfmt
+        run: |
+          rustup component add rustfmt
+          cargo fmt --check
+
       - name: Release build (agent)
         run: cargo build --release --locked -p ebbtop-agent

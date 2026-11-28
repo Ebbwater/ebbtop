@@ -29,21 +29,21 @@ static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// Deterministic-per-input hash fallback. Only reached when `/dev/urandom`
 /// is unavailable, i.e. effectively never on the supported platform.
 fn fill_fallback(buf: &mut [u8]) {
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::BuildHasher;
     let mut written = 0;
     while written < buf.len() {
         let n = FALLBACK_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-        (
-            n,
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-        )
-            .hash(&mut h);
-        let v = h.finish().to_le_bytes();
+
+        let v = std::collections::hash_map::RandomState::new()
+            .hash_one((
+                n,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            ))
+            .to_le_bytes();
         let take = v.len().min(buf.len() - written);
         buf[written..written + take].copy_from_slice(&v[..take]);
         written += take;
@@ -127,7 +127,10 @@ mod tests {
     fn token_is_32_bytes_hex() {
         let t = token();
         assert_eq!(t.len(), 64);
-        assert!(t.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+        assert!(
+            t.bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
     }
 
     #[test]

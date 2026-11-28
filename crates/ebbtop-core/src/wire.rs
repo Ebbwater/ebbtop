@@ -239,7 +239,12 @@ const MAX_INFLATED: u64 = 32 * 1024 * 1024;
 
 fn maybe_gunzip(b: &[u8]) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
     if b.len() >= 2 && b[..2] == GZIP_MAGIC {
-        let mut out = Vec::with_capacity(b.len() * 4);
+        // Start small and let the Vec grow under the take() limit. The
+        // previous 4x-compressed-size pre-allocation let a hostile frame
+        // pick an immediate ~256 MiB allocation (tungstenite caps messages
+        // at 64 MiB) before a byte was decompressed; real frames are
+        // 10-100 KB compressed, so the growth cost is a few reallocs.
+        let mut out = Vec::with_capacity(64 * 1024);
         flate2::read::GzDecoder::new(b)
             .take(MAX_INFLATED + 1)
             .read_to_end(&mut out)?;
@@ -339,7 +344,6 @@ pub struct KillResult {
 
 pub fn decode_kill(f: Frame<'_>) -> anyhow::Result<KillResult> {
     json(f)
-
 }
 
 #[cfg(test)]
@@ -375,12 +379,18 @@ mod tests {
     /// decoding, with the field defaulting to None (legacy agent).
     #[test]
     fn metrics_without_cpu_model_decodes_legacy() {
-        assert!(!METRICS.contains("cpu_model"), "fixture must stay legacy-shaped");
+        assert!(
+            !METRICS.contains("cpu_model"),
+            "fixture must stay legacy-shaped"
+        );
         let m = decode_metrics(Frame::Text(METRICS)).unwrap();
         assert_eq!(m.cpu_model, None);
         // Same for an agent that explicitly sends null.
         let explicit = METRICS.replace(r#""gpus":null}"#, r#""gpus":null,"cpu_model":null}"#);
-        assert_eq!(decode_metrics(Frame::Text(&explicit)).unwrap().cpu_model, None);
+        assert_eq!(
+            decode_metrics(Frame::Text(&explicit)).unwrap().cpu_model,
+            None
+        );
     }
 
     /// P3a: a frame from an agent that predates the identity fields still
@@ -411,7 +421,10 @@ mod tests {
         );
         let m = decode_metrics(Frame::Text(&patched)).unwrap();
         assert_eq!(m.agent_version.as_deref(), Some("0.2.8"));
-        assert_eq!(m.boot_nonce.as_deref(), Some("00112233445566778899aabbccddeeff"));
+        assert_eq!(
+            m.boot_nonce.as_deref(),
+            Some("00112233445566778899aabbccddeeff")
+        );
     }
 
     #[test]
@@ -421,7 +434,139 @@ mod tests {
             r#""gpus":null,"cpu_model":"Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"}"#,
         );
         let m = decode_metrics(Frame::Text(&s)).unwrap();
-        assert_eq!(m.cpu_model.as_deref(), Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz"));
+        assert_eq!(
+            m.cpu_model.as_deref(),
+            Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz")
+        );
+    }
+
+    // ---- Hostile-decode edges: the agent (or a man in the middle on the
+    // plain-ws transport) controls every frame, so a truncated, corrupt, or
+    // oversized one must return Err, never panic and never allocate
+    // attacker-scaled memory.
+
+    /// A gzip stream that ends mid-file (agent died mid-send) is an error.
+    #[test]
+    fn truncated_gzip_is_an_error_not_a_panic() {
+        let full = gz(METRICS.as_bytes());
+        for chop in [1, 4, 16] {
+            let cut = &full[..full.len() - chop];
+            assert!(
+                decode_metrics(Frame::Binary(cut)).is_err(),
+                "truncating {chop} bytes must fail"
+            );
+        }
+    }
+
+    /// Flipped bytes inside the compressed data (CRC mismatch) are an error.
+    #[test]
+    fn corrupt_gzip_body_is_an_error() {
+        let mut bad = gz(METRICS.as_bytes());
+        let mid = bad.len() / 2;
+        bad[mid] ^= 0xff;
+        assert!(decode_metrics(Frame::Binary(&bad)).is_err());
+    }
+
+    /// A highly compressible frame far past [`MAX_INFLATED`] is refused by
+    /// the take() cap, and the refusal must not first allocate the inflated
+    /// size (the old compressed*4 pre-allocation let the frame pick an
+    /// immediate ~256 MiB allocation).
+    #[test]
+    fn gzip_bomb_past_the_cap_is_refused() {
+        let bomb = vec![b'a'; MAX_INFLATED as usize + 1024];
+        // Best compression keeps the fixture small: a 20,000x+ ratio is
+        // exactly what an attacker would send.
+        let mut e = GzEncoder::new(Vec::new(), Compression::best());
+        e.write_all(&bomb).unwrap();
+        let small = e.finish().unwrap();
+        assert!(
+            small.len() < 64 * 1024,
+            "fixture must stay small: {}",
+            small.len()
+        );
+        let err = decode_metrics(Frame::Binary(&small))
+            .expect_err("a frame inflating past MAX_INFLATED must be refused");
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    /// A large but legal frame (under the cap) still decodes after the
+    /// pre-allocation clamp, so the fix cost real frames nothing.
+    #[test]
+    fn large_but_legal_gzip_still_decodes() {
+        let big = format!(
+            r#"{{"sampled_at_ms":1762500000123,"cpu_total":12.5,"cpu_per_core":[10.0],"mem_total":1000,"mem_used":250,"swap_total":0,"swap_used":0,"hostname":"{}","cpu_temp_c":null,"disks":[],"networks":[],"top_processes":[],"gpus":null}}"#,
+            "k".repeat(600_000)
+        );
+        let m = decode_metrics(Frame::Binary(&gz(big.as_bytes())))
+            .expect("a 600 KB hostname frame is legal");
+        assert_eq!(m.hostname.len(), 600_000);
+    }
+
+    /// A protobuf frame that ends mid-field is an error.
+    #[test]
+    fn truncated_protobuf_is_an_error_not_a_panic() {
+        let mut buf = Vec::new();
+        <Processes as prost::Message>::encode(
+            &Processes {
+                process_count: 2,
+                rows: vec![Process {
+                    pid: 1,
+                    name: "worker".into(),
+                    ..Default::default()
+                }],
+                sampled_at_ms: 1_700_000_000_000,
+            },
+            &mut buf,
+        )
+        .unwrap();
+        for chop in [1, 5, 20] {
+            let cut = &buf[..buf.len().saturating_sub(chop).max(1)];
+            assert!(
+                decode_processes(Frame::Binary(cut)).is_err(),
+                "truncating {chop} bytes must fail"
+            );
+        }
+    }
+
+    /// A string field carrying invalid UTF-8 (binary frames skip the ws
+    /// UTF-8 validation text frames get) is an error, not a panic.
+    #[test]
+    fn protobuf_invalid_utf8_name_is_an_error() {
+        // Field 2 (rows), wire type 2: tag 0x12, len 3, then bytes that are
+        // not valid UTF-8 (\xff\xfe plus a nul).
+        let frame = [0x12u8, 0x03, 0xff, 0xfe, 0x00];
+        assert!(decode_processes(Frame::Binary(&frame)).is_err());
+    }
+
+    /// Random garbage is refused cleanly; structurally valid-but-empty
+    /// frames decode to their defaults (an empty payload is a legal
+    /// protobuf message, so that is decode behavior, not an error).
+    #[test]
+    fn garbage_binary_frames_are_errors() {
+        assert!(decode_processes(Frame::Binary(&[0xff, 0xff, 0xff])).is_err());
+        let empty = decode_processes(Frame::Binary(&[])).unwrap();
+        assert_eq!(empty.rows.len(), 0);
+        // [8,150,1] is a legal process_count=150 with no rows: it decodes.
+        let ok = decode_processes(Frame::Binary(&[0x08, 0x96, 0x01])).unwrap();
+        assert_eq!(ok.process_count, 150);
+        assert_eq!(ok.rows.len(), 0);
+    }
+
+    /// Wrong JSON types (a hostile agent or a typo'd shim) are errors.
+    #[test]
+    fn wrong_json_types_are_errors() {
+        let s = METRICS.replace(
+            r#""sampled_at_ms":1762500000123"#,
+            r#""sampled_at_ms":"not-a-number""#,
+        );
+        assert!(decode_metrics(Frame::Text(&s)).is_err());
+        let s = METRICS.replace(r#""mem_total":1000"#, r#""mem_total":-1"#);
+        assert!(decode_metrics(Frame::Text(&s)).is_err());
+        let s = METRICS.replace(
+            r#""networks":["#,
+            r#""networks":"not-an-array","disks_x":[],"_x":["#,
+        );
+        assert!(decode_metrics(Frame::Text(&s)).is_err());
     }
 
     #[test]
@@ -462,7 +607,8 @@ mod tests {
                 user: "kyler".into(),
                 state: "Sleeping".into(),
                 start_time_ms: 1_700_000_002_500,
-                cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service".into(),
+                cgroup: "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service"
+                    .into(),
             }],
             sampled_at_ms: 99,
         };
@@ -494,7 +640,12 @@ mod tests {
         }
         let old = OldProcesses {
             process_count: 1,
-            rows: vec![OldProcess { pid: 7, name: "x".into(), cpu_usage: 1.0, mem_bytes: 2 }],
+            rows: vec![OldProcess {
+                pid: 7,
+                name: "x".into(),
+                cpu_usage: 1.0,
+                mem_bytes: 2,
+            }],
         };
         let p = decode_processes(Frame::Binary(&old.encode_to_vec())).unwrap();
         assert_eq!(p.rows[0].pid, 7);
@@ -505,12 +656,21 @@ mod tests {
 
     #[test]
     fn kill_grammar_and_reply_decode() {
-        assert_eq!(format_kill_request(4242, 1_700_000_002_500, KillSignal::Term), "kill:4242:1700000002500:TERM");
+        assert_eq!(
+            format_kill_request(4242, 1_700_000_002_500, KillSignal::Term),
+            "kill:4242:1700000002500:TERM"
+        );
         assert_eq!(format_kill_request(7, 0, KillSignal::Int), "kill:7:0:INT");
-        let ok = decode_kill(Frame::Text(r#"{"ok":true,"pid":4242,"signal":"TERM","error":null}"#)).unwrap();
+        let ok = decode_kill(Frame::Text(
+            r#"{"ok":true,"pid":4242,"signal":"TERM","error":null}"#,
+        ))
+        .unwrap();
         assert!(ok.ok && ok.pid == 4242 && ok.signal == "TERM" && ok.error.is_none());
         // Large-error gzip variant decodes the same way.
-        let err = decode_kill(Frame::Binary(&gz(br#"{"ok":false,"pid":1,"signal":"","error":"pid 1"}"#))).unwrap();
+        let err = decode_kill(Frame::Binary(&gz(
+            br#"{"ok":false,"pid":1,"signal":"","error":"pid 1"}"#,
+        )))
+        .unwrap();
         assert!(!err.ok && err.error.as_deref() == Some("pid 1"));
         assert!(decode_kill(Frame::Text("nope")).is_err());
     }
@@ -524,8 +684,12 @@ mod tests {
 
     #[test]
     fn process_detail_text_and_gzip_decode_identically() {
-        let a = decode_process_detail(Frame::Text(DETAIL)).unwrap().expect("detail");
-        let b = decode_process_detail(Frame::Binary(&gz(DETAIL.as_bytes()))).unwrap().expect("detail gzip");
+        let a = decode_process_detail(Frame::Text(DETAIL))
+            .unwrap()
+            .expect("detail");
+        let b = decode_process_detail(Frame::Binary(&gz(DETAIL.as_bytes())))
+            .unwrap()
+            .expect("detail gzip");
         assert_eq!(a, b);
         assert_eq!(a.process.pid, 4242);
         assert_eq!(a.process.name, "hottest-proc");
@@ -537,12 +701,16 @@ mod tests {
         assert_eq!(a.process.threads.len(), 1);
         assert_eq!(a.process.threads[0].tid, 4242);
         assert_eq!(a.cached_at, 1762500000);
-        assert_eq!(encode_process_metrics_request(4242), "get_process_metrics:4242");
+        assert_eq!(
+            encode_process_metrics_request(4242),
+            "get_process_metrics:4242"
+        );
     }
 
     #[test]
     fn process_detail_missing_pid_maps_to_none() {
-        let err = r#"{"error":"Process 999999 not found","request":"get_process_metrics","pid":999999}"#;
+        let err =
+            r#"{"error":"Process 999999 not found","request":"get_process_metrics","pid":999999}"#;
         assert_eq!(decode_process_detail(Frame::Text(err)).unwrap(), None);
     }
 
@@ -554,8 +722,11 @@ mod tests {
     #[test]
     fn process_detail_old_agent_payload_with_defaults() {
         // An older agent omits the optional scalars and children/threads.
-        let s = r#"{"process":{"pid":7,"name":"x","cpu_usage":1.5,"mem_bytes":4096},"cached_at":99}"#;
-        let d = decode_process_detail(Frame::Text(s)).unwrap().expect("detail old");
+        let s =
+            r#"{"process":{"pid":7,"name":"x","cpu_usage":1.5,"mem_bytes":4096},"cached_at":99}"#;
+        let d = decode_process_detail(Frame::Text(s))
+            .unwrap()
+            .expect("detail old");
         assert_eq!(d.process.pid, 7);
         assert_eq!(d.process.status, "");
         assert_eq!(d.process.user_id, 0);

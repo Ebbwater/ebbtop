@@ -39,14 +39,22 @@ impl NodeInfo {
     /// description. A placeholder is not a name — see
     /// `named_by_placeholder_only`.
     pub(super) fn name(&self) -> Option<&str> {
-        [self.label.as_deref(), self.value.as_deref(), self.description.as_deref()]
-            .into_iter()
-            .flatten()
-            .find(|s| !s.trim().is_empty())
+        [
+            self.label.as_deref(),
+            self.value.as_deref(),
+            self.description.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.trim().is_empty())
     }
 
     pub(super) fn named_by_placeholder_only(&self) -> bool {
-        self.name().is_none() && self.placeholder.as_deref().is_some_and(|p| !p.trim().is_empty())
+        self.name().is_none()
+            && self
+                .placeholder
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty())
     }
 
     pub(super) fn role_name(&self) -> String {
@@ -193,7 +201,12 @@ impl Walk {
 
     /// One frame. `screen` is the physical window size; the points handed to
     /// egui shrink as the zoom factor grows, exactly like a real window.
-    pub(super) fn frame(&mut self, app: &mut App, screen: (f32, f32), events: Vec<egui::Event>) -> Frame {
+    pub(super) fn frame(
+        &mut self,
+        app: &mut App,
+        screen: (f32, f32),
+        events: Vec<egui::Event>,
+    ) -> Frame {
         self.frame_age(app, screen, events, Some(0))
     }
 
@@ -221,13 +234,21 @@ impl Walk {
         input.events = events;
         let mut out = self.ctx.run_ui(input, |ui| app.draw(ui));
         out.textures_delta.clear(); // no renderer in tests
-        let update = out.platform_output.accesskit_update.clone().unwrap_or(TreeUpdate {
-            nodes: vec![],
-            tree: None,
-            tree_id: egui::accesskit::TreeId::ROOT,
-            focus: NodeId(0),
-        });
-        Frame { nodes: nodes_of(&update), texts: texts(&out.shapes), shapes: out.shapes }
+        let update = out
+            .platform_output
+            .accesskit_update
+            .clone()
+            .unwrap_or(TreeUpdate {
+                nodes: vec![],
+                tree: None,
+                tree_id: egui::accesskit::TreeId::ROOT,
+                focus: NodeId(0),
+            });
+        Frame {
+            nodes: nodes_of(&update),
+            texts: texts(&out.shapes),
+            shapes: out.shapes,
+        }
     }
 
     /// Three settled frames, like the existing render helpers.
@@ -278,13 +299,21 @@ fn nodes_of(update: &TreeUpdate) -> Vec<NodeInfo> {
             focused: *id == update.focus,
             click: node.supports_action(Action::Click),
             focus: node.supports_action(Action::Focus),
-            rect: node.bounds().map(|b| [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32]),
+            rect: node
+                .bounds()
+                .map(|b| [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32]),
         })
         .collect()
 }
 
 fn key(k: egui::Key) -> egui::Event {
-    egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }
+    egui::Event::Key {
+        key: k,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Default::default(),
+    }
 }
 
 fn text(s: &str) -> egui::Event {
@@ -302,7 +331,9 @@ fn paint_in(shapes: &[egui::epaint::ClippedShape], rect: egui::Rect) -> Vec<Stri
             egui::Shape::Rect(r) if rect.intersects(r.rect) => {
                 out.push(format!("rect fill={:?} stroke={:?}", r.fill, r.stroke))
             }
-            egui::Shape::LineSegment { points, stroke } if points.iter().any(|p| rect.contains(*p)) => {
+            egui::Shape::LineSegment { points, stroke }
+                if points.iter().any(|p| rect.contains(*p)) =>
+            {
                 out.push(format!("line stroke={stroke:?}"))
             }
             egui::Shape::Text(t) if rect.intersects(t.visual_bounding_rect()) => out.push(format!(
@@ -374,7 +405,11 @@ fn screens() -> Vec<(&'static str, App)> {
 
     let mut kill = dashboard();
     kill.selected = Some(4242);
-    kill.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1 });
+    kill.kill_confirm = Some(KillConfirm {
+        pid: 4242,
+        name: "hottest-proc".into(),
+        start_time_ms: 1,
+    });
     out.push(("kill confirm", kill));
 
     // The update dialog is an updater-build scene: the App::update field it
@@ -403,15 +438,35 @@ fn a11y_every_screen_exposes_named_controls() {
     for (name, mut app) in screens() {
         let f = w.settle(&mut app, (960.0, 1000.0));
         assert!(!f.nodes.is_empty(), "{name}: empty accessibility tree");
-        assert!(f.nodes.iter().any(|n| n.name().is_some()), "{name}: no named node at all");
+        assert!(
+            f.nodes.iter().any(|n| n.name().is_some()),
+            "{name}: no named node at all"
+        );
         let nameless: Vec<String> = f
             .nameless_inputs()
             .iter()
-            .map(|n| format!("{} rect={:?} placeholder={:?}", n.role_name(), n.rect, n.placeholder))
+            .map(|n| {
+                format!(
+                    "{} rect={:?} placeholder={:?}",
+                    n.role_name(),
+                    n.rect,
+                    n.placeholder
+                )
+            })
             .collect();
-        assert!(nameless.is_empty(), "{name}: input without an accessible name: {nameless:?}");
-        let unnamed: Vec<String> = f.unnamed_focusables().iter().map(|n| n.role_name()).collect();
-        assert!(unnamed.is_empty(), "{name}: focusable control without a name: {unnamed:?}");
+        assert!(
+            nameless.is_empty(),
+            "{name}: input without an accessible name: {nameless:?}"
+        );
+        let unnamed: Vec<String> = f
+            .unnamed_focusables()
+            .iter()
+            .map(|n| n.role_name())
+            .collect();
+        assert!(
+            unnamed.is_empty(),
+            "{name}: focusable control without a name: {unnamed:?}"
+        );
     }
 }
 
@@ -434,9 +489,15 @@ fn a11y_table_rows_and_splitter_have_no_role_or_name() {
         .nodes
         .iter()
         .filter(|n| n.is_table_row())
-        .filter(|n| n.rect.is_none_or(|r| !r[0].is_finite() || r[2] <= r[0] || r[3] <= r[1]))
+        .filter(|n| {
+            n.rect
+                .is_none_or(|r| !r[0].is_finite() || r[2] <= r[0] || r[3] <= r[1])
+        })
         .count();
-    assert_eq!(unlocated, rows, "table rows must stay unlocated until A-2 is fixed");
+    assert_eq!(
+        unlocated, rows,
+        "table rows must stay unlocated until A-2 is fixed"
+    );
 
     // The rows are what Tab walks through: most stops in a cycle are anonymous.
     let mut w = Walk::new();
@@ -466,7 +527,11 @@ fn a11y_painted_metrics_are_not_in_the_tree() {
     let mut app = dashboard();
     let f = w.settle(&mut app, (960.0, 1000.0));
     let tree = f.tree_text();
-    let placeholders: Vec<&str> = f.nodes.iter().filter_map(|n| n.placeholder.as_deref()).collect();
+    let placeholders: Vec<&str> = f
+        .nodes
+        .iter()
+        .filter_map(|n| n.placeholder.as_deref())
+        .collect();
     let mut missing: Vec<String> = f
         .texts
         .iter()
@@ -480,10 +545,42 @@ fn a11y_painted_metrics_are_not_in_the_tree() {
 
     /// What the painted widgets draw and the tree cannot see.
     const PAINTED_ONLY: &[&str] = &[
-        "0.1", "1.0 GiB / 4.0 GiB", "1.0 GiB / 8.0 GiB", "11%", "12.0 GiB / 32.0 GiB", "127.5",
-        "18%", "25%", "32%", "37%", "39%", "4%", "46%", "512 GiB / 1.0 TiB", "69%", "76%",
-        "83%", "87.5", "90%", "97%", "C0", "C1", "C10", "C11", "C2", "C3", "C4", "C5", "C6",
-        "C7", "C8", "C9", "Load", "Swap", "Used", "VRAM",
+        "0.1",
+        "1.0 GiB / 4.0 GiB",
+        "1.0 GiB / 8.0 GiB",
+        "11%",
+        "12.0 GiB / 32.0 GiB",
+        "127.5",
+        "18%",
+        "25%",
+        "32%",
+        "37%",
+        "39%",
+        "4%",
+        "46%",
+        "512 GiB / 1.0 TiB",
+        "69%",
+        "76%",
+        "83%",
+        "87.5",
+        "90%",
+        "97%",
+        "C0",
+        "C1",
+        "C10",
+        "C11",
+        "C2",
+        "C3",
+        "C4",
+        "C5",
+        "C6",
+        "C7",
+        "C8",
+        "C9",
+        "Load",
+        "Swap",
+        "Used",
+        "VRAM",
     ];
     let want: Vec<String> = PAINTED_ONLY.iter().map(|s| s.to_string()).collect();
     assert_eq!(
@@ -493,7 +590,16 @@ fn a11y_painted_metrics_are_not_in_the_tree() {
 
     // Everything else that is painted is exposed: the words a sighted user
     // reads are the words the tree carries.
-    for expected in ["LIVE", "PID", "Name", "CPU%", "MEM%", "401 of 401", "v proc", "v workloads"] {
+    for expected in [
+        "LIVE",
+        "PID",
+        "Name",
+        "CPU%",
+        "MEM%",
+        "401 of 401",
+        "v proc",
+        "v workloads",
+    ] {
         assert!(
             tree.iter().any(|s| s.contains(expected)),
             "{expected:?} is painted but not exposed: {tree:?}"
@@ -514,7 +620,11 @@ fn a11y_keyboard_selects_a_row_and_reaches_kill() {
 
     // Arrow keys select in the visible (filtered, sorted) order.
     let f = w.frame(&mut app, SCREEN, vec![key(egui::Key::ArrowDown)]);
-    assert_eq!(app.selected, Some(4242), "ArrowDown must select the first row");
+    assert_eq!(
+        app.selected,
+        Some(4242),
+        "ArrowDown must select the first row"
+    );
     assert!(
         !f.texts.iter().any(|t| t == "v proc-detail"),
         "the detail pane is drawn before the table, so it appears on the next frame"
@@ -525,7 +635,10 @@ fn a11y_keyboard_selects_a_row_and_reaches_kill() {
     let (stop, _) = w
         .focus_matching(&mut app, SCREEN, 20, |n| n.name() == Some("Kill"))
         .expect("Kill must be reachable with Tab");
-    assert_eq!(stop, 13, "documented tab order changed: Kill used to be stop 14 (index 13)");
+    assert_eq!(
+        stop, 13,
+        "documented tab order changed: Kill used to be stop 14 (index 13)"
+    );
 
     // Space activates the focused button and opens the confirm dialog.
     let _ = w.frame(&mut app, SCREEN, vec![key(egui::Key::Space)]);
@@ -535,9 +648,14 @@ fn a11y_keyboard_selects_a_row_and_reaches_kill() {
         "Space on Kill must open the confirm"
     );
     let f = w.frame(&mut app, SCREEN, vec![]);
-    assert!(f.texts.iter().any(|t| t.contains("Kill process")), "confirm dialog did not render");
     assert!(
-        f.texts.iter().any(|t| t.contains("Send SIGTERM to \"hottest-proc\" (pid 4242)")),
+        f.texts.iter().any(|t| t.contains("Kill process")),
+        "confirm dialog did not render"
+    );
+    assert!(
+        f.texts
+            .iter()
+            .any(|t| t.contains("Send SIGTERM to \"hottest-proc\" (pid 4242)")),
         "confirm dialog must name the process and pid"
     );
 
@@ -549,9 +667,15 @@ fn a11y_keyboard_selects_a_row_and_reaches_kill() {
     let (stop, _) = w
         .focus_matching(&mut app, SCREEN, 200, |n| n.name() == Some("Send TERM"))
         .expect("Send TERM must be reachable with Tab");
-    assert_eq!(stop, 77, "the confirm dialog moved in the tab order: it used to be press 78");
+    assert_eq!(
+        stop, 77,
+        "the confirm dialog moved in the tab order: it used to be press 78"
+    );
     w.frame(&mut app, SCREEN, vec![key(egui::Key::Space)]);
-    assert!(app.kill_confirm.is_none(), "confirming must close the dialog");
+    assert!(
+        app.kill_confirm.is_none(),
+        "confirming must close the dialog"
+    );
     let note = app.kill_note.clone().unwrap_or_default();
     assert!(
         note.starts_with("kill sent: pid 4242") || note.starts_with("kill unavailable"),
@@ -594,10 +718,16 @@ fn a11y_tab_order_starts_in_the_status_bar_and_wraps() {
         stops.push(what);
     }
     let wrap_at = wrap_at.unwrap_or_else(|| {
-        panic!("Tab never wrapped inside 400 presses ({} stops): focus order may be trapped", stops.len())
+        panic!(
+            "Tab never wrapped inside 400 presses ({} stops): focus order may be trapped",
+            stops.len()
+        )
     });
     assert_eq!(stops[0], "Button Some(\"Settings\")", "first stop changed");
-    assert_eq!(stops[wrap_at], stops[0], "the wrap must return to the first stop");
+    assert_eq!(
+        stops[wrap_at], stops[0],
+        "the wrap must return to the first stop"
+    );
     eprintln!(
         "tab census: {unnamed_stops}/400 unnamed stops, {row_stops} of them table rows (wrap at press {wrap_at})"
     );
@@ -623,7 +753,11 @@ fn a11y_focus_visual_on_buttons_but_not_on_titles_or_rows() {
     let mut app = dashboard();
     let base = w.settle(&mut app, SCREEN);
 
-    let button = to_rect(base.by_name("Settings").and_then(|n| n.rect).expect("Settings button"));
+    let button = to_rect(
+        base.by_name("Settings")
+            .and_then(|n| n.rect)
+            .expect("Settings button"),
+    );
     let title = to_rect(
         base.nodes
             .iter()
@@ -654,11 +788,19 @@ fn a11y_focus_visual_on_buttons_but_not_on_titles_or_rows() {
     let mut app = dashboard();
     w.settle(&mut app, SCREEN);
     let (_, focused) = w
-        .focus_matching(&mut app, SCREEN, 6, |n| n.name().is_some_and(|s| s.starts_with("v cpu")))
+        .focus_matching(&mut app, SCREEN, 6, |n| {
+            n.name().is_some_and(|s| s.starts_with("v cpu"))
+        })
         .expect("panel title must be focusable");
     let after_title = paint_in(&focused.shapes, title);
-    assert_ne!(before_title, after_title, "a focused panel title must show something");
-    let whites: Vec<&String> = after_title.iter().filter(|p| p.contains("#FF_FF_FF")).collect();
+    assert_ne!(
+        before_title, after_title,
+        "a focused panel title must show something"
+    );
+    let whites: Vec<&String> = after_title
+        .iter()
+        .filter(|p| p.contains("#FF_FF_FF"))
+        .collect();
     assert_eq!(
         whites.len(),
         1,
@@ -686,7 +828,10 @@ fn a11y_focus_visual_on_buttons_but_not_on_titles_or_rows() {
         .focus_matching(&mut app, SCREEN, 20, |n| n.role == egui::Role::Unknown)
         .expect("the splitter must be focusable");
     let after = paint_in(&focused.shapes, handle);
-    assert_eq!(before, after, "pinned gap A-7: a focused splitter paints no focus indicator");
+    assert_eq!(
+        before, after,
+        "pinned gap A-7: a focused splitter paints no focus indicator"
+    );
 }
 
 /// Invariant (passes): LIVE and STALE are words as well as colours, and the
@@ -697,19 +842,28 @@ fn a11y_status_state_is_not_colour_only() {
     let mut w = Walk::new();
     let mut app = dashboard();
     let f = w.settle(&mut app, (960.0, 1000.0));
-    assert!(f.tree_text().iter().any(|t| t.contains("LIVE")), "LIVE must be exposed as text");
+    assert!(
+        f.tree_text().iter().any(|t| t.contains("LIVE")),
+        "LIVE must be exposed as text"
+    );
 
     let mut app = dashboard();
     fake_state(&app, client::now_ms() - 5_000);
     let mut w = Walk::new();
     let f = w.frame_age(&mut app, (960.0, 1000.0), vec![], Some(5_000));
     let tree = f.tree_text();
-    assert!(tree.iter().any(|t| t.contains("STALE")), "STALE must be exposed as text: {tree:?}");
+    assert!(
+        tree.iter().any(|t| t.contains("STALE")),
+        "STALE must be exposed as text: {tree:?}"
+    );
     assert!(
         tree.iter().any(|t| t.starts_with("age ")),
         "the stale frame must also state the sample age in words: {tree:?}"
     );
-    assert!(!tree.iter().any(|t| t.contains("LIVE")), "STALE and LIVE must not both show");
+    assert!(
+        !tree.iter().any(|t| t.contains("LIVE")),
+        "STALE and LIVE must not both show"
+    );
 }
 
 /// Invariant (passes) with one pinned fact: at 150% and 200% zoom no visible
@@ -729,7 +883,10 @@ fn a11y_zoom_paints_no_overlapping_text_and_keeps_panes_reachable() {
         let f = w.settle(&mut app, (960.0, 1000.0));
         census.push((zoom, f.text_census()));
         let overlaps = f.visible_text_overlaps();
-        assert!(overlaps.is_empty(), "zoom {zoom}: overlapping text {overlaps:?}");
+        assert!(
+            overlaps.is_empty(),
+            "zoom {zoom}: overlapping text {overlaps:?}"
+        );
         let visible: Vec<String> = f.visible_texts().into_iter().map(|(_, t)| t).collect();
         for expected in ["EbbTop", "Settings", "v cpu"] {
             assert!(
@@ -738,11 +895,15 @@ fn a11y_zoom_paints_no_overlapping_text_and_keeps_panes_reachable() {
             );
         }
         let proc_visible = visible.iter().any(|t| t.starts_with("v proc"));
-        assert!(proc_visible || app.group_scroll_max > 0.0, "zoom {zoom}: proc table unreachable");
+        assert!(
+            proc_visible || app.group_scroll_max > 0.0,
+            "zoom {zoom}: proc table unreachable"
+        );
     }
 
     // At 200% the mem/disk meters are clipped until the top pane is scrolled.
-    let visible = |f: &Frame| -> Vec<String> { f.visible_texts().into_iter().map(|(_, t)| t).collect() };
+    let visible =
+        |f: &Frame| -> Vec<String> { f.visible_texts().into_iter().map(|(_, t)| t).collect() };
     let mut w = Walk::at_zoom(2.0);
     let mut app = dashboard();
     let f = w.settle(&mut app, (960.0, 1000.0));
@@ -798,13 +959,17 @@ fn a11y_keyboard_cannot_reveal_the_values_clipped_at_200_percent() {
         egui::Key::ArrowUp,
         egui::Key::PageUp,
     ];
-    let visible = |f: &Frame| -> Vec<String> { f.visible_texts().into_iter().map(|(_, t)| t).collect() };
+    let visible =
+        |f: &Frame| -> Vec<String> { f.visible_texts().into_iter().map(|(_, t)| t).collect() };
 
     for target in ["v mem", "v disk", "log scale"] {
         let mut w = Walk::at_zoom(2.0);
         let mut app = dashboard();
         let f = w.settle(&mut app, SCREEN);
-        assert!(!visible(&f).iter().any(|t| t == "Used"), "setup: Used must start clipped at 200%");
+        assert!(
+            !visible(&f).iter().any(|t| t == "Used"),
+            "setup: Used must start clipped at 200%"
+        );
         let (stop, _) = w
             .focus_matching(&mut app, SCREEN, 16, |n| match n.name() {
                 Some(name) if target.starts_with("v ") => name.starts_with(target),
@@ -848,10 +1013,17 @@ fn a11y_keyboard_cannot_reveal_the_values_clipped_at_200_percent() {
     let before = app.cfg.top_frac;
     w.focus_matching(&mut app, SCREEN, 20, |n| n.role == egui::Role::Unknown)
         .expect("the splitter must be focusable");
-    for k in [egui::Key::ArrowDown, egui::Key::ArrowUp, egui::Key::PageDown] {
+    for k in [
+        egui::Key::ArrowDown,
+        egui::Key::ArrowUp,
+        egui::Key::PageDown,
+    ] {
         w.frame(&mut app, SCREEN, vec![key(k)]);
     }
-    assert_eq!(app.cfg.top_frac, before, "pinned gap A-8: the splitter gained keyboard operation — flip this");
+    assert_eq!(
+        app.cfg.top_frac, before,
+        "pinned gap A-8: the splitter gained keyboard operation — flip this"
+    );
     let f = w.frame(&mut app, SCREEN, vec![]);
     assert!(
         !visible(&f).iter().any(|t| t == "Used"),
@@ -886,17 +1058,30 @@ fn a11y_keyboard_zoom_works_and_persists() {
     ] {
         w.frame(&mut app, (960.0, 1000.0), vec![press(k)]);
         w.frame(&mut app, (960.0, 1000.0), vec![]);
-        assert_eq!(w.ctx.zoom_factor(), want, "shortcut {k:?} must set zoom {want}");
+        assert_eq!(
+            w.ctx.zoom_factor(),
+            want,
+            "shortcut {k:?} must set zoom {want}"
+        );
     }
 
     w.ctx.set_zoom_factor(1.7);
     w.frame(&mut app, (960.0, 1000.0), vec![]);
     let opts = w.ctx.memory(|m| m.options.clone());
-    assert_eq!(opts.zoom_factor, 1.7, "the zoom factor must live in egui Options");
+    assert_eq!(
+        opts.zoom_factor, 1.7,
+        "the zoom factor must live in egui Options"
+    );
     let json = serde_json::to_string(&opts).expect("Options must serialize");
     let back: egui::Options = serde_json::from_str(&json).expect("Options must deserialize");
-    assert_eq!(back.zoom_factor, 1.7, "zoom must survive a persistence round trip");
-    assert!(eframe::App::persist_egui_memory(&app), "eframe must persist egui memory");
+    assert_eq!(
+        back.zoom_factor, 1.7,
+        "zoom must survive a persistence round trip"
+    );
+    assert!(
+        eframe::App::persist_egui_memory(&app),
+        "eframe must persist egui memory"
+    );
 }
 
 /// Invariant (passes): the pairing wizard is operable from the keyboard alone —
@@ -919,7 +1104,10 @@ fn a11y_keyboard_operates_the_pairing_wizard() {
     w.focus_matching(&mut app, SCREEN, 4, |n| n.name() == Some("URL"))
         .expect("the URL field must follow the Name field");
     w.frame(&mut app, SCREEN, vec![text("127.0.0.1:1")]);
-    assert_eq!(app.onboard.as_ref().map(|o| o.url.as_str()), Some("127.0.0.1:1"));
+    assert_eq!(
+        app.onboard.as_ref().map(|o| o.url.as_str()),
+        Some("127.0.0.1:1")
+    );
 
     w.focus_matching(&mut app, SCREEN, 4, |n| n.name() == Some("Agent token"))
         .expect("the token field must follow the URL field");
@@ -928,7 +1116,10 @@ fn a11y_keyboard_operates_the_pairing_wizard() {
     for ev in [text("t0"), key(egui::Key::Slash), text("/"), text("ken")] {
         w.frame(&mut app, SCREEN, vec![ev]);
     }
-    assert_eq!(app.onboard.as_ref().map(|o| o.token.as_str()), Some("t0/ken"));
+    assert_eq!(
+        app.onboard.as_ref().map(|o| o.token.as_str()),
+        Some("t0/ken")
+    );
     let f = w.frame(&mut app, SCREEN, vec![]);
     assert_eq!(
         f.focus().and_then(|n| n.name()),
@@ -936,16 +1127,24 @@ fn a11y_keyboard_operates_the_pairing_wizard() {
         "typing `/` must not move focus out of the field"
     );
 
-    w.focus_matching(&mut app, SCREEN, 8, |n| n.name() == Some("Use a pairing code"))
-        .expect("Use a pairing code must be reachable with Tab");
+    w.focus_matching(&mut app, SCREEN, 8, |n| {
+        n.name() == Some("Use a pairing code")
+    })
+    .expect("Use a pairing code must be reachable with Tab");
     w.frame(&mut app, SCREEN, vec![key(egui::Key::Space)]);
-    assert!(app.onboard.as_ref().and_then(|o| o.pair.as_ref()).is_some(), "the code step must open");
+    assert!(
+        app.onboard.as_ref().and_then(|o| o.pair.as_ref()).is_some(),
+        "the code step must open"
+    );
     w.frame(&mut app, SCREEN, vec![]);
     w.focus_matching(&mut app, SCREEN, 30, |n| n.name() == Some("Pairing code"))
         .expect("the pairing-code field must be reachable with Tab");
     w.frame(&mut app, SCREEN, vec![text("123456")]);
     assert_eq!(
-        app.onboard.as_ref().and_then(|o| o.pair.as_ref()).map(|p| p.code.clone()),
+        app.onboard
+            .as_ref()
+            .and_then(|o| o.pair.as_ref())
+            .map(|p| p.code.clone()),
         Some("123456".to_string())
     );
 
@@ -955,12 +1154,17 @@ fn a11y_keyboard_operates_the_pairing_wizard() {
         .expect("Pair must be reachable with Tab");
     w.frame(&mut app, SCREEN, vec![key(egui::Key::Space)]);
     assert!(
-        app.onboard.as_ref().and_then(|o| o.pair.as_ref()).is_some_and(|p| p.busy),
+        app.onboard
+            .as_ref()
+            .and_then(|o| o.pair.as_ref())
+            .is_some_and(|p| p.busy),
         "Space on Pair must start the exchange"
     );
 
     let f = w.frame(&mut app, SCREEN, vec![]);
-    let save = f.by_name("Save and connect").expect("Save and connect must be in the tree");
+    let save = f
+        .by_name("Save and connect")
+        .expect("Save and connect must be in the tree");
     assert!(save.disabled, "Save must stay disabled until a green Test");
 }
 
@@ -979,9 +1183,8 @@ fn a11y_status_changes_are_not_announced() {
         "pinned gap A-9: a live region appeared — flip this assertion"
     );
     assert!(
-        f.nodes
-            .iter()
-            .any(|n| n.name() == Some(" LIVE ") && matches!(n.role, egui::Role::Label | egui::Role::TextRun)),
+        f.nodes.iter().any(|n| n.name() == Some(" LIVE ")
+            && matches!(n.role, egui::Role::Label | egui::Role::TextRun)),
         "the badge is static text today"
     );
 }

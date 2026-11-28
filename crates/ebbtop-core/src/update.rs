@@ -46,7 +46,10 @@ pub fn parse_release_assets(body: &str) -> Vec<ReleaseAsset> {
 
 /// Download URL for `asset` in a parsed list. `None` when absent.
 pub fn release_asset_url(assets: &[ReleaseAsset], asset: &str) -> Option<String> {
-    assets.iter().find(|a| a.name == asset).map(|a| a.url.clone())
+    assets
+        .iter()
+        .find(|a| a.name == asset)
+        .map(|a| a.url.clone())
 }
 
 /// One parsed `SHA256SUMS` line: `<hex>  <filename>`.

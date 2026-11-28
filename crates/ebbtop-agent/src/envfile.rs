@@ -101,9 +101,7 @@ pub fn parse(text: &str) -> Result<Vec<Assignment>, String> {
         // a terminal and often captured in a log.
         if key.is_empty()
             || !key.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-            || !key
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         {
             return Err(format!(
                 "unsupported line {lineno}: not a plain KEY=VALUE assignment (a key is letters, \
@@ -234,8 +232,14 @@ mod tests {
             assert!(!err.contains("abcdef"), "refusal leaked a value: {err}");
             assert!(!err.contains("1.2.3.4"), "refusal leaked a value: {err}");
             // Malformed key text must not come back either.
-            assert!(!err.contains("export SECRET"), "refusal echoed a malformed key: {err}");
-            assert!(!err.contains("export EBBTOP_TOKEN"), "refusal echoed a malformed key: {err}");
+            assert!(
+                !err.contains("export SECRET"),
+                "refusal echoed a malformed key: {err}"
+            );
+            assert!(
+                !err.contains("export EBBTOP_TOKEN"),
+                "refusal echoed a malformed key: {err}"
+            );
             // Nor a raw byte rendered as hex.
             assert!(!err.contains("0xc2"), "refusal echoed an input byte: {err}");
             assert!(!err.contains("0xa0"), "refusal echoed an input byte: {err}");
@@ -271,13 +275,19 @@ mod tests {
         assert_eq!(a, c);
         assert_eq!(a, d);
         // Only the line number varies, and it is an index, not content.
-        assert_eq!(a, "unsupported line 1: not a plain KEY=VALUE assignment (a key is letters, digits and '_', starting with a letter or '_')");
+        assert_eq!(
+            a,
+            "unsupported line 1: not a plain KEY=VALUE assignment (a key is letters, digits and '_', starting with a letter or '_')"
+        );
     }
 
     /// A line with only a key and no '=' is a mistake, not an empty value.
     #[test]
     fn empty_file_is_valid_and_empty_value_is_kept() {
         assert!(parse("").unwrap().is_empty());
-        assert_eq!(keys("EBBTOP_TOKEN=\n"), vec![("EBBTOP_TOKEN".into(), "".into())]);
+        assert_eq!(
+            keys("EBBTOP_TOKEN=\n"),
+            vec![("EBBTOP_TOKEN".into(), "".into())]
+        );
     }
 }

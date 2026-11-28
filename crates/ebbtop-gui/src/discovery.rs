@@ -22,10 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use egui::RichText;
 use ebbtop_core::pairing::{
-    self, DiscoveredAgent, PairError, PairRequest, DISCOVERY_PORT, DISCOVERY_REQUEST,
+    self, DISCOVERY_PORT, DISCOVERY_REQUEST, DiscoveredAgent, PairError, PairRequest,
 };
+use egui::RichText;
 
 use crate::l10n::{self, Key, Locale};
 use crate::widgets as w;
@@ -113,13 +113,18 @@ pub fn exchange_blocking(
     label: Option<String>,
     fallback_name: &str,
 ) -> Result<PairOutcome, PairError> {
-    let body = serde_json::to_string(&PairRequest { code: code.to_string(), label })
-        .map_err(|e| PairError::from_transport(&format!("cannot encode the pairing request: {e}")))?;
+    let body = serde_json::to_string(&PairRequest {
+        code: code.to_string(),
+        label,
+    })
+    .map_err(|e| PairError::from_transport(&format!("cannot encode the pairing request: {e}")))?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(5))
         .connect_timeout(Duration::from_secs(3))
         .build()
-        .map_err(|e| PairError::from_transport(&format!("cannot start the pairing request: {e}")))?;
+        .map_err(|e| {
+            PairError::from_transport(&format!("cannot start the pairing request: {e}"))
+        })?;
     let resp = client
         .post(pair_url)
         .header("content-type", "application/json")
@@ -164,12 +169,25 @@ fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 
 /// What a successful exchange hands back. `token` is a secret: it is written
 /// to the credential store and kept in memory, never rendered or logged.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct PairOutcome {
     pub token: String,
     pub host: String,
     pub agent_version: String,
     pub scope: String,
+}
+
+impl std::fmt::Debug for PairOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the token: a debug print can reach a log (same rule as
+        // `Pairing`'s Debug below).
+        f.debug_struct("PairOutcome")
+            .field("token", &"***")
+            .field("host", &self.host)
+            .field("agent_version", &self.agent_version)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// A finished or in-flight scan, plus the list it produced. One instance per
@@ -322,7 +340,9 @@ impl Discovery {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&a.name).strong().color(w::TEXT));
                             ui.label(
-                                RichText::new(format!("v{}", a.agent_version)).small().color(w::DIM),
+                                RichText::new(format!("v{}", a.agent_version))
+                                    .small()
+                                    .color(w::DIM),
                             );
                             ui.label(
                                 RichText::new(format!("{}:{}", a.host(), a.port))
@@ -364,6 +384,7 @@ pub enum PairAction {
 
 /// Code entry for one chosen host: a name for the source, the address it will
 /// pair with, the digits the user is typing, and the last classified failure.
+#[derive(Default)]
 pub struct Pairing {
     pub name: String,
     pub url: String,
@@ -391,7 +412,11 @@ impl std::fmt::Debug for Pairing {
 impl Pairing {
     /// Prompt for an agent the scan found.
     pub fn for_agent(a: &DiscoveredAgent) -> Self {
-        Self { name: a.name.clone(), url: a.url(), ..Self::default() }
+        Self {
+            name: a.name.clone(),
+            url: a.url(),
+            ..Self::default()
+        }
     }
 
     /// Prompt for a host the user typed themselves (the manual path still
@@ -399,9 +424,13 @@ impl Pairing {
     pub fn for_address(name: &str, url: &str) -> Self {
         // Show the address the exchange will actually use (bare host gains
         // ws://, :45976 and /ws), so the prompt cannot imply a different host.
-        let url = ebbtop_core::client::normalize_base_url(url)
-            .unwrap_or_else(|_| url.trim().to_string());
-        Self { name: name.trim().to_string(), url, ..Self::default() }
+        let url =
+            ebbtop_core::client::normalize_base_url(url).unwrap_or_else(|_| url.trim().to_string());
+        Self {
+            name: name.trim().to_string(),
+            url,
+            ..Self::default()
+        }
     }
 
     /// Drain the exchange thread. Returns the outcome once on success; a
@@ -426,7 +455,9 @@ impl Pairing {
             Err(TryRecvError::Disconnected) => {
                 self.rx = None;
                 self.busy = false;
-                self.error = Some(PairError::bad_reply("the pairing worker stopped without a reply"));
+                self.error = Some(PairError::bad_reply(
+                    "the pairing worker stopped without a reply",
+                ));
                 None
             }
             Err(TryRecvError::Empty) => None,
@@ -508,7 +539,10 @@ impl Pairing {
             )
             .accessible_name(l10n::text(locale, Key::LabelPairingCode));
             let pair = ui
-                .add_enabled(!self.busy, egui::Button::new(l10n::text(locale, Key::BtnPair)))
+                .add_enabled(
+                    !self.busy,
+                    egui::Button::new(l10n::text(locale, Key::BtnPair)),
+                )
                 .on_hover_text(l10n::text(locale, Key::HoverPairExchange));
             if pair.clicked() {
                 action = PairAction::Start;
@@ -539,21 +573,6 @@ impl Pairing {
             ui.add(egui::Label::new(RichText::new(text).color(w::WARN)).wrap());
         }
         action
-    }
-}
-
-impl Default for Pairing {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            url: String::new(),
-            code: String::new(),
-            busy: false,
-            error: None,
-            msg: None,
-            msg_key: None,
-            rx: None,
-        }
     }
 }
 
@@ -622,7 +641,11 @@ mod tests {
             if let Some(head_end) = text.find("\r\n\r\n") {
                 let len = text[..head_end]
                     .lines()
-                    .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().to_string()))
+                    .find_map(|l| {
+                        l.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|v| v.trim().to_string())
+                    })
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(0);
                 if raw.len() >= head_end + 4 + len {
@@ -650,7 +673,11 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let found = scan_blocking(&[target], Duration::from_millis(600), 8, &cancel)
             .expect("scan must not error on a quiet segment");
-        assert_eq!(found.len(), 1, "one responder must produce one row: {found:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "one responder must produce one row: {found:?}"
+        );
         let a = &found[0];
         assert_eq!(a.name, "k-server");
         assert_eq!(a.agent_version, "0.2.8");
@@ -674,8 +701,8 @@ mod tests {
         ] {
             let target = responder(reply);
             let cancel = AtomicBool::new(false);
-            let found = scan_blocking(&[target], Duration::from_millis(350), 8, &cancel)
-                .expect("scan");
+            let found =
+                scan_blocking(&[target], Duration::from_millis(350), 8, &cancel).expect("scan");
             assert!(found.is_empty(), "foreign reply listed: {found:?}");
         }
     }
@@ -688,12 +715,10 @@ mod tests {
         let a = responder(FIXTURE_REPLY);
         let b = responder(SECOND);
         let cancel = AtomicBool::new(false);
-        let both =
-            scan_blocking(&[a, b], Duration::from_millis(600), 8, &cancel).expect("scan");
+        let both = scan_blocking(&[a, b], Duration::from_millis(600), 8, &cancel).expect("scan");
         assert_eq!(both.len(), 2, "the fixtures must both answer: {both:?}");
         let cancel = AtomicBool::new(false);
-        let capped =
-            scan_blocking(&[a, b], Duration::from_millis(600), 1, &cancel).expect("scan");
+        let capped = scan_blocking(&[a, b], Duration::from_millis(600), 1, &cancel).expect("scan");
         assert_eq!(capped.len(), 1, "cap must bound the list: {capped:?}");
     }
 
@@ -703,7 +728,10 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let started = Instant::now();
         let found = scan_blocking(&[target], Duration::from_secs(2), 8, &cancel).expect("scan");
-        assert!(found.is_empty(), "a cancelled scan reports nothing: {found:?}");
+        assert!(
+            found.is_empty(),
+            "a cancelled scan reports nothing: {found:?}"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(400),
             "cancel must not wait out the window: {:?}",
@@ -720,7 +748,11 @@ mod tests {
         let started = Instant::now();
         let found = scan_blocking(&[addr], Duration::from_millis(300), 8, &cancel).expect("scan");
         assert!(found.is_empty());
-        assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -744,10 +776,22 @@ mod tests {
         // query string, and the body is the contract's shape.
         let req = seen.lock().unwrap().clone();
         let (head, body) = req.split_once("\r\n\r\n").expect("request head");
-        assert!(head.starts_with("POST /pair HTTP/1.1"), "wrong request: {head}");
-        assert!(!head.to_ascii_lowercase().contains("code="), "code in the URL: {head}");
-        assert!(body.contains(r#""code":"123456""#), "code missing from the body: {body}");
-        assert!(body.contains(r#""label":"wizard""#), "label missing: {body}");
+        assert!(
+            head.starts_with("POST /pair HTTP/1.1"),
+            "wrong request: {head}"
+        );
+        assert!(
+            !head.to_ascii_lowercase().contains("code="),
+            "code in the URL: {head}"
+        );
+        assert!(
+            body.contains(r#""code":"123456""#),
+            "code missing from the body: {body}"
+        );
+        assert!(
+            body.contains(r#""label":"wizard""#),
+            "label missing: {body}"
+        );
         let parsed: PairRequest = serde_json::from_str(body.trim()).expect("body is a PairRequest");
         assert_eq!(parsed.code, "123456");
     }
@@ -755,19 +799,60 @@ mod tests {
     #[test]
     fn exchange_classifies_each_refusal_class() {
         for (status, reason, body, want) in [
-            (404u16, "Not Found", "no pending pairing code", pairing::PairFailure::NoPendingCode),
-            (403, "Forbidden", "invalid pairing code", pairing::PairFailure::InvalidCode),
-            (403, "Forbidden", "pairing code expired", pairing::PairFailure::ExpiredCode),
-            (429, "Too Many Requests", "too many attempts; run ebbtop-agent --pair again", pairing::PairFailure::LockedOut),
-            (400, "Bad Request", "bad pair request", pairing::PairFailure::BadRequest),
-            (500, "Internal Server Error", "boom", pairing::PairFailure::Ambiguous),
+            (
+                404u16,
+                "Not Found",
+                "no pending pairing code",
+                pairing::PairFailure::NoPendingCode,
+            ),
+            (
+                403,
+                "Forbidden",
+                "invalid pairing code",
+                pairing::PairFailure::InvalidCode,
+            ),
+            (
+                403,
+                "Forbidden",
+                "pairing code expired",
+                pairing::PairFailure::ExpiredCode,
+            ),
+            (
+                429,
+                "Too Many Requests",
+                "too many attempts; run ebbtop-agent --pair again",
+                pairing::PairFailure::LockedOut,
+            ),
+            (
+                400,
+                "Bad Request",
+                "bad pair request",
+                pairing::PairFailure::BadRequest,
+            ),
+            (
+                500,
+                "Internal Server Error",
+                "boom",
+                pairing::PairFailure::Ambiguous,
+            ),
         ] {
             let (addr, _seen) = http_fixture(status, reason, body);
             let url = format!("http://{addr}/pair");
             let e = exchange_blocking(&url, "123456", None, "n").expect_err("refusal expected");
-            assert_eq!(e.kind, want, "status {status} body {body:?} classified wrong: {e:?}");
-            assert!(!e.detail.contains("123456"), "code echoed in the detail: {}", e.detail);
-            assert!(!e.log_line().contains("123456"), "code in the log line: {}", e.log_line());
+            assert_eq!(
+                e.kind, want,
+                "status {status} body {body:?} classified wrong: {e:?}"
+            );
+            assert!(
+                !e.detail.contains("123456"),
+                "code echoed in the detail: {}",
+                e.detail
+            );
+            assert!(
+                !e.log_line().contains("123456"),
+                "code in the log line: {}",
+                e.log_line()
+            );
             // Every class renders an actionable pair of lines.
             assert!(e.headline().len() > 5, "no headline: {e:?}");
             assert!(e.next_action().len() > 40, "no next action: {e:?}");
@@ -795,7 +880,11 @@ mod tests {
         p.code = "12345".into();
         p.start();
         assert!(!p.busy, "a short code must not start an exchange");
-        assert!(p.msg.as_deref().unwrap_or("").contains("6 digits"), "{:?}", p.msg);
+        assert!(
+            p.msg.as_deref().unwrap_or("").contains("6 digits"),
+            "{:?}",
+            p.msg
+        );
         assert!(p.error.is_none());
         // A bad address is refused the same way, before any socket.
         let mut p = Pairing::for_address("h", "http://h/ws");
@@ -804,8 +893,16 @@ mod tests {
         assert!(!p.busy);
         // The sentence around the detail is composed at draw time in the active
         // locale (`msg_key`); the stored detail stays the canonical core text.
-        assert_eq!(p.msg_key, Some(Key::PairAddrBad), "the refusal must name the address");
-        assert!(p.msg.as_deref().unwrap_or("").contains("bad URL"), "{:?}", p.msg);
+        assert_eq!(
+            p.msg_key,
+            Some(Key::PairAddrBad),
+            "the refusal must name the address"
+        );
+        assert!(
+            p.msg.as_deref().unwrap_or("").contains("bad URL"),
+            "{:?}",
+            p.msg
+        );
     }
 
     #[test]

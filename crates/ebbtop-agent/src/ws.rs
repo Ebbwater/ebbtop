@@ -47,6 +47,10 @@ pub async fn ws_handler(
             let _ = socket.close().await;
         });
     };
+    // Inbound protocol messages are a handful of bytes (the longest is a
+    // `get_process_metrics:<pid>` text frame); cap far above that so an
+    // authenticated peer cannot park 64 MiB buffers per message.
+    let ws = ws.max_message_size(16 * 1024).max_frame_size(16 * 1024);
     ws.on_upgrade(move |socket| handle_socket(socket, state, scope))
 }
 
@@ -165,6 +169,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, scope: AuthScope)
                 // dropped. We `take` it out of pb to leave that field empty,
                 // and the next request will `.clear()` before refilling.
                 cache.processes_vec = std::mem::take(&mut pb.rows);
+                // The encoded buffer is self-contained: release the cache
+                // BEFORE the sends. Holding the process-wide guard across
+                // `socket.send` let one stalled client (unwritten TCP buffer)
+                // block every other connection's get_processes indefinitely.
+                drop(cache);
 
                 if encode_result.is_err() {
                     let _ = socket.send(Message::Close(None)).await;
@@ -183,7 +192,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, scope: AuthScope)
                         }
                     }
                 }
-                drop(cache); // Explicit drop to release mutex early
             }
             Message::Text(ref text) if text.starts_with("get_process_metrics:") => {
                 if let Some(pid_str) = text.strip_prefix("get_process_metrics:")
@@ -218,17 +226,20 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, scope: AuthScope)
             // ebbtop: Phase 2 kill. Exact grammar `kill:<pid>:<start_time_ms>:<TERM|INT>`;
             // near-misses are refused (with a journal line), not silently ignored.
             // ebbtop P3a: a token issued by `/pair` is read-only and never
-            // reaches the kill path.
+            // reaches the kill path — but the attempt is still journalled, so
+            // the operator's audit covers every kill-shaped frame.
             Message::Text(ref text) if text == "kill" || text.starts_with("kill:") => {
                 let out = if scope.allows_kill() {
                     crate::kill::handle_kill_request(text)
                 } else {
-                    crate::types::KillOutcome {
+                    let out = crate::types::KillOutcome {
                         ok: false,
                         pid: 0,
                         signal: String::new(),
                         error: Some(crate::kill::ERR_READ_ONLY_SCOPE.to_string()),
-                    }
+                    };
+                    crate::kill::journal_line(&crate::kill::journal_read_only_refusal(text));
+                    out
                 };
                 let _ = send_json(&mut socket, &out).await;
             }

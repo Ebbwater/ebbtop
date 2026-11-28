@@ -13,6 +13,16 @@ ExecStart=%h/services/ebbtop-agent/bin/ebbtop-agent --port 45976
 Restart=always
 RestartSec=5
 NoNewPrivileges=yes
+# Hardening for a user service that reads /proc and writes only its own
+# state directory. These cost the agent nothing: it makes no new
+# privileged/suid calls, needs no realtime scheduling, and runs unprivileged
+# already (so an empty capability bounding set changes nothing).
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+CapabilityBoundingSet=
+ProtectClock=yes
+ProtectHostname=yes
 
 [Install]
 WantedBy=default.target

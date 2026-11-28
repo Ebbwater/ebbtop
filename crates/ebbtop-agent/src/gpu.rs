@@ -75,7 +75,8 @@ mod worker {
         // Tried after the normal soname, so it is inert once the system
         // library works again.
         let mut libs = vec!["libnvidia-ml.so.1".to_string()];
-        if let Ok(p) = std::env::var("EBBTOP_AGENT_NVML_LIB").or_else(|_| std::env::var("SOCKTOP_AGENT_NVML_LIB"))
+        if let Ok(p) = std::env::var("EBBTOP_AGENT_NVML_LIB")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_NVML_LIB"))
             && !p.is_empty()
         {
             libs.push(p);

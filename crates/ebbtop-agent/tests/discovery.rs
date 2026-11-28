@@ -43,7 +43,12 @@ async fn client() -> UdpSocket {
 }
 
 /// Send one datagram and read at most one reply inside `wait`.
-async fn probe(c: &UdpSocket, server: SocketAddr, payload: &[u8], wait: Duration) -> Option<Vec<u8>> {
+async fn probe(
+    c: &UdpSocket,
+    server: SocketAddr,
+    payload: &[u8],
+    wait: Duration,
+) -> Option<Vec<u8>> {
     c.send_to(payload, server).await.unwrap();
     let mut buf = [0u8; 1024];
     match timeout(wait, c.recv_from(&mut buf)).await {
@@ -64,7 +69,10 @@ async fn responds_with_name_version_nonce_and_port() {
         !text.contains(TOKEN_SENTINEL),
         "discovery reply leaked the agent token: {text}"
     );
-    assert!(!text.contains("token"), "reply contains a token field: {text}");
+    assert!(
+        !text.contains("token"),
+        "reply contains a token field: {text}"
+    );
 
     let r: DiscoveryResponse = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(r.ebbtop_discovery, discovery::DISCOVERY_PROTOCOL);
@@ -116,7 +124,10 @@ async fn rate_limits_one_reply_per_source_then_recovers() {
             replies += 1;
         }
     }
-    assert_eq!(replies, 1, "rate limit must allow exactly one reply per window");
+    assert_eq!(
+        replies, 1,
+        "rate limit must allow exactly one reply per window"
+    );
 
     // After the window, the same source is served again.
     tokio::time::sleep(SOURCE_MIN_GAP + Duration::from_millis(120)).await;
@@ -157,7 +168,10 @@ async fn disabled_feature_binds_no_socket_and_never_answers() {
         port: 0,
     };
     let spawned = discovery::spawn(cfg, state, 45976).await.unwrap();
-    assert!(spawned.is_none(), "disabled discovery must not spawn a task");
+    assert!(
+        spawned.is_none(),
+        "disabled discovery must not spawn a task"
+    );
 
     // Prove no socket was left listening: a free ephemeral port can be bound
     // by someone else, and a probe to a closed port times out.
@@ -183,7 +197,10 @@ async fn a_second_instance_on_the_same_port_reports_the_bind_error() {
         port,
     };
     let err = discovery::spawn(cfg, state, 45976).await;
-    assert!(err.is_err(), "a taken discovery port must surface, not panic");
+    assert!(
+        err.is_err(),
+        "a taken discovery port must surface, not panic"
+    );
 }
 
 /// The reason the responder binds `0.0.0.0` instead of `EBBTOP_BIND`: a

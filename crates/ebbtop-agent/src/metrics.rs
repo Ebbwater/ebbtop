@@ -108,7 +108,8 @@ fn user_id_or_zero(p: &sysinfo::Process) -> u32 {
 fn gpu_enabled() -> bool {
     static ON: OnceCell<bool> = OnceCell::new();
     *ON.get_or_init(|| {
-        std::env::var("EBBTOP_AGENT_GPU").or_else(|_| std::env::var("SOCKTOP_AGENT_GPU"))
+        std::env::var("EBBTOP_AGENT_GPU")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_GPU"))
             .map(|v| v != "0")
             .unwrap_or(true)
     })
@@ -116,7 +117,8 @@ fn gpu_enabled() -> bool {
 fn temp_enabled() -> bool {
     static ON: OnceCell<bool> = OnceCell::new();
     *ON.get_or_init(|| {
-        std::env::var("EBBTOP_AGENT_TEMP").or_else(|_| std::env::var("SOCKTOP_AGENT_TEMP"))
+        std::env::var("EBBTOP_AGENT_TEMP")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_TEMP"))
             .map(|v| v != "0")
             .unwrap_or(true)
     })
@@ -169,7 +171,8 @@ fn now_epoch_ms() -> u64 {
 fn metrics_ttl_ms() -> u64 {
     static V: OnceCell<u64> = OnceCell::new();
     *V.get_or_init(|| {
-        std::env::var("EBBTOP_AGENT_METRICS_TTL_MS").or_else(|_| std::env::var("SOCKTOP_AGENT_METRICS_TTL_MS"))
+        std::env::var("EBBTOP_AGENT_METRICS_TTL_MS")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_METRICS_TTL_MS"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(250)
@@ -178,7 +181,8 @@ fn metrics_ttl_ms() -> u64 {
 fn disks_ttl_ms() -> u64 {
     static V: OnceCell<u64> = OnceCell::new();
     *V.get_or_init(|| {
-        std::env::var("EBBTOP_AGENT_DISKS_TTL_MS").or_else(|_| std::env::var("SOCKTOP_AGENT_DISKS_TTL_MS"))
+        std::env::var("EBBTOP_AGENT_DISKS_TTL_MS")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_DISKS_TTL_MS"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_000)
@@ -188,7 +192,8 @@ fn disks_ttl_ms() -> u64 {
 fn processes_ttl_ms() -> u64 {
     static V: OnceCell<u64> = OnceCell::new();
     *V.get_or_init(|| {
-        std::env::var("EBBTOP_AGENT_PROCESSES_TTL_MS").or_else(|_| std::env::var("SOCKTOP_AGENT_PROCESSES_TTL_MS"))
+        std::env::var("EBBTOP_AGENT_PROCESSES_TTL_MS")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_PROCESSES_TTL_MS"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1_500)
@@ -198,7 +203,8 @@ fn processes_ttl_ms() -> u64 {
 fn name_cache_cleanup_threshold() -> usize {
     static V: OnceCell<usize> = OnceCell::new();
     *V.get_or_init(|| {
-        std::env::var("EBBTOP_AGENT_NAME_CACHE_CLEANUP_THRESHOLD").or_else(|_| std::env::var("SOCKTOP_AGENT_NAME_CACHE_CLEANUP_THRESHOLD"))
+        std::env::var("EBBTOP_AGENT_NAME_CACHE_CLEANUP_THRESHOLD")
+            .or_else(|_| std::env::var("SOCKTOP_AGENT_NAME_CACHE_CLEANUP_THRESHOLD"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1000)
@@ -242,7 +248,8 @@ static HOSTNAME: OnceCell<String> = OnceCell::new();
 /// agent did not report a model" from a real one.
 pub fn parse_cpuinfo_model_name(s: &str) -> Option<String> {
     let line = s.lines().find(|l| {
-        l.split_once(':').is_some_and(|(k, _)| k.trim() == "model name")
+        l.split_once(':')
+            .is_some_and(|(k, _)| k.trim() == "model name")
     })?;
     let value = line.split_once(':')?.1.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -341,32 +348,31 @@ pub async fn collect_fast_metrics(state: &AppState) -> Metrics {
     // the documented null is produced by this code path rather than by hoping
     // sysinfo finds no matching sensor (its IOHID scan does match Apple Silicon
     // "PMU tdie*" die sensors).
-    let cpu_temp_c = if !crate::platform::cpu_temp_reported(cfg!(target_os = "macos")) {
-        None
-    } else if !temp_enabled() {
-        None
-    } else if let Some(cached) = TEMP.get_fresh(TTL) {
-        cached
-    } else {
-        let val = {
-            let mut components = state.components.lock().await;
-            refresh_components_if_stale(&mut components);
-            components.iter().find_map(|c| {
-                let l = c.label().to_ascii_lowercase();
-                if l.contains("cpu")
-                    || l.contains("package")
-                    || l.contains("tctl")
-                    || l.contains("tdie")
-                {
-                    c.temperature()
-                } else {
-                    None
-                }
-            })
+    let cpu_temp_c =
+        if !crate::platform::cpu_temp_reported(cfg!(target_os = "macos")) || !temp_enabled() {
+            None
+        } else if let Some(cached) = TEMP.get_fresh(TTL) {
+            cached
+        } else {
+            let val = {
+                let mut components = state.components.lock().await;
+                refresh_components_if_stale(&mut components);
+                components.iter().find_map(|c| {
+                    let l = c.label().to_ascii_lowercase();
+                    if l.contains("cpu")
+                        || l.contains("package")
+                        || l.contains("tctl")
+                        || l.contains("tdie")
+                    {
+                        c.temperature()
+                    } else {
+                        None
+                    }
+                })
+            };
+            TEMP.set(val);
+            val
         };
-        TEMP.set(val);
-        val
-    };
 
     // Networks with reusable name cache
     let networks = {
@@ -1865,7 +1871,10 @@ model name\t: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz\n";
         );
         // Arms: no cpuinfo at all, no model name line, empty value.
         assert_eq!(parse_cpuinfo_model_name(""), None);
-        assert_eq!(parse_cpuinfo_model_name("processor\t: 0\ncpu MHz\t\t: 1200.0\n"), None);
+        assert_eq!(
+            parse_cpuinfo_model_name("processor\t: 0\ncpu MHz\t\t: 1200.0\n"),
+            None
+        );
         assert_eq!(parse_cpuinfo_model_name("model name\t:   \n"), None);
         // Trailing/leading whitespace is trimmed, not carried into the wire.
         assert_eq!(

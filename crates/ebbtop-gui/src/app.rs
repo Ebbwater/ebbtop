@@ -2,18 +2,18 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use egui::{Color32, RichText, Ui};
-use egui_extras::{Column, TableBuilder};
 use ebbtop_core::client::{self, ClientConfig};
 use ebbtop_core::history::{Conn, NetRate, Ring, State};
 #[cfg(not(feature = "store"))]
 use ebbtop_core::update as core_update;
 use ebbtop_core::view::{self, SortKey};
 use ebbtop_core::wire::{KillJob, KillSignal};
+use egui::{Color32, RichText, Ui};
+use egui_extras::{Column, TableBuilder};
 use tokio::sync::mpsc;
 
 use crate::discovery::{self, PairAction, PairOutcome, Pairing};
@@ -47,7 +47,9 @@ fn pick_disk<'a>(io: &'a HashMap<String, Ring<NetRate>>, pinned: Option<&str>) -
             let sb = b.1.last().map(|r| r.rx_bps + r.tx_bps).unwrap_or(0.0);
             // max_by keeps the last maximum on ties; reversing the name
             // comparison makes the smallest name win, like the old sort.
-            sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal).then(b.0.cmp(a.0))
+            sa.partial_cmp(&sb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.0.cmp(a.0))
         })
         .map(|(k, _)| k.as_str())
 }
@@ -94,7 +96,7 @@ enum SettingsTab {
 
 /// First-run wizard state. Present while the user has no sources and has
 /// not skipped; the Sources tab is the re-run path afterwards.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Onboard {
     name: String,
     url: String,
@@ -123,6 +125,27 @@ struct Onboard {
     issued_name: Option<String>,
 }
 
+impl std::fmt::Debug for Onboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never the typed token or the pairing-issued one: a debug print can
+        // reach a log (same rule as `Pairing`/`PairOutcome` in discovery.rs).
+        f.debug_struct("Onboard")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field("token", &(!self.token.is_empty()).then_some("***"))
+            .field("msg", &self.msg)
+            .field("testing", &self.testing)
+            .field("tested", &self.tested.as_ref().map(|(n, _, _)| n))
+            .field("probe_for", &self.probe_for.as_ref().map(|(n, _, _)| n))
+            .field("failure", &self.failure)
+            .field("discovery", &self.discovery)
+            .field("pair", &self.pair)
+            .field("issued", &self.issued.as_ref().map(|_| "***"))
+            .field("issued_name", &self.issued_name)
+            .finish()
+    }
+}
+
 impl Onboard {
     /// The credential Test/Save will use: what the user typed if they typed
     /// anything, else the token a pairing exchange issued. Keeping the paired
@@ -130,7 +153,11 @@ impl Onboard {
     /// still overrides it (the field is the user's latest instruction).
     fn effective_token(&self) -> String {
         let typed = client::clean_token(&self.token);
-        if typed.is_empty() { self.issued.clone().unwrap_or_default() } else { typed }
+        if typed.is_empty() {
+            self.issued.clone().unwrap_or_default()
+        } else {
+            typed
+        }
     }
 }
 
@@ -223,6 +250,10 @@ pub struct App {
     /// gets the bundled CJK faces. A locale switch reinstalls on the next
     /// frame; widget ids are positional, so nothing else has to move.
     fonts_locale: Option<Locale>,
+    /// The top splitter changed `top_frac` since the last config write. The
+    /// drag updates the fraction every frame (in memory) but the config write
+    /// happens once, on release — not a JSON serialize + rename per frame.
+    splitter_dirty: bool,
 }
 
 fn local_time(ms: u64) -> String {
@@ -254,10 +285,16 @@ fn local_datetime(s: u64) -> String {
 /// holds the mutable borrow of its own state.
 fn draw_failure(ui: &mut Ui, locale: Locale, d: &client::Diagnosis) {
     ui.add_space(4.0);
-    ui.label(RichText::new(l10n::failure_headline(locale, d)).strong().color(w::BAD));
+    ui.label(
+        RichText::new(l10n::failure_headline(locale, d))
+            .strong()
+            .color(w::BAD),
+    );
     ui.add(
         egui::Label::new(
-            RichText::new(l10n::failure_next_action(locale, d)).small().color(w::TEXT),
+            RichText::new(l10n::failure_next_action(locale, d))
+                .small()
+                .color(w::TEXT),
         )
         .wrap(),
     );
@@ -276,10 +313,7 @@ fn workload_close(ui: &mut Ui, locale: Locale) -> bool {
     // `Role` (egui 0.37's renamed `WidgetType`) keeps this warning-free.
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     let hovered = resp.hovered() || resp.has_focus();
-    let stroke = egui::Stroke::new(
-        1.6,
-        if hovered { w::TEXT } else { w::ACCENT },
-    );
+    let stroke = egui::Stroke::new(1.6, if hovered { w::TEXT } else { w::ACCENT });
     let cross = rect.shrink(3.5);
     let p = ui.painter_at(rect);
     p.line_segment([cross.left_top(), cross.right_bottom()], stroke);
@@ -356,7 +390,12 @@ impl App {
     }
 
     /// Construct without a runtime or client (tests).
-    pub fn with(cfg: Config, token: Option<String>, token_src: TokenSource, rt: Option<tokio::runtime::Runtime>) -> Self {
+    pub fn with(
+        cfg: Config,
+        token: Option<String>,
+        token_src: TokenSource,
+        rt: Option<tokio::runtime::Runtime>,
+    ) -> Self {
         let first_run = cfg.sources.is_empty();
         // Seed before the move below: restores the 24 h cadence and any
         // skipped release across restarts. Store builds have no updater.
@@ -367,7 +406,10 @@ impl App {
             client::now_ms(),
         );
         Self {
-            url_edit: cfg.active_source().map(|s| s.url.clone()).unwrap_or_default(),
+            url_edit: cfg
+                .active_source()
+                .map(|s| s.url.clone())
+                .unwrap_or_default(),
             cfg,
             shared: Arc::new(Mutex::new(State::default())),
             rt,
@@ -392,7 +434,11 @@ impl App {
             source_failure: None,
             test_rx: None,
             testing: false,
-            onboard: if first_run { Some(Onboard::default()) } else { None },
+            onboard: if first_run {
+                Some(Onboard::default())
+            } else {
+                None
+            },
             kill_confirm: None,
             kill_tx: None,
             kill_note: None,
@@ -409,6 +455,7 @@ impl App {
             pair_msg: None,
             font_notice_open: false,
             fonts_locale: None,
+            splitter_dirty: false,
         }
     }
 
@@ -462,7 +509,9 @@ impl App {
         let Some(rt) = &self.rt else { return };
         // No sources yet (fresh install): leave the status at CONNECTING
         // until onboarding adds the first source.
-        let Some(url) = self.cfg.active_source().map(|s| s.url.clone()) else { return };
+        let Some(url) = self.cfg.active_source().map(|s| s.url.clone()) else {
+            return;
+        };
         let mut cc = ClientConfig::new(url, self.token.clone());
         // Same atomic the GUI mirrors `selected` into; a reconnect reuses it.
         cc.detail_pid = self.detail_pid.clone();
@@ -479,7 +528,10 @@ impl App {
                 t.tick().await;
                 loop {
                     t.tick().await;
-                    let line = log_shared.lock().map(|s| s.summary_line(client::now_ms())).unwrap_or_default();
+                    let line = log_shared
+                        .lock()
+                        .map(|s| s.summary_line(client::now_ms()))
+                        .unwrap_or_default();
                     store::append_log(&line);
                 }
             });
@@ -493,10 +545,16 @@ impl App {
             store::append_log(&format!("start url={}", cc.url));
             client::run_with_kill(cc, Some(kill_rx), move |ev| {
                 if let client::Event::Disconnected { reason, retry_in } = &ev {
-                    store::append_log(&format!("disconnected reason={reason} retry_ms={}", retry_in.as_millis()));
+                    store::append_log(&format!(
+                        "disconnected reason={reason} retry_ms={}",
+                        retry_in.as_millis()
+                    ));
                 }
                 if let client::Event::KillResult { r, .. } = &ev {
-                    store::append_log(&format!("kill pid={} signal={} ok={}", r.pid, r.signal, r.ok));
+                    store::append_log(&format!(
+                        "kill pid={} signal={} ok={}",
+                        r.pid, r.signal, r.ok
+                    ));
                 }
                 if let Ok(mut s) = shared.lock() {
                     s.apply(ev, client::now_ms());
@@ -524,22 +582,33 @@ impl App {
         #[cfg(not(feature = "store"))]
         {
             if self.update.poll() {
+                // Persist the check time only when a *check* finished (the
+                // three arms below). poll() also fires for download-progress
+                // transitions, and rewriting config.json at frame rate for
+                // the length of a download was needless IO churn.
+                let mut check_finished = false;
                 match self.update.status() {
-                    UpdateStatus::Available { version, .. } => store::append_log(&format!(
-                        "update available {version} (current {})",
-                        version::current_version()
-                    )),
+                    UpdateStatus::Available { version, .. } => {
+                        store::append_log(&format!(
+                            "update available {version} (current {})",
+                            version::current_version()
+                        ));
+                        check_finished = true;
+                    }
                     UpdateStatus::UpToDate { version } => {
                         store::append_log(&format!("update check up to date {version}"));
+                        check_finished = true;
                     }
                     UpdateStatus::Failed(e) => {
-                        store::append_log(&format!("update check failed: {e}"))
+                        store::append_log(&format!("update check failed: {e}"));
+                        check_finished = true;
                     }
                     _ => {}
                 }
-                // Persist the check time so the 24 h cadence survives restarts.
-                self.cfg.update_last_check_ms = client::now_ms();
-                let _ = store::save_config(&self.cfg);
+                if check_finished {
+                    self.cfg.update_last_check_ms = client::now_ms();
+                    let _ = store::save_config(&self.cfg);
+                }
             }
             if self.update_auto && self.update.due() {
                 self.update.start(update::fetch_latest_release);
@@ -561,7 +630,11 @@ impl App {
         // the bar's height (36 px; the old strip plus its line was 33 px).
         let bar = egui::Panel::top("status")
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(w::BAR).inner_margin(egui::Margin::symmetric(10, 8)))
+            .frame(
+                egui::Frame::new()
+                    .fill(w::BAR)
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
             .show(ui, |ui| self.status_bar(ui, &st, now));
         // One flat pixel of the palette's blue along the bar's whole bottom
         // edge. Painted on the bar's last row, so it costs the layout nothing
@@ -582,8 +655,11 @@ impl App {
                 let slots = self.cfg.window_s as usize;
                 let wide = ui.available_width() >= 1100.0;
                 let total_h = ui.available_height();
-                let any_top =
-                    self.cfg.show_cpu || self.cfg.show_gpu || self.cfg.show_mem || self.cfg.show_net || self.cfg.show_disk;
+                let any_top = self.cfg.show_cpu
+                    || self.cfg.show_gpu
+                    || self.cfg.show_mem
+                    || self.cfg.show_net
+                    || self.cfg.show_disk;
                 if any_top {
                     let frac = self.cfg.top_frac.clamp(0.25, 0.75);
                     // Dynamic handoff: if the process table is collapsed,
@@ -603,8 +679,10 @@ impl App {
                         .show(ui, |ui| self.top_boxes(ui, &st, slots, wide));
                     // Drag handle (phase 2): adjust the saved ratio.
                     // One 8px allocate + paint per frame — no per-frame alloc.
-                    let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), egui::Sense::drag());
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), 8.0),
+                        egui::Sense::drag(),
+                    );
                     let hover_like = resp.hovered() || resp.dragged();
                     let line_col = if hover_like { w::ACCENT } else { w::LINE };
                     let cy = rect.center().y;
@@ -620,9 +698,17 @@ impl App {
                         let d = resp.drag_delta().y;
                         if d.abs() > 0.0 && total_h > 0.0 {
                             let nf = (self.cfg.top_frac + d / total_h).clamp(0.25, 0.75);
-                            self.cfg.top_frac = nf;
-                            let _ = store::save_config(&self.cfg);
+                            if nf != self.cfg.top_frac {
+                                self.cfg.top_frac = nf;
+                                self.splitter_dirty = true;
+                            }
                         }
+                    }
+                    // One config write per drag, on release with the final
+                    // fraction — not one serialize + rename per drag frame.
+                    if resp.drag_stopped() && self.splitter_dirty {
+                        self.splitter_dirty = false;
+                        let _ = store::save_config(&self.cfg);
                     }
                 }
                 // Detail pane sits between the top boxes and the process
@@ -696,7 +782,9 @@ impl App {
     /// is chosen here (TERM default path, INT alternative). Sends exactly
     /// one job on the client's kill channel.
     fn kill_dialog(&mut self, ctx: &egui::Context) {
-        let Some(kc) = self.kill_confirm.clone() else { return };
+        let Some(kc) = self.kill_confirm.clone() else {
+            return;
+        };
         let loc = self.loc();
         let mut open = true;
         let mut sig: Option<KillSignal> = None;
@@ -719,12 +807,14 @@ impl App {
                 // minimum window size, so no Chinese run is clipped out of view.
                 ui.set_max_width(420.0);
                 // The process name and pid are raw data: painted verbatim.
-                ui.add(egui::Label::new(RichText::new(l10n::fmt(
-                    loc,
-                    Key::KillConfirmBody,
-                    &[&kc.name, &kc.pid.to_string(), &host],
-                )))
-                .wrap());
+                ui.add(
+                    egui::Label::new(RichText::new(l10n::fmt(
+                        loc,
+                        Key::KillConfirmBody,
+                        &[&kc.name, &kc.pid.to_string(), &host],
+                    )))
+                    .wrap(),
+                );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui.button(l10n::text(loc, Key::BtnSendTerm)).clicked() {
@@ -752,7 +842,11 @@ impl App {
             st.clear_kill();
         }
         if let Some(tx) = &self.kill_tx {
-            let _ = tx.send(KillJob { pid: kc.pid, start_time_ms: kc.start_time_ms, signal });
+            let _ = tx.send(KillJob {
+                pid: kc.pid,
+                start_time_ms: kc.start_time_ms,
+                signal,
+            });
             // The pid and the signal name are data: never translated.
             self.kill_note = Some(l10n::fmt(
                 loc,
@@ -877,7 +971,9 @@ impl App {
             ui.add_space(1.0);
             let age = st.since_new_sample_ms(now);
             let (label, color) = match (&st.conn, age) {
-                (Conn::Connected, Some(a)) if a < STALE_MS => (l10n::text(loc, Key::ConnLive), w::OK),
+                (Conn::Connected, Some(a)) if a < STALE_MS => {
+                    (l10n::text(loc, Key::ConnLive), w::OK)
+                }
                 (Conn::Connected, Some(_)) => (l10n::text(loc, Key::ConnStale), w::WARN),
                 (Conn::Connected, None) | (Conn::Connecting { .. }, _) => {
                     (l10n::text(loc, Key::ConnConnecting), w::WARN)
@@ -889,12 +985,19 @@ impl App {
             let dot = (egui::vec2(8.0, 8.0), egui::Sense::hover());
             let (rect, _) = ui.allocate_exact_size(dot.0, dot.1);
             ui.painter_at(rect).circle_filled(rect.center(), 3.5, color);
-            ui.label(RichText::new(format!(" {label} ")).monospace().strong().color(color));
+            ui.label(
+                RichText::new(format!(" {label} "))
+                    .monospace()
+                    .strong()
+                    .color(color),
+            );
             // Metrics hostname when live, else the configured source name,
             // else the empty state. Never a hardcoded host.
-            let host = st.metrics.as_ref().map(|m| m.hostname.clone()).or_else(|| {
-                self.cfg.active_source().map(|s| s.name.clone())
-            });
+            let host = st
+                .metrics
+                .as_ref()
+                .map(|m| m.hostname.clone())
+                .or_else(|| self.cfg.active_source().map(|s| s.name.clone()));
             let host = host
                 .map(|h| h.to_string())
                 .unwrap_or_else(|| l10n::text(loc, Key::NoSource).to_string());
@@ -916,14 +1019,19 @@ impl App {
                         Key::DiagSampleTick,
                         &[&local_time(m.sampled_at_ms), &view::age(p95), &reconnects],
                     ),
-                    (Some(m), None) => l10n::fmt(loc, Key::DiagSample, &[&local_time(m.sampled_at_ms)]),
+                    (Some(m), None) => {
+                        l10n::fmt(loc, Key::DiagSample, &[&local_time(m.sampled_at_ms)])
+                    }
                     _ => String::new(),
                 };
                 // The whole tooltip is composed from the key table — the lag
                 // fragment included — so neither Chinese locale can paint an
                 // English label inside a localized sentence.
-                let tooltip =
-                    age_tooltip(loc, st.sample_age_ms(now), &format!("{diag}\n{}", st.summary_line(now)));
+                let tooltip = age_tooltip(
+                    loc,
+                    st.sample_age_ms(now),
+                    &format!("{diag}\n{}", st.summary_line(now)),
+                );
                 ui.label(
                     RichText::new(l10n::fmt(loc, Key::Age, &[&view::age(a)]))
                         .monospace()
@@ -932,12 +1040,26 @@ impl App {
                 .on_hover_text(tooltip);
             }
             match &st.conn {
-                Conn::Down { reason, retry_in, .. } => {
+                Conn::Down {
+                    reason, retry_in, ..
+                } => {
                     // The reason is the canonical English diagnostic text.
-                    ui.label(RichText::new(l10n::fmt(loc, Key::DownRetry, &[reason, &view::age(retry_in.as_millis() as i64)])).monospace().color(w::BAD));
+                    ui.label(
+                        RichText::new(l10n::fmt(
+                            loc,
+                            Key::DownRetry,
+                            &[reason, &view::age(retry_in.as_millis() as i64)],
+                        ))
+                        .monospace()
+                        .color(w::BAD),
+                    );
                 }
                 Conn::Connecting { attempt } if *attempt > 1 => {
-                    ui.label(RichText::new(l10n::fmt(loc, Key::AttemptN, &[&attempt.to_string()])).monospace().color(w::WARN));
+                    ui.label(
+                        RichText::new(l10n::fmt(loc, Key::AttemptN, &[&attempt.to_string()]))
+                            .monospace()
+                            .color(w::WARN),
+                    );
                 }
                 _ => {}
             }
@@ -954,7 +1076,11 @@ impl App {
             if let Some(r) = st.kill.as_ref().filter(|_| show_kill) {
                 let (txt, col) = if r.ok {
                     (
-                        l10n::fmt(loc, Key::KillOk, &[&r.pid.to_string(), &r.signal.to_string()]),
+                        l10n::fmt(
+                            loc,
+                            Key::KillOk,
+                            &[&r.pid.to_string(), &r.signal.to_string()],
+                        ),
                         w::OK,
                     )
                 } else {
@@ -962,13 +1088,14 @@ impl App {
                         .error
                         .clone()
                         .unwrap_or_else(|| l10n::text(loc, Key::KillErrorFallback).to_string());
-                    (l10n::fmt(loc, Key::KillRefused, &[&r.pid.to_string(), &why]), w::BAD)
+                    (
+                        l10n::fmt(loc, Key::KillRefused, &[&r.pid.to_string(), &why]),
+                        w::BAD,
+                    )
                 };
                 ui.label(RichText::new(txt).monospace().color(col));
-            } else if !narrow {
-                if let Some(note) = &self.kill_note {
-                    ui.label(RichText::new(note).monospace().color(w::DIM));
-                }
+            } else if !narrow && let Some(note) = &self.kill_note {
+                ui.label(RichText::new(note).monospace().color(w::DIM));
             }
             // Release check outcome: an available release gets a prompt
             // button; a failed check is a quiet note (spec: retry next
@@ -977,34 +1104,49 @@ impl App {
             match self.update.status() {
                 UpdateStatus::Available { version, .. } => {
                     let version = version.clone();
-                    ui.label(RichText::new(l10n::fmt(loc, Key::UpdateReadyBar, &[&version])).monospace().color(w::WARN));
+                    ui.label(
+                        RichText::new(l10n::fmt(loc, Key::UpdateReadyBar, &[&version]))
+                            .monospace()
+                            .color(w::WARN),
+                    );
                     if ui.button(l10n::text(loc, Key::BtnUpdate)).clicked() {
                         self.update_open = true;
                         self.update.mark_notified();
                     }
                 }
                 UpdateStatus::Failed(_) if !narrow => {
-                    ui.label(RichText::new(l10n::text(loc, Key::UpdateCheckFailed)).monospace().color(w::DIM));
+                    ui.label(
+                        RichText::new(l10n::text(loc, Key::UpdateCheckFailed))
+                            .monospace()
+                            .color(w::DIM),
+                    );
                 }
                 _ => {}
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button(l10n::text(loc, Key::BtnSettings)).clicked() {
                     self.settings_open = true;
-                    self.url_edit = self.cfg.active_source().map(|s| s.url.clone()).unwrap_or_default();
+                    self.url_edit = self
+                        .cfg
+                        .active_source()
+                        .map(|s| s.url.clone())
+                        .unwrap_or_default();
                     self.settings_msg = None;
                 }
                 // Source picker, only when there is a choice to make.
                 // Sits with the other controls, left of Settings.
                 if self.cfg.sources.len() > 1 {
                     let mut pick = self.cfg.active.min(self.cfg.sources.len() - 1);
-                    let names: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
+                    let names: Vec<String> =
+                        self.cfg.sources.iter().map(|s| s.name.clone()).collect();
                     // Fixed combo id; only the visible label is localized.
-                    egui::ComboBox::new("source", l10n::text(loc, Key::ComboSource)).selected_text(&names[pick]).show_ui(ui, |ui| {
-                        for (i, n) in names.iter().enumerate() {
-                            ui.selectable_value(&mut pick, i, n);
-                        }
-                    });
+                    egui::ComboBox::new("source", l10n::text(loc, Key::ComboSource))
+                        .selected_text(&names[pick])
+                        .show_ui(ui, |ui| {
+                            for (i, n) in names.iter().enumerate() {
+                                ui.selectable_value(&mut pick, i, n);
+                            }
+                        });
                     if pick != self.cfg.active {
                         // Deferred: draw() holds the shared-state lock
                         // across this whole frame, so switching inline
@@ -1013,13 +1155,18 @@ impl App {
                         self.pending_source = Some(pick);
                     }
                 }
-                if ui.selectable_label(self.cfg.compact, l10n::text(loc, Key::Dense)).clicked() {
+                if ui
+                    .selectable_label(self.cfg.compact, l10n::text(loc, Key::Dense))
+                    .clicked()
+                {
                     self.cfg.compact = !self.cfg.compact;
                     let _ = store::save_config(&self.cfg);
                     style_with(ui.ctx(), self.cfg.compact);
                 }
                 for (s, l) in [(300u32, "5m"), (60, "60s")] {
-                    if ui.selectable_label(self.cfg.window_s == s, l).clicked() && self.cfg.window_s != s {
+                    if ui.selectable_label(self.cfg.window_s == s, l).clicked()
+                        && self.cfg.window_s != s
+                    {
                         self.cfg.window_s = s;
                         let _ = store::save_config(&self.cfg);
                     }
@@ -1034,37 +1181,74 @@ impl App {
         // The header carries the machine's model so it stays readable while
         // the box is collapsed. None (legacy agent) => label alone.
         let model = st.metrics.as_ref().and_then(|m| m.cpu_model.as_deref());
-        w::panel_with_model(ui, l10n::text(loc, Key::PanelTitleCpu), model, &mut open, |ui| {
-            let Some(m) = &st.metrics else {
-                ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
-                return;
-            };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{:5.1}%", m.cpu_total)).monospace().strong().color(w::heat(m.cpu_total / 100.0)));
-                ui.label(RichText::new(l10n::fmt(loc, Key::Cores, &[&m.cpu_per_core.len().to_string()])).monospace().color(w::DIM));
-                if let Some(t) = m.cpu_temp_c {
-                    ui.label(RichText::new(format!("{t:.0}°C")).monospace().color(w::DIM));
-                }
-                if let Some([a, b, c]) = m.load_avg {
-                    ui.label(RichText::new(l10n::fmt(loc, Key::LoadAvg, &[&format!("{a:.2}"), &format!("{b:.2}"), &format!("{c:.2}")])).monospace().color(w::DIM));
-                }
-                if let Some(u) = m.uptime_s {
-                    ui.label(RichText::new(l10n::fmt(loc, Key::Uptime, &[&view::uptime(u)])).monospace().color(w::DIM));
-                }
-            });
-            let vals: Vec<f64> = st.cpu.iter().map(|p| p.1).collect();
-            w::graph(ui, &vals, slots, 100.0, graph_h, Some(w::CPU));
-            ui.add_space(4.0);
-            let cols = ((ui.available_width() / 150.0).floor() as usize).clamp(1, 8);
-            for (row_i, chunk) in m.cpu_per_core.chunks(cols).enumerate() {
-                ui.columns(cols, |c| {
-                    for (j, v) in chunk.iter().enumerate() {
-                        let i = row_i * cols + j;
-                        w::meter(&mut c[j], &format!("C{i}"), v / 100.0, &format!("{v:3.0}%"), Some(w::CPU));
+        w::panel_with_model(
+            ui,
+            l10n::text(loc, Key::PanelTitleCpu),
+            model,
+            &mut open,
+            |ui| {
+                let Some(m) = &st.metrics else {
+                    ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
+                    return;
+                };
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{:5.1}%", m.cpu_total))
+                            .monospace()
+                            .strong()
+                            .color(w::heat(m.cpu_total / 100.0)),
+                    );
+                    ui.label(
+                        RichText::new(l10n::fmt(
+                            loc,
+                            Key::Cores,
+                            &[&m.cpu_per_core.len().to_string()],
+                        ))
+                        .monospace()
+                        .color(w::DIM),
+                    );
+                    if let Some(t) = m.cpu_temp_c {
+                        ui.label(RichText::new(format!("{t:.0}°C")).monospace().color(w::DIM));
+                    }
+                    if let Some([a, b, c]) = m.load_avg {
+                        ui.label(
+                            RichText::new(l10n::fmt(
+                                loc,
+                                Key::LoadAvg,
+                                &[&format!("{a:.2}"), &format!("{b:.2}"), &format!("{c:.2}")],
+                            ))
+                            .monospace()
+                            .color(w::DIM),
+                        );
+                    }
+                    if let Some(u) = m.uptime_s {
+                        ui.label(
+                            RichText::new(l10n::fmt(loc, Key::Uptime, &[&view::uptime(u)]))
+                                .monospace()
+                                .color(w::DIM),
+                        );
                     }
                 });
-            }
-        });
+                let vals: Vec<f64> = st.cpu.iter().map(|p| p.1).collect();
+                w::graph(ui, &vals, slots, 100.0, graph_h, Some(w::CPU));
+                ui.add_space(4.0);
+                let cols = ((ui.available_width() / 150.0).floor() as usize).clamp(1, 8);
+                for (row_i, chunk) in m.cpu_per_core.chunks(cols).enumerate() {
+                    ui.columns(cols, |c| {
+                        for (j, v) in chunk.iter().enumerate() {
+                            let i = row_i * cols + j;
+                            w::meter(
+                                &mut c[j],
+                                &format!("C{i}"),
+                                v / 100.0,
+                                &format!("{v:3.0}%"),
+                                Some(w::CPU),
+                            );
+                        }
+                    });
+                }
+            },
+        );
         let collapsed = !open;
         if collapsed != self.cfg.collapsed_cpu {
             self.cfg.collapsed_cpu = collapsed;
@@ -1086,43 +1270,71 @@ impl App {
         // Header carries the first GPU's model (short form, same as the body
         // rows) so it stays readable while the box is collapsed.
         let model = gpus.first().map(|g| w::short_gpu_name(&g.name));
-        w::panel_with_model(ui, l10n::text(loc, Key::PanelTitleGpu), model, &mut open, |ui| {
-            for (i, g) in gpus.iter().enumerate() {
-                let short = w::short_gpu_name(&g.name);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("G{i} {short}")).monospace().strong().color(w::TEXT))
+        w::panel_with_model(
+            ui,
+            l10n::text(loc, Key::PanelTitleGpu),
+            model,
+            &mut open,
+            |ui| {
+                for (i, g) in gpus.iter().enumerate() {
+                    let short = w::short_gpu_name(&g.name);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("G{i} {short}"))
+                                .monospace()
+                                .strong()
+                                .color(w::TEXT),
+                        )
                         .on_hover_text(&g.name);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(t) = g.temperature_c {
-                            ui.label(RichText::new(format!("{t:.0}°C")).monospace()
-                                .color(w::heat((t / 100.0).clamp(0.0, 1.0))));
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some(t) = g.temperature_c {
+                                ui.label(
+                                    RichText::new(format!("{t:.0}°C"))
+                                        .monospace()
+                                        .color(w::heat((t / 100.0).clamp(0.0, 1.0))),
+                                );
+                            }
+                        });
                     });
-                });
-                w::meter(ui, l10n::text(loc, Key::MeterLoadGpu), g.utilization_gpu_pct as f32 / 100.0,
-                    &format!("{}%", g.utilization_gpu_pct), Some(w::GPU));
-                let vram = if g.mem_total_bytes == 0 {
-                    0.0
-                } else {
-                    g.mem_used_bytes as f32 / g.mem_total_bytes as f32
-                };
-                w::meter(ui, l10n::text(loc, Key::MeterVram), vram,
-                    &format!("{} / {}", view::bytes(g.mem_used_bytes), view::bytes(g.mem_total_bytes)), Some(w::GPU));
-                if let Some(ring) = st.gpu_pct.get(&g.name) {
-                    let vals: Vec<f64> = ring.iter().map(|p| p.1).collect();
-                    w::graph(ui, &vals, slots, 100.0, 24.0, Some(w::GPU));
+                    w::meter(
+                        ui,
+                        l10n::text(loc, Key::MeterLoadGpu),
+                        g.utilization_gpu_pct as f32 / 100.0,
+                        &format!("{}%", g.utilization_gpu_pct),
+                        Some(w::GPU),
+                    );
+                    let vram = if g.mem_total_bytes == 0 {
+                        0.0
+                    } else {
+                        g.mem_used_bytes as f32 / g.mem_total_bytes as f32
+                    };
+                    w::meter(
+                        ui,
+                        l10n::text(loc, Key::MeterVram),
+                        vram,
+                        &format!(
+                            "{} / {}",
+                            view::bytes(g.mem_used_bytes),
+                            view::bytes(g.mem_total_bytes)
+                        ),
+                        Some(w::GPU),
+                    );
+                    if let Some(ring) = st.gpu_pct.get(&g.name) {
+                        let vals: Vec<f64> = ring.iter().map(|p| p.1).collect();
+                        w::graph(ui, &vals, slots, 100.0, 24.0, Some(w::GPU));
+                    }
+                    // VRAM history (ring added in history.rs, same clock).
+                    // No label line: 24+18 keeps the box compact for half-screen.
+                    if let Some(ring) = st.gpu_mem_pct.get(&g.name) {
+                        let vals: Vec<f64> = ring.iter().map(|p| p.1).collect();
+                        w::graph(ui, &vals, slots, 100.0, 18.0, Some(w::GPU));
+                    }
+                    if i + 1 < gpus.len() {
+                        ui.add_space(4.0);
+                    }
                 }
-                // VRAM history (ring added in history.rs, same clock).
-                // No label line: 24+18 keeps the box compact for half-screen.
-                if let Some(ring) = st.gpu_mem_pct.get(&g.name) {
-                    let vals: Vec<f64> = ring.iter().map(|p| p.1).collect();
-                    w::graph(ui, &vals, slots, 100.0, 18.0, Some(w::GPU));
-                }
-                if i + 1 < gpus.len() {
-                    ui.add_space(4.0);
-                }
-            }
-        });
+            },
+        );
         let collapsed = !open;
         if collapsed != self.cfg.collapsed_gpu {
             self.cfg.collapsed_gpu = collapsed;
@@ -1136,10 +1348,24 @@ impl App {
         w::panel(ui, l10n::text(loc, Key::PanelTitleMem), &mut open, |ui| {
             let Some(m) = &st.metrics else { return };
             let f = |u: u64, t: u64| if t == 0 { 0.0 } else { u as f32 / t as f32 };
-            w::meter(ui, l10n::text(loc, Key::MeterUsed), f(m.mem_used, m.mem_total),
-                &format!("{} / {}", view::bytes(m.mem_used), view::bytes(m.mem_total)), Some(w::MEM));
-            w::meter(ui, l10n::text(loc, Key::MeterSwap), f(m.swap_used, m.swap_total),
-                &format!("{} / {}", view::bytes(m.swap_used), view::bytes(m.swap_total)), Some(w::MEM));
+            w::meter(
+                ui,
+                l10n::text(loc, Key::MeterUsed),
+                f(m.mem_used, m.mem_total),
+                &format!("{} / {}", view::bytes(m.mem_used), view::bytes(m.mem_total)),
+                Some(w::MEM),
+            );
+            w::meter(
+                ui,
+                l10n::text(loc, Key::MeterSwap),
+                f(m.swap_used, m.swap_total),
+                &format!(
+                    "{} / {}",
+                    view::bytes(m.swap_used),
+                    view::bytes(m.swap_total)
+                ),
+                Some(w::MEM),
+            );
             let vals: Vec<f64> = st.mem_pct.iter().map(|p| p.1).collect();
             w::graph(ui, &vals, slots, 100.0, 24.0, Some(w::MEM));
             // Swap history was already tracked in State, just not drawn.
@@ -1165,18 +1391,28 @@ impl App {
             if ifaces.is_empty() {
                 return;
             }
-            let cur = self.cfg.iface.clone().filter(|i| ifaces.contains(i)).unwrap_or_else(|| ifaces[0].clone());
+            let cur = self
+                .cfg
+                .iface
+                .clone()
+                .filter(|i| ifaces.contains(i))
+                .unwrap_or_else(|| ifaces[0].clone());
             let mut pick = cur.clone();
-            egui::ComboBox::new("iface", l10n::text(loc, Key::LabelInterface)).selected_text(&pick).show_ui(ui, |ui| {
-                for i in &ifaces {
-                    ui.selectable_value(&mut pick, i.clone(), i);
-                }
-            });
+            egui::ComboBox::new("iface", l10n::text(loc, Key::LabelInterface))
+                .selected_text(&pick)
+                .show_ui(ui, |ui| {
+                    for i in &ifaces {
+                        ui.selectable_value(&mut pick, i.clone(), i);
+                    }
+                });
             if pick != cur {
                 self.cfg.iface = Some(pick.clone());
                 let _ = store::save_config(&self.cfg);
             }
-            if ui.checkbox(&mut self.cfg.log_scale, l10n::text(loc, Key::LogScale)).changed() {
+            if ui
+                .checkbox(&mut self.cfg.log_scale, l10n::text(loc, Key::LogScale))
+                .changed()
+            {
                 let _ = store::save_config(&self.cfg);
             }
             let Some(ring) = st.net.get(&pick) else {
@@ -1186,7 +1422,10 @@ impl App {
             let take = slots.min(ring.len());
             let recent: Vec<_> = ring.iter().skip(ring.len() - take).copied().collect();
             for (arrow, color, sel) in [("rx", w::RX, true), ("tx", w::TX, false)] {
-                let linear: Vec<f64> = recent.iter().map(|r| if sel { r.rx_bps } else { r.tx_bps }).collect();
+                let linear: Vec<f64> = recent
+                    .iter()
+                    .map(|r| if sel { r.rx_bps } else { r.tx_bps })
+                    .collect();
                 let peak_lin = linear.iter().copied().fold(0.0, f64::max).max(1024.0);
                 let now = linear.last().copied().unwrap_or(0.0);
                 // Log transform only when toggled; labels stay linear.
@@ -1198,8 +1437,16 @@ impl App {
                     (linear, peak_lin)
                 };
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{arrow} {:>11}", view::rate_bits(now))).monospace().color(color));
-                    ui.label(RichText::new(l10n::fmt(loc, Key::Peak, &[&view::rate_bits(peak_lin)])).monospace().color(w::DIM));
+                    ui.label(
+                        RichText::new(format!("{arrow} {:>11}", view::rate_bits(now)))
+                            .monospace()
+                            .color(color),
+                    );
+                    ui.label(
+                        RichText::new(l10n::fmt(loc, Key::Peak, &[&view::rate_bits(peak_lin)]))
+                            .monospace()
+                            .color(w::DIM),
+                    );
                 });
                 w::graph(ui, &vals, slots, peak, 30.0, Some(color));
             }
@@ -1222,7 +1469,9 @@ impl App {
             disks.sort_by(|a, b| {
                 let fa = a.total.saturating_sub(a.available) as f64 / a.total as f64;
                 let fb = b.total.saturating_sub(b.available) as f64 / b.total as f64;
-                fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal).then(a.name.cmp(&b.name))
+                fb.partial_cmp(&fa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.name.cmp(&b.name))
             });
             if disks.is_empty() {
                 ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
@@ -1230,11 +1479,24 @@ impl App {
             for d in disks.iter().take(4) {
                 let used = d.total.saturating_sub(d.available);
                 let name: String = d.name.trim_start_matches("/dev/").chars().take(8).collect();
-                w::meter(ui, &name, used as f32 / d.total as f32,
-                    &format!("{} / {}", view::bytes(used), view::bytes(d.total)), Some(w::DISK));
+                w::meter(
+                    ui,
+                    &name,
+                    used as f32 / d.total as f32,
+                    &format!("{} / {}", view::bytes(used), view::bytes(d.total)),
+                    Some(w::DISK),
+                );
             }
             if disks.len() > 4 {
-                ui.label(RichText::new(l10n::fmt(loc, Key::MoreCount, &[&(disks.len() - 4).to_string()])).monospace().color(w::DIM));
+                ui.label(
+                    RichText::new(l10n::fmt(
+                        loc,
+                        Key::MoreCount,
+                        &[&(disks.len() - 4).to_string()],
+                    ))
+                    .monospace()
+                    .color(w::DIM),
+                );
             }
             // r/w history graphs for the picked disk (pin or busiest),
             // same pattern + log toggle as net. Data rings already
@@ -1253,17 +1515,22 @@ impl App {
                     names.sort();
                     let current = self.cfg.disk.clone().filter(|d| st.disk_io.contains_key(d));
                     let mut pick = current.clone();
-                    let selected = current.clone().unwrap_or_else(|| l10n::text(loc, Key::DiskAuto).to_string());
+                    let selected = current
+                        .clone()
+                        .unwrap_or_else(|| l10n::text(loc, Key::DiskAuto).to_string());
                     // No choice, no picker: mirrors the host picker rule.
                     let show_pick = names.len() > 1;
                     let recent: Vec<_> = ring.iter().skip(ring.len() - take).copied().collect();
                     for (arrow, color, sel) in [("r", w::RX, true), ("w", w::TX, false)] {
-                        let linear: Vec<f64> =
-                            recent.iter().map(|r| if sel { r.rx_bps } else { r.tx_bps }).collect();
+                        let linear: Vec<f64> = recent
+                            .iter()
+                            .map(|r| if sel { r.rx_bps } else { r.tx_bps })
+                            .collect();
                         let peak_lin = linear.iter().copied().fold(0.0, f64::max).max(1024.0);
                         let now = linear.last().copied().unwrap_or(0.0);
                         let (vals, peak) = if self.cfg.log_scale {
-                            let vals: Vec<f64> = linear.iter().map(|v| v.max(1.0).log10()).collect();
+                            let vals: Vec<f64> =
+                                linear.iter().map(|v| v.max(1.0).log10()).collect();
                             let peak = vals.iter().copied().fold(0.0, f64::max).max(3.0);
                             (vals, peak)
                         } else {
@@ -1271,23 +1538,44 @@ impl App {
                         };
                         ui.horizontal(|ui| {
                             if show_pick && arrow == "r" {
-                                egui::ComboBox::new("disk", l10n::text(loc, Key::ComboDisk)).selected_text(&selected).show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut pick, None, l10n::text(loc, Key::DiskAuto));
-                                    for name in &names {
-                                        ui.selectable_value(&mut pick, Some(name.clone()), name);
-                                    }
-                                });
+                                egui::ComboBox::new("disk", l10n::text(loc, Key::ComboDisk))
+                                    .selected_text(&selected)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut pick,
+                                            None,
+                                            l10n::text(loc, Key::DiskAuto),
+                                        );
+                                        for name in &names {
+                                            ui.selectable_value(
+                                                &mut pick,
+                                                Some(name.clone()),
+                                                name,
+                                            );
+                                        }
+                                    });
                                 if pick != current {
                                     self.cfg.disk = pick.clone();
                                     let _ = store::save_config(&self.cfg);
                                 }
                             }
-                            ui.label(RichText::new(format!("{name} {arrow} {:>10}", view::bytes(now as u64)))
+                            ui.label(
+                                RichText::new(format!(
+                                    "{name} {arrow} {:>10}",
+                                    view::bytes(now as u64)
+                                ))
                                 .monospace()
-                                .color(color));
-                            ui.label(RichText::new(l10n::fmt(loc, Key::Peak, &[&view::bytes(peak_lin as u64)]))
+                                .color(color),
+                            );
+                            ui.label(
+                                RichText::new(l10n::fmt(
+                                    loc,
+                                    Key::Peak,
+                                    &[&view::bytes(peak_lin as u64)],
+                                ))
                                 .monospace()
-                                .color(w::DIM));
+                                .color(w::DIM),
+                            );
                         });
                         w::graph(ui, &vals, slots, peak, 18.0, Some(color));
                     }
@@ -1312,182 +1600,290 @@ impl App {
         let Some(pid) = self.selected else { return };
         let loc = self.loc();
         let mut open = !self.cfg.collapsed_proc_detail;
-        w::panel(ui, l10n::text(loc, Key::PanelTitleProcDetail), &mut open, |ui| {
-            let row = st.procs.as_ref().and_then(|pp| pp.rows.iter().find(|r| r.pid == pid));
-            let detail = st.proc_detail.as_ref().filter(|d| d.process.pid == pid);
-            let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
-            // Identity prefers the detail reply, falls back to the list row
-            // (which knows the /etc/passwd name too) so the header and the
-            // Kill action render while the first reply is still in flight.
-            // The CPU/MEM readout needs the reply and waits for it.
-            let (name, user, state_str) = match (&detail, &row) {
-                (Some(d), _) => {
-                    let p = &d.process;
-                    let name = if !p.name.is_empty() {
-                        p.name.clone()
-                    } else {
-                        row.as_ref().map(|r| r.name.clone()).unwrap_or_default()
-                    };
-                    let user = match row.as_ref() {
-                        Some(r) if !r.user.is_empty() => r.user.clone(),
-                        _ if p.user_id != 0 => p.user_id.to_string(),
-                        _ => String::new(),
-                    };
-                    let state_str = if !p.status.is_empty() {
-                        p.status.clone()
-                    } else {
-                        row.as_ref().map(|r| r.state.clone()).unwrap_or_default()
-                    };
-                    (name, user, state_str)
-                }
-                (None, Some(r)) => (r.name.clone(), r.user.clone(), r.state.clone()),
-                (None, None) => (String::new(), String::new(), String::new()),
-            };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{pid} {name} {user} {state_str}")).monospace().strong().color(w::TEXT));
-                if let Some(d) = detail.as_ref() {
-                    let p = &d.process;
-                    let memf = p.mem_bytes as f32 * 100.0 / mem_total as f32;
-                    ui.label(RichText::new(format!("{:.1}% {:.1}% {}", p.cpu_usage, memf, view::bytes(p.mem_bytes)))
-                        .monospace()
-                        .color(w::heat((p.cpu_usage / 100.0).clamp(0.0, 1.0))));
-                }
-                // Kill, on demand only: enabled for a non-root row that
-                // carries a start time. Clicking opens the confirm dialog;
-                // the signal always goes via the dialog.
-                if let Some(r) = row.as_ref() {
-                    let root = view::is_root_owned(&r.user);
-                    // 0 = agent did not report a start time (unpatched): no
-                    // PID-reuse guard, so no kill.
-                    let no_start = r.start_time_ms == 0;
-                    let host = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_else(|| l10n::text(loc, Key::ThisHost).to_string());
-                    let hint = if root {
-                        l10n::text(loc, Key::KillRootOwned).to_string()
-                    } else if no_start {
-                        l10n::text(loc, Key::KillNoStartTimes).to_string()
-                    } else {
-                        l10n::fmt(loc, Key::KillHintOnHost, &[&host])
-                    };
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .add_enabled(!root && !no_start, egui::Button::new(l10n::text(loc, Key::BtnKill)))
-                            .on_hover_text(l10n::fmt(loc, Key::KillHover, &[&hint, &r.pid.to_string()]))
-                            .clicked()
-                        {
-                            self.kill_confirm = Some(KillConfirm {
-                                pid: r.pid,
-                                name: r.name.clone(),
-                                start_time_ms: r.start_time_ms,
+        w::panel(
+            ui,
+            l10n::text(loc, Key::PanelTitleProcDetail),
+            &mut open,
+            |ui| {
+                let row = st
+                    .procs
+                    .as_ref()
+                    .and_then(|pp| pp.rows.iter().find(|r| r.pid == pid));
+                let detail = st.proc_detail.as_ref().filter(|d| d.process.pid == pid);
+                let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
+                // Identity prefers the detail reply, falls back to the list row
+                // (which knows the /etc/passwd name too) so the header and the
+                // Kill action render while the first reply is still in flight.
+                // The CPU/MEM readout needs the reply and waits for it.
+                let (name, user, state_str) = match (&detail, &row) {
+                    (Some(d), _) => {
+                        let p = &d.process;
+                        let name = if !p.name.is_empty() {
+                            p.name.clone()
+                        } else {
+                            row.as_ref().map(|r| r.name.clone()).unwrap_or_default()
+                        };
+                        let user = match row.as_ref() {
+                            Some(r) if !r.user.is_empty() => r.user.clone(),
+                            _ if p.user_id != 0 => p.user_id.to_string(),
+                            _ => String::new(),
+                        };
+                        let state_str = if !p.status.is_empty() {
+                            p.status.clone()
+                        } else {
+                            row.as_ref().map(|r| r.state.clone()).unwrap_or_default()
+                        };
+                        (name, user, state_str)
+                    }
+                    (None, Some(r)) => (r.name.clone(), r.user.clone(), r.state.clone()),
+                    (None, None) => (String::new(), String::new(), String::new()),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{pid} {name} {user} {state_str}"))
+                            .monospace()
+                            .strong()
+                            .color(w::TEXT),
+                    );
+                    if let Some(d) = detail.as_ref() {
+                        let p = &d.process;
+                        let memf = p.mem_bytes as f32 * 100.0 / mem_total as f32;
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.1}% {:.1}% {}",
+                                p.cpu_usage,
+                                memf,
+                                view::bytes(p.mem_bytes)
+                            ))
+                            .monospace()
+                            .color(w::heat((p.cpu_usage / 100.0).clamp(0.0, 1.0))),
+                        );
+                    }
+                    // Kill, on demand only: enabled for a non-root row that
+                    // carries a start time. Clicking opens the confirm dialog;
+                    // the signal always goes via the dialog.
+                    if let Some(r) = row.as_ref() {
+                        let root = view::is_root_owned(&r.user);
+                        // 0 = agent did not report a start time (unpatched): no
+                        // PID-reuse guard, so no kill.
+                        let no_start = r.start_time_ms == 0;
+                        let host = self
+                            .cfg
+                            .active_source()
+                            .map(|s| s.name.clone())
+                            .unwrap_or_else(|| l10n::text(loc, Key::ThisHost).to_string());
+                        let hint = if root {
+                            l10n::text(loc, Key::KillRootOwned).to_string()
+                        } else if no_start {
+                            l10n::text(loc, Key::KillNoStartTimes).to_string()
+                        } else {
+                            l10n::fmt(loc, Key::KillHintOnHost, &[&host])
+                        };
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(
+                                    !root && !no_start,
+                                    egui::Button::new(l10n::text(loc, Key::BtnKill)),
+                                )
+                                .on_hover_text(l10n::fmt(
+                                    loc,
+                                    Key::KillHover,
+                                    &[&hint, &r.pid.to_string()],
+                                ))
+                                .clicked()
+                            {
+                                self.kill_confirm = Some(KillConfirm {
+                                    pid: r.pid,
+                                    name: r.name.clone(),
+                                    start_time_ms: r.start_time_ms,
+                                });
+                            }
+                        });
+                    }
+                });
+                // Body: CPU history once the reply backs this pid, else the
+                // waiting/stale copy shared with the other boxes.
+                match detail.as_ref() {
+                    Some(d) => {
+                        let p = &d.process;
+                        // Command (truncated display) plus Copy for the full text.
+                        if !p.command.is_empty() && p.command != name {
+                            ui.horizontal(|ui| {
+                                let cmd: String = p.command.chars().take(120).collect();
+                                let cmd = if p.command.chars().count() > 120 {
+                                    format!("{cmd}…")
+                                } else {
+                                    cmd
+                                };
+                                ui.label(RichText::new(cmd).monospace().color(w::DIM));
+                                if ui
+                                    .button(l10n::text(loc, Key::BtnCopy))
+                                    .on_hover_text(l10n::text(loc, Key::HoverCopyCommand))
+                                    .clicked()
+                                {
+                                    ui.ctx().copy_text(p.command.clone());
+                                }
                             });
                         }
-                    });
-                }
-            });
-            // Body: CPU history once the reply backs this pid, else the
-            // waiting/stale copy shared with the other boxes.
-            match detail.as_ref() {
-                Some(d) => {
-                    let p = &d.process;
-                    // Command (truncated display) plus Copy for the full text.
-                    if !p.command.is_empty() && p.command != name {
-                        ui.horizontal(|ui| {
-                            let cmd: String = p.command.chars().take(120).collect();
-                            let cmd = if p.command.chars().count() > 120 { format!("{cmd}…") } else { cmd };
-                            ui.label(RichText::new(cmd).monospace().color(w::DIM));
-                            if ui.button(l10n::text(loc, Key::BtnCopy)).on_hover_text(l10n::text(loc, Key::HoverCopyCommand)).clicked() {
-                                ui.ctx().copy_text(p.command.clone());
+                        // Facts row 1: counts + CPU time. The threads/fds/ppid
+                        // order is asserted by the exe test.
+                        let mut facts = vec![l10n::fmt(
+                            loc,
+                            Key::FactsThreads,
+                            &[&p.thread_count.to_string()],
+                        )];
+                        if let Some(fds) = p.fd_count {
+                            facts.push(l10n::fmt(loc, Key::FactsFds, &[&fds.to_string()]));
+                        }
+                        if let Some(ppid) = p.parent_pid {
+                            facts.push(l10n::fmt(loc, Key::FactsPpid, &[&ppid.to_string()]));
+                        }
+                        facts.push(l10n::fmt(
+                            loc,
+                            Key::FactsCpu,
+                            &[&view::cpu_time(
+                                p.cpu_time_user.saturating_add(p.cpu_time_system),
+                            )],
+                        ));
+                        ui.label(RichText::new(facts.join(" · ")).monospace().color(w::DIM));
+                        // Facts row 2: memory + I/O. r/w stay adjacent (exe test).
+                        let mut mem = vec![l10n::fmt(
+                            loc,
+                            Key::FactsVmem,
+                            &[&view::bytes(p.virtual_mem_bytes)],
+                        )];
+                        if let Some(s) = p.shared_mem_bytes {
+                            mem.push(l10n::fmt(loc, Key::FactsShared, &[&view::bytes(s)]));
+                        }
+                        match (p.read_bytes, p.write_bytes) {
+                            (Some(r), Some(wr)) => mem.push(l10n::fmt(
+                                loc,
+                                Key::FactsReadWrite,
+                                &[&view::bytes(r), &view::bytes(wr)],
+                            )),
+                            (Some(r), None) => {
+                                mem.push(l10n::fmt(loc, Key::FactsRead, &[&view::bytes(r)]))
                             }
-                        });
-                    }
-                    // Facts row 1: counts + CPU time. The threads/fds/ppid
-                    // order is asserted by the exe test.
-                    let mut facts = vec![l10n::fmt(loc, Key::FactsThreads, &[&p.thread_count.to_string()])];
-                    if let Some(fds) = p.fd_count {
-                        facts.push(l10n::fmt(loc, Key::FactsFds, &[&fds.to_string()]));
-                    }
-                    if let Some(ppid) = p.parent_pid {
-                        facts.push(l10n::fmt(loc, Key::FactsPpid, &[&ppid.to_string()]));
-                    }
-                    facts.push(l10n::fmt(loc, Key::FactsCpu, &[&view::cpu_time(p.cpu_time_user.saturating_add(p.cpu_time_system))]));
-                    ui.label(RichText::new(facts.join(" · ")).monospace().color(w::DIM));
-                    // Facts row 2: memory + I/O. r/w stay adjacent (exe test).
-                    let mut mem = vec![l10n::fmt(loc, Key::FactsVmem, &[&view::bytes(p.virtual_mem_bytes)])];
-                    if let Some(s) = p.shared_mem_bytes {
-                        mem.push(l10n::fmt(loc, Key::FactsShared, &[&view::bytes(s)]));
-                    }
-                    match (p.read_bytes, p.write_bytes) {
-                        (Some(r), Some(wr)) => mem.push(l10n::fmt(loc, Key::FactsReadWrite, &[&view::bytes(r), &view::bytes(wr)])),
-                        (Some(r), None) => mem.push(l10n::fmt(loc, Key::FactsRead, &[&view::bytes(r)])),
-                        (None, Some(wr)) => mem.push(l10n::fmt(loc, Key::FactsWritten, &[&view::bytes(wr)])),
-                        (None, None) => {}
-                    }
-                    ui.label(RichText::new(mem.join(" · ")).monospace().color(w::DIM));
-                    // Facts row 3: origin.
-                    let mut origin = vec![l10n::fmt(loc, Key::FactsStarted, &[&local_datetime(p.start_time)])];
-                    if let Some(cwd) = p.working_directory.as_ref().filter(|c| !c.is_empty()) {
-                        origin.push(l10n::fmt(loc, Key::FactsCwd, &[cwd]));
-                    }
-                    ui.label(RichText::new(origin.join(" · ")).monospace().color(w::DIM));
-                    if let Some(exe) = p.executable_path.as_ref().filter(|e| !e.is_empty()) {
-                        ui.label(RichText::new(exe).monospace().color(w::DIM));
-                    }
-                    // Children on one row; click jumps the selection there.
-                    if !p.child_processes.is_empty() {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(l10n::text(loc, Key::ChildrenHeader)).monospace().color(w::DIM));
-                            for c in p.child_processes.iter().take(4) {
-                                if ui.selectable_label(false, format!("{} {}", c.pid, c.name)).clicked() {
-                                    self.selected = Some(c.pid);
+                            (None, Some(wr)) => {
+                                mem.push(l10n::fmt(loc, Key::FactsWritten, &[&view::bytes(wr)]))
+                            }
+                            (None, None) => {}
+                        }
+                        ui.label(RichText::new(mem.join(" · ")).monospace().color(w::DIM));
+                        // Facts row 3: origin.
+                        let mut origin = vec![l10n::fmt(
+                            loc,
+                            Key::FactsStarted,
+                            &[&local_datetime(p.start_time)],
+                        )];
+                        if let Some(cwd) = p.working_directory.as_ref().filter(|c| !c.is_empty()) {
+                            origin.push(l10n::fmt(loc, Key::FactsCwd, &[cwd]));
+                        }
+                        ui.label(RichText::new(origin.join(" · ")).monospace().color(w::DIM));
+                        if let Some(exe) = p.executable_path.as_ref().filter(|e| !e.is_empty()) {
+                            ui.label(RichText::new(exe).monospace().color(w::DIM));
+                        }
+                        // Children on one row; click jumps the selection there.
+                        if !p.child_processes.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(l10n::text(loc, Key::ChildrenHeader))
+                                        .monospace()
+                                        .color(w::DIM),
+                                );
+                                for c in p.child_processes.iter().take(4) {
+                                    if ui
+                                        .selectable_label(false, format!("{} {}", c.pid, c.name))
+                                        .clicked()
+                                    {
+                                        self.selected = Some(c.pid);
+                                    }
                                 }
-                            }
-                            if p.child_processes.len() > 4 {
-                                ui.label(RichText::new(l10n::fmt(loc, Key::MoreCount, &[&(p.child_processes.len() - 4).to_string()])).monospace().color(w::DIM));
-                            }
-                        });
-                    }
-                    // Top threads by CPU time, capped.
-                    if !p.threads.is_empty() {
-                        let mut th: Vec<_> = p.threads.iter().collect();
-                        th.sort_by(|a, b| {
-                            let ta = a.cpu_time_user.saturating_add(a.cpu_time_system);
-                            let tb = b.cpu_time_user.saturating_add(b.cpu_time_system);
-                            tb.cmp(&ta).then(a.tid.cmp(&b.tid))
-                        });
-                        ui.label(RichText::new(l10n::text(loc, Key::ThreadHeader)).monospace().color(w::DIM));
-                        for t in th.iter().take(5) {
-                            let cpu = view::cpu_time(t.cpu_time_user.saturating_add(t.cpu_time_system));
-                            let row = if t.name.is_empty() {
-                                format!("{} {} {cpu}", t.tid, view::state_letter(&t.status))
-                            } else {
-                                format!("{} {} {} {cpu}", t.tid, t.name, view::state_letter(&t.status))
-                            };
-                            ui.label(RichText::new(row).monospace().color(w::DIM));
+                                if p.child_processes.len() > 4 {
+                                    ui.label(
+                                        RichText::new(l10n::fmt(
+                                            loc,
+                                            Key::MoreCount,
+                                            &[&(p.child_processes.len() - 4).to_string()],
+                                        ))
+                                        .monospace()
+                                        .color(w::DIM),
+                                    );
+                                }
+                            });
                         }
-                        if th.len() > 5 {
-                            ui.label(RichText::new(l10n::fmt(loc, Key::MoreCount, &[&(th.len() - 5).to_string()])).monospace().color(w::DIM));
+                        // Top threads by CPU time, capped.
+                        if !p.threads.is_empty() {
+                            let mut th: Vec<_> = p.threads.iter().collect();
+                            th.sort_by(|a, b| {
+                                let ta = a.cpu_time_user.saturating_add(a.cpu_time_system);
+                                let tb = b.cpu_time_user.saturating_add(b.cpu_time_system);
+                                tb.cmp(&ta).then(a.tid.cmp(&b.tid))
+                            });
+                            ui.label(
+                                RichText::new(l10n::text(loc, Key::ThreadHeader))
+                                    .monospace()
+                                    .color(w::DIM),
+                            );
+                            for t in th.iter().take(5) {
+                                let cpu = view::cpu_time(
+                                    t.cpu_time_user.saturating_add(t.cpu_time_system),
+                                );
+                                let row = if t.name.is_empty() {
+                                    format!("{} {} {cpu}", t.tid, view::state_letter(&t.status))
+                                } else {
+                                    format!(
+                                        "{} {} {} {cpu}",
+                                        t.tid,
+                                        t.name,
+                                        view::state_letter(&t.status)
+                                    )
+                                };
+                                ui.label(RichText::new(row).monospace().color(w::DIM));
+                            }
+                            if th.len() > 5 {
+                                ui.label(
+                                    RichText::new(l10n::fmt(
+                                        loc,
+                                        Key::MoreCount,
+                                        &[&(th.len() - 5).to_string()],
+                                    ))
+                                    .monospace()
+                                    .color(w::DIM),
+                                );
+                            }
+                        }
+                        // CPU + RSS graphs side by side: no added height.
+                        let cpu_vals: Vec<f64> = st.proc_detail_cpu.iter().map(|pt| pt.1).collect();
+                        if cpu_vals.is_empty() {
+                            ui.label(
+                                RichText::new(l10n::text(loc, Key::NoDetail))
+                                    .monospace()
+                                    .color(w::DIM),
+                            );
+                        } else {
+                            let mem_vals: Vec<f64> =
+                                st.proc_detail_mem.iter().map(|pt| pt.1).collect();
+                            let mem_peak = mem_vals.iter().copied().fold(0.0, f64::max);
+                            ui.columns(2, |c| {
+                                w::graph(&mut c[0], &cpu_vals, slots, 100.0, 40.0, Some(w::CPU));
+                                w::graph(&mut c[1], &mem_vals, slots, mem_peak, 40.0, Some(w::MEM));
+                            });
                         }
                     }
-                    // CPU + RSS graphs side by side: no added height.
-                    let cpu_vals: Vec<f64> = st.proc_detail_cpu.iter().map(|pt| pt.1).collect();
-                    if cpu_vals.is_empty() {
-                        ui.label(RichText::new(l10n::text(loc, Key::NoDetail)).monospace().color(w::DIM));
-                    } else {
-                        let mem_vals: Vec<f64> = st.proc_detail_mem.iter().map(|pt| pt.1).collect();
-                        let mem_peak = mem_vals.iter().copied().fold(0.0, f64::max);
-                        ui.columns(2, |c| {
-                            w::graph(&mut c[0], &cpu_vals, slots, 100.0, 40.0, Some(w::CPU));
-                            w::graph(&mut c[1], &mem_vals, slots, mem_peak, 40.0, Some(w::MEM));
-                        });
+                    None if st.proc_detail.is_none() => {
+                        ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(l10n::text(loc, Key::NoDetail))
+                                .monospace()
+                                .color(w::DIM),
+                        );
                     }
                 }
-                None if st.proc_detail.is_none() => {
-                    ui.label(RichText::new(l10n::text(loc, Key::WaitingForData)).color(w::DIM));
-                }
-                None => {
-                    ui.label(RichText::new(l10n::text(loc, Key::NoDetail)).monospace().color(w::DIM));
-                }
-            }
-        });
+            },
+        );
         let collapsed = !open;
         if collapsed != self.cfg.collapsed_proc_detail {
             self.cfg.collapsed_proc_detail = collapsed;
@@ -1512,68 +1908,98 @@ impl App {
         let mut open = !self.cfg.collapsed_workloads;
         let mem_total = st.metrics.as_ref().map(|m| m.mem_total).unwrap_or(0).max(1);
         let mut scroll = LinkedTable::NONE;
-        w::panel(ui, l10n::text(loc, Key::PanelTitleWorkloads), &mut open, |ui| {
-            let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
-            let narrow = ui.available_width() < 640.0;
-            let mut pick: Option<String> = None;
-            let mut tb = TableBuilder::new(ui)
-                .id_salt("workloads-table")
-                .striped(true)
-                .sense(egui::Sense::click())
-                .auto_shrink([false, true])
-                .max_scroll_height(row_h * 7.0)
-                .column(Column::remainder().at_least(120.0).clip(true))
-                .column(Column::exact(52.0))
-                .column(Column::exact(64.0))
-                .column(Column::exact(64.0));
-            if !narrow {
-                tb = tb.column(Column::exact(76.0));
-            }
-            let out = tb.header(row_h + 2.0, |mut h| {
-                for name in [
-                    l10n::text(loc, Key::ColWorkload),
-                    l10n::text(loc, Key::ColPids),
-                    l10n::text(loc, Key::ColCpuPct),
-                    l10n::text(loc, Key::ColMemPct),
-                ] {
-                    h.col(|ui| {
-                        ui.label(RichText::new(name).monospace().strong().color(w::TEXT));
-                    });
-                }
+        w::panel(
+            ui,
+            l10n::text(loc, Key::PanelTitleWorkloads),
+            &mut open,
+            |ui| {
+                let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
+                let narrow = ui.available_width() < 640.0;
+                let mut pick: Option<String> = None;
+                let mut tb = TableBuilder::new(ui)
+                    .id_salt("workloads-table")
+                    .striped(true)
+                    .sense(egui::Sense::click())
+                    .auto_shrink([false, true])
+                    .max_scroll_height(row_h * 7.0)
+                    .column(Column::remainder().at_least(120.0).clip(true))
+                    .column(Column::exact(52.0))
+                    .column(Column::exact(64.0))
+                    .column(Column::exact(64.0));
                 if !narrow {
-                    h.col(|ui| {
-                        ui.label(RichText::new(l10n::text(loc, Key::ColMem)).monospace().strong().color(w::TEXT));
-                    });
+                    tb = tb.column(Column::exact(76.0));
                 }
-            })
-            .body(|body| {
-                body.rows(row_h, st.workloads.len(), |mut row| {
-                    let g = &st.workloads[row.index()];
-                    let active = self.workload_filter.as_deref() == Some(g.key.as_str());
-                    row.set_selected(active);
-                    let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
-                    let memf = g.mem_bytes as f32 * 100.0 / mem_total as f32;
-                    row.col(|ui| { ui.label(mono(view::workload_label(&g.key), if active { w::ACCENT } else { w::TEXT })); });
-                    row.col(|ui| { ui.label(mono(g.pids.to_string(), w::DIM)); });
-                    row.col(|ui| { w::cpu_bar_cell(ui, g.cpu_usage / 100.0, &format!("{:5.1}", g.cpu_usage)); });
-                    row.col(|ui| { ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0))); });
-                    if !narrow {
-                        row.col(|ui| { ui.label(mono(view::bytes(g.mem_bytes), w::DIM)); });
-                    }
-                    if row.response().clicked() {
-                        pick = Some(g.key.clone());
-                    }
-                });
-            });
-            scroll.viewport = out.inner_rect.height();
-            if let Some(key) = pick {
-                self.workload_filter = if self.workload_filter.as_deref() == Some(key.as_str()) {
-                    None
-                } else {
-                    Some(key)
-                };
-            }
-        });
+                let out = tb
+                    .header(row_h + 2.0, |mut h| {
+                        for name in [
+                            l10n::text(loc, Key::ColWorkload),
+                            l10n::text(loc, Key::ColPids),
+                            l10n::text(loc, Key::ColCpuPct),
+                            l10n::text(loc, Key::ColMemPct),
+                        ] {
+                            h.col(|ui| {
+                                ui.label(RichText::new(name).monospace().strong().color(w::TEXT));
+                            });
+                        }
+                        if !narrow {
+                            h.col(|ui| {
+                                ui.label(
+                                    RichText::new(l10n::text(loc, Key::ColMem))
+                                        .monospace()
+                                        .strong()
+                                        .color(w::TEXT),
+                                );
+                            });
+                        }
+                    })
+                    .body(|body| {
+                        body.rows(row_h, st.workloads.len(), |mut row| {
+                            let g = &st.workloads[row.index()];
+                            let active = self.workload_filter.as_deref() == Some(g.key.as_str());
+                            row.set_selected(active);
+                            let mono =
+                                |s: String, c: Color32| RichText::new(s).monospace().color(c);
+                            let memf = g.mem_bytes as f32 * 100.0 / mem_total as f32;
+                            row.col(|ui| {
+                                ui.label(mono(
+                                    view::workload_label(&g.key),
+                                    if active { w::ACCENT } else { w::TEXT },
+                                ));
+                            });
+                            row.col(|ui| {
+                                ui.label(mono(g.pids.to_string(), w::DIM));
+                            });
+                            row.col(|ui| {
+                                w::cpu_bar_cell(
+                                    ui,
+                                    g.cpu_usage / 100.0,
+                                    &format!("{:5.1}", g.cpu_usage),
+                                );
+                            });
+                            row.col(|ui| {
+                                ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0)));
+                            });
+                            if !narrow {
+                                row.col(|ui| {
+                                    ui.label(mono(view::bytes(g.mem_bytes), w::DIM));
+                                });
+                            }
+                            if row.response().clicked() {
+                                pick = Some(g.key.clone());
+                            }
+                        });
+                    });
+                scroll.viewport = out.inner_rect.height();
+                if let Some(key) = pick {
+                    self.workload_filter = if self.workload_filter.as_deref() == Some(key.as_str())
+                    {
+                        None
+                    } else {
+                        Some(key)
+                    };
+                }
+            },
+        );
         if !open != self.cfg.collapsed_workloads {
             self.cfg.collapsed_workloads = !open;
             let _ = store::save_config(&self.cfg);
@@ -1601,24 +2027,36 @@ impl App {
             let want_focus = !self.settings_open && ui.input(|i| i.key_pressed(egui::Key::Slash));
             let mut clear_workload = false;
             ui.horizontal(|ui| {
-                let r = ui.add(
-                    egui::TextEdit::singleline(&mut self.filter)
-                        .hint_text(l10n::text(loc, Key::FilterHint))
-                        .desired_width(220.0)
-                )
-                .accessible_name(l10n::text(loc, Key::AccessFilterProcesses));
+                let r = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .hint_text(l10n::text(loc, Key::FilterHint))
+                            .desired_width(220.0),
+                    )
+                    .accessible_name(l10n::text(loc, Key::AccessFilterProcesses));
                 if want_focus {
                     r.request_focus();
                 }
                 if r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     self.filter.clear();
                 }
-                ui.label(RichText::new(l10n::fmt(loc, Key::CountOf, &[&idx.len().to_string(), &p.rows.len().to_string()])).monospace().color(w::DIM));
+                ui.label(
+                    RichText::new(l10n::fmt(
+                        loc,
+                        Key::CountOf,
+                        &[&idx.len().to_string(), &p.rows.len().to_string()],
+                    ))
+                    .monospace()
+                    .color(w::DIM),
+                );
                 if let Some(wk) = &self.workload_filter {
                     let label = view::workload_label(wk);
                     let chip = l10n::fmt(loc, Key::WorkloadChip, &[&label]);
                     let resp = ui
-                        .add(egui::Label::new(RichText::new(chip).monospace().color(w::ACCENT)).sense(egui::Sense::click()))
+                        .add(
+                            egui::Label::new(RichText::new(chip).monospace().color(w::ACCENT))
+                                .sense(egui::Sense::click()),
+                        )
                         .on_hover_text(l10n::text(loc, Key::HoverClearWorkload))
                         .on_hover_cursor(egui::CursorIcon::PointingHand);
                     if resp.clicked() {
@@ -1633,7 +2071,11 @@ impl App {
                     }
                 }
                 if p.sampled_at_ms > 0 {
-                    ui.label(RichText::new(l10n::fmt(loc, Key::AtTime, &[&local_time(p.sampled_at_ms)])).monospace().color(w::DIM));
+                    ui.label(
+                        RichText::new(l10n::fmt(loc, Key::AtTime, &[&local_time(p.sampled_at_ms)]))
+                            .monospace()
+                            .color(w::DIM),
+                    );
                 }
             });
             if clear_workload {
@@ -1668,71 +2110,132 @@ impl App {
             if !narrow {
                 tb = tb.column(Column::exact(84.0).clip(true));
             }
-            tb = tb.column(Column::exact(20.0)).column(Column::exact(64.0)).column(Column::exact(64.0));
+            tb = tb
+                .column(Column::exact(20.0))
+                .column(Column::exact(64.0))
+                .column(Column::exact(64.0));
             if !narrow {
                 tb = tb.column(Column::exact(76.0));
                 // Workload: display only (click a workloads row to filter).
                 tb = tb.column(Column::exact(120.0).clip(true));
             }
-            let mut cols: Vec<(&str, SortKey)> = vec![(l10n::text(loc, Key::ColPid), SortKey::Pid), (l10n::text(loc, Key::ColName), SortKey::Name)];
+            let mut cols: Vec<(&str, SortKey)> = vec![
+                (l10n::text(loc, Key::ColPid), SortKey::Pid),
+                (l10n::text(loc, Key::ColName), SortKey::Name),
+            ];
             if !narrow {
                 cols.push((l10n::text(loc, Key::ColUser), SortKey::User));
             }
-            cols.extend([(l10n::text(loc, Key::ColState), SortKey::State), (l10n::text(loc, Key::ColCpuPct), SortKey::Cpu), (l10n::text(loc, Key::ColMemPct), SortKey::Mem)]);
+            cols.extend([
+                (l10n::text(loc, Key::ColState), SortKey::State),
+                (l10n::text(loc, Key::ColCpuPct), SortKey::Cpu),
+                (l10n::text(loc, Key::ColMemPct), SortKey::Mem),
+            ]);
             if !narrow {
                 cols.push((l10n::text(loc, Key::ColMem), SortKey::Mem));
             }
-            let out = tb.header(row_h + 2.0, |mut h| {
-                for (name, key) in &cols {
-                    let resp = h.col(|ui| {
-                        let on = sort.0 == *key;
-                        let txt = if on { format!("{name}{}", if sort.1 { "▼" } else { "▲" }) } else { name.to_string() };
-                        // Text-only sort marker (same clickable-Label pattern
-                        // as panel titles): the filled Accent background is
-                        // reserved for row selection and view toggles, so the
-                        // three blue fills stop competing.
-                        ui.add(egui::Label::new(
-                            RichText::new(txt).monospace().strong().color(if on { w::ACCENT } else { w::TEXT }),
-                        ).sense(egui::Sense::click()));
-                    }).1;
-                    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        let on = sort.0 == *key;
-                        sort = if on { (*key, !sort.1) } else {
-                            // Numbers default to high-first, text to A-Z.
-                            (*key, matches!(key, SortKey::Cpu | SortKey::Mem))
-                        };
+            let out = tb
+                .header(row_h + 2.0, |mut h| {
+                    for (name, key) in &cols {
+                        let resp = h
+                            .col(|ui| {
+                                let on = sort.0 == *key;
+                                let txt = if on {
+                                    format!("{name}{}", if sort.1 { "▼" } else { "▲" })
+                                } else {
+                                    name.to_string()
+                                };
+                                // Text-only sort marker (same clickable-Label pattern
+                                // as panel titles): the filled Accent background is
+                                // reserved for row selection and view toggles, so the
+                                // three blue fills stop competing.
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(txt).monospace().strong().color(if on {
+                                            w::ACCENT
+                                        } else {
+                                            w::TEXT
+                                        }),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                );
+                            })
+                            .1;
+                        if resp
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            let on = sort.0 == *key;
+                            sort = if on {
+                                (*key, !sort.1)
+                            } else {
+                                // Numbers default to high-first, text to A-Z.
+                                (*key, matches!(key, SortKey::Cpu | SortKey::Mem))
+                            };
+                        }
                     }
-                }
-                if !narrow {
-                    h.col(|ui| {
-                        ui.label(RichText::new(l10n::text(loc, Key::ColWorkload)).monospace().strong().color(w::TEXT));
+                    if !narrow {
+                        h.col(|ui| {
+                            ui.label(
+                                RichText::new(l10n::text(loc, Key::ColWorkload))
+                                    .monospace()
+                                    .strong()
+                                    .color(w::TEXT),
+                            );
+                        });
+                    }
+                })
+                .body(|body| {
+                    body.rows(row_h, idx.len(), |mut row| {
+                        let r = &p.rows[idx[row.index()]];
+                        let row_wk = st.row_workload.get(idx[row.index()]).map(String::as_str);
+                        row.set_selected(selected == Some(r.pid));
+                        let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
+                        let memf = r.mem_bytes as f32 * 100.0 / mem_total as f32;
+                        row.col(|ui| {
+                            ui.label(mono(r.pid.to_string(), w::DIM));
+                        });
+                        row.col(|ui| {
+                            ui.label(mono(r.name.clone(), w::TEXT));
+                        });
+                        if !narrow {
+                            row.col(|ui| {
+                                ui.label(mono(
+                                    r.user.clone(),
+                                    if r.user == "root" { w::WARN } else { w::DIM },
+                                ));
+                            });
+                        }
+                        row.col(|ui| {
+                            ui.label(mono(view::state_letter(&r.state).into(), w::DIM));
+                        });
+                        row.col(|ui| {
+                            w::cpu_bar_cell(
+                                ui,
+                                r.cpu_usage / 100.0,
+                                &format!("{:5.1}", r.cpu_usage),
+                            );
+                        });
+                        row.col(|ui| {
+                            ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0)));
+                        });
+                        if !narrow {
+                            row.col(|ui| {
+                                ui.label(mono(view::bytes(r.mem_bytes), w::DIM));
+                            });
+                            row.col(|ui| {
+                                ui.label(mono(view::workload_label(row_wk.unwrap_or("")), w::DIM));
+                            });
+                        }
+                        if row.response().clicked() {
+                            selected = if selected == Some(r.pid) {
+                                None
+                            } else {
+                                Some(r.pid)
+                            };
+                        }
                     });
-                }
-            })
-            .body(|body| {
-                body.rows(row_h, idx.len(), |mut row| {
-                    let r = &p.rows[idx[row.index()]];
-                    let row_wk = st.row_workload.get(idx[row.index()]).map(String::as_str);
-                    row.set_selected(selected == Some(r.pid));
-                    let mono = |s: String, c: Color32| RichText::new(s).monospace().color(c);
-                    let memf = r.mem_bytes as f32 * 100.0 / mem_total as f32;
-                    row.col(|ui| { ui.label(mono(r.pid.to_string(), w::DIM)); });
-                    row.col(|ui| { ui.label(mono(r.name.clone(), w::TEXT)); });
-                    if !narrow {
-                        row.col(|ui| { ui.label(mono(r.user.clone(), if r.user == "root" { w::WARN } else { w::DIM })); });
-                    }
-                    row.col(|ui| { ui.label(mono(view::state_letter(&r.state).into(), w::DIM)); });
-                    row.col(|ui| { w::cpu_bar_cell(ui, r.cpu_usage / 100.0, &format!("{:5.1}", r.cpu_usage)); });
-                    row.col(|ui| { ui.label(mono(format!("{memf:5.1}"), w::heat(memf / 100.0))); });
-                    if !narrow {
-                        row.col(|ui| { ui.label(mono(view::bytes(r.mem_bytes), w::DIM)); });
-                        row.col(|ui| { ui.label(mono(view::workload_label(row_wk.unwrap_or("")), w::DIM)); });
-                    }
-                    if row.response().clicked() {
-                        selected = if selected == Some(r.pid) { None } else { Some(r.pid) };
-                    }
                 });
-            });
             scroll.viewport = out.inner_rect.height();
             (self.sort, self.desc) = sort;
             self.selected = selected;
@@ -1765,7 +2268,10 @@ impl App {
     /// port 45976 and `/ws`).
     fn add_source(&mut self, name: &str, url: &str) -> Result<(), String> {
         let normalized = self.validate_source(name, url)?;
-        self.cfg.sources.push(store::Source { name: name.trim().to_string(), url: normalized });
+        self.cfg.sources.push(store::Source {
+            name: name.trim().to_string(),
+            url: normalized,
+        });
         if self.cfg.sources.len() == 1 {
             self.cfg.active = 0;
         }
@@ -1812,7 +2318,11 @@ impl App {
         };
         self.token = token;
         self.token_src = src;
-        self.url_edit = self.cfg.active_source().map(|s| s.url.clone()).unwrap_or_default();
+        self.url_edit = self
+            .cfg
+            .active_source()
+            .map(|s| s.url.clone())
+            .unwrap_or_default();
         self.token_edit.clear();
         self.start_client(ctx);
         self.update_title(ctx);
@@ -1831,7 +2341,9 @@ impl App {
     /// `test_rx` and is polled in `settings()`.
     fn start_probe(&mut self, idx: usize) {
         self.ensure_rt();
-        let Some(s) = self.cfg.sources.get(idx) else { return };
+        let Some(s) = self.cfg.sources.get(idx) else {
+            return;
+        };
         let Some(rt) = &self.rt else {
             self.source_msg = Some(l10n::text(self.loc(), Key::TestUnavailable).to_string());
             return;
@@ -1893,7 +2405,8 @@ impl App {
             ob.probe_for = Some((name.trim().to_string(), normalized.clone(), tok.clone()));
         }
         rt.spawn(async move {
-            let r = client::probe_once(&normalized, Some(tok.as_str()), Duration::from_secs(5)).await;
+            let r =
+                client::probe_once(&normalized, Some(tok.as_str()), Duration::from_secs(5)).await;
             let _ = tx.send(r.map(|ok| ok.hostname));
         });
     }
@@ -1930,14 +2443,25 @@ impl App {
             }
             return;
         }
-        if let Err(e) = self.add_source(&name, &self.onboard.as_ref().map(|ob| ob.url.clone()).unwrap_or_default()) {
+        if let Err(e) = self.add_source(
+            &name,
+            &self
+                .onboard
+                .as_ref()
+                .map(|ob| ob.url.clone())
+                .unwrap_or_default(),
+        ) {
             if let Some(ob) = self.onboard.as_mut() {
                 ob.msg = Some(e);
             }
             return;
         }
         self.cfg.active = self.cfg.sources.len() - 1;
-        let user = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_default();
+        let user = self
+            .cfg
+            .active_source()
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
         match store::save_token_for(&user, &tok) {
             Ok(()) => self.token_src = TokenSource::Keyring,
             Err(e) => {
@@ -1953,7 +2477,11 @@ impl App {
             store::delete_token_for(&old);
         }
         self.token = Some(tok);
-        self.url_edit = self.cfg.active_source().map(|s| s.url.clone()).unwrap_or_default();
+        self.url_edit = self
+            .cfg
+            .active_source()
+            .map(|s| s.url.clone())
+            .unwrap_or_default();
         let _ = store::save_config(&self.cfg);
         self.onboard = None;
         self.start_client(ctx);
@@ -1999,7 +2527,11 @@ impl App {
     fn onboard_paired(&mut self, name: &str, url: &str, out: PairOutcome) {
         let loc = self.loc();
         let taken: Vec<String> = self.cfg.sources.iter().map(|s| s.name.clone()).collect();
-        let base = if out.host.trim().is_empty() { name } else { out.host.as_str() };
+        let base = if out.host.trim().is_empty() {
+            name
+        } else {
+            out.host.as_str()
+        };
         let name = ebbtop_core::pairing::unique_source_name(base, &taken);
         let stored = Self::store_issued_token(&name, &out.token);
         store::append_log(&format!("pairing ok host={name} scope={}", out.scope));
@@ -2060,7 +2592,10 @@ impl App {
             }
         };
         let first = self.cfg.sources.is_empty();
-        self.cfg.sources.push(store::Source { name: name.clone(), url: normalized });
+        self.cfg.sources.push(store::Source {
+            name: name.clone(),
+            url: normalized,
+        });
         if first {
             self.cfg.active = 0;
         }
@@ -2125,7 +2660,9 @@ impl App {
             endpoint: &endpoint,
             token_source: &self.token_src,
             connection: &connection,
-            failure: self.active_failure().map(|d| (d.headline(), d.detail.as_str())),
+            failure: self
+                .active_failure()
+                .map(|d| (d.headline(), d.detail.as_str())),
             log_bytes: store::log_bytes(),
             config_ok: store::config_path().is_some_and(|p| p.exists()),
         };
@@ -2168,7 +2705,10 @@ impl App {
                             // `probe_once` already drops the token; scrub the
                             // query form too, then classify. The log line is
                             // the scrubbed class + detail, never the token.
-                            let d = client::Diagnosis::from_error(&client::redact(e, self.token.as_deref()));
+                            let d = client::Diagnosis::from_error(&client::redact(
+                                e,
+                                self.token.as_deref(),
+                            ));
                             store::append_log(&format!("onboarding {}", d.log_line()));
                             ob.tested = None;
                             ob.msg = None;
@@ -2213,10 +2753,17 @@ impl App {
                 ui.add_space(4.0);
 
                 // (1) Discovery: find an agent on this segment, or skip it.
-                let picked = self.onboard.as_mut().expect("wizard open").discovery.draw(ui, loc);
+                let picked = self
+                    .onboard
+                    .as_mut()
+                    .expect("wizard open")
+                    .discovery
+                    .draw(ui, loc);
                 if let Some(i) = picked {
-                    let agent =
-                        self.onboard.as_ref().and_then(|ob| ob.discovery.agents.get(i).cloned());
+                    let agent = self
+                        .onboard
+                        .as_ref()
+                        .and_then(|ob| ob.discovery.agents.get(i).cloned());
                     if let Some(a) = agent {
                         if let Some(ob) = self.onboard.as_mut() {
                             ob.pair = Some(Pairing::for_agent(&a));
@@ -2241,10 +2788,26 @@ impl App {
 
                 ui.add_space(6.0);
                 ui.separator();
-                ui.label(RichText::new(l10n::text(loc, Key::OnbManualHeader)).strong().color(w::TEXT));
-                ui.label(RichText::new(l10n::text(loc, Key::OnbPortHint)).small().color(w::DIM));
-                ui.label(RichText::new(l10n::text(loc, Key::OnbFetchHint)).small().color(w::DIM));
-                ui.label(RichText::new(l10n::text(loc, Key::OnbBareHostTip)).small().color(w::DIM));
+                ui.label(
+                    RichText::new(l10n::text(loc, Key::OnbManualHeader))
+                        .strong()
+                        .color(w::TEXT),
+                );
+                ui.label(
+                    RichText::new(l10n::text(loc, Key::OnbPortHint))
+                        .small()
+                        .color(w::DIM),
+                );
+                ui.label(
+                    RichText::new(l10n::text(loc, Key::OnbFetchHint))
+                        .small()
+                        .color(w::DIM),
+                );
+                ui.label(
+                    RichText::new(l10n::text(loc, Key::OnbBareHostTip))
+                        .small()
+                        .color(w::DIM),
+                );
                 ui.add_space(6.0);
 
                 // Snapshot for the gated Save button; computed before the
@@ -2255,23 +2818,47 @@ impl App {
                 // A green Test for values the user has since edited: Save is
                 // still locked, and the note says exactly why.
                 let stale_test = tested.is_some() && !can_save;
-                let assumed = if current.1.is_empty() { None } else { Some(current.1.clone()) };
+                let assumed = if current.1.is_empty() {
+                    None
+                } else {
+                    Some(current.1.clone())
+                };
                 let tok_warn = client::token_warning(&current.2).is_some();
                 {
                     let ob = self.onboard.as_mut().expect("wizard open");
                     let mut token_edited = false;
-                    egui::Grid::new("onboard").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                        ui.label(l10n::text(loc, Key::LabelName));
-                        ui.add(egui::TextEdit::singleline(&mut ob.name).desired_width(220.0).hint_text("myserver")).accessible_name(l10n::text(loc, Key::LabelName));
-                        ui.end_row();
-                        ui.label(l10n::text(loc, Key::LabelUrl));
-                        ui.add(egui::TextEdit::singleline(&mut ob.url).desired_width(220.0).hint_text(l10n::text(loc, Key::HintUrlLong))).accessible_name(l10n::text(loc, Key::LabelUrl));
-                        ui.end_row();
-                        ui.label(l10n::text(loc, Key::LabelToken));
-                        let tok = ui.add(egui::TextEdit::singleline(&mut ob.token).password(true).desired_width(220.0).hint_text(l10n::text(loc, Key::HintPasteToken))).accessible_name(l10n::text(loc, Key::AccessAgentToken));
-                        token_edited = tok.changed();
-                        ui.end_row();
-                    });
+                    egui::Grid::new("onboard")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label(l10n::text(loc, Key::LabelName));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut ob.name)
+                                    .desired_width(220.0)
+                                    .hint_text("myserver"),
+                            )
+                            .accessible_name(l10n::text(loc, Key::LabelName));
+                            ui.end_row();
+                            ui.label(l10n::text(loc, Key::LabelUrl));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut ob.url)
+                                    .desired_width(220.0)
+                                    .hint_text(l10n::text(loc, Key::HintUrlLong)),
+                            )
+                            .accessible_name(l10n::text(loc, Key::LabelUrl));
+                            ui.end_row();
+                            ui.label(l10n::text(loc, Key::LabelToken));
+                            let tok = ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut ob.token)
+                                        .password(true)
+                                        .desired_width(220.0)
+                                        .hint_text(l10n::text(loc, Key::HintPasteToken)),
+                                )
+                                .accessible_name(l10n::text(loc, Key::AccessAgentToken));
+                            token_edited = tok.changed();
+                            ui.end_row();
+                        });
                     // Typing a token releases a paired one: the field is the
                     // user's latest instruction, not a stale pairing.
                     if token_edited && ob.issued.is_some() {
@@ -2280,27 +2867,41 @@ impl App {
                         ob.msg = Some(l10n::text(loc, Key::NoteTypedTokenOverride).to_string());
                     }
                     if ob.issued.is_some() {
-                        ui.add(egui::Label::new(
-                            RichText::new(l10n::text(loc, Key::NotePairedCredential))
-                                .small()
-                                .color(w::OK),
-                        ).wrap());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(l10n::text(loc, Key::NotePairedCredential))
+                                    .small()
+                                    .color(w::OK),
+                            )
+                            .wrap(),
+                        );
                     }
                     if let Some(u) = assumed {
-                        ui.label(RichText::new(l10n::fmt(loc, Key::WillConnectTo, &[&u])).small().color(w::DIM));
+                        ui.label(
+                            RichText::new(l10n::fmt(loc, Key::WillConnectTo, &[&u]))
+                                .small()
+                                .color(w::DIM),
+                        );
                     }
                     if tok_warn {
                         // One fixed advisory from core (`token_warning`); the
                         // text shown is the localized equivalent, and English
                         // stays byte-identical to the core wording.
-                        ui.label(RichText::new(l10n::text(loc, Key::TokenUnusual)).small().color(w::WARN));
+                        ui.label(
+                            RichText::new(l10n::text(loc, Key::TokenUnusual))
+                                .small()
+                                .color(w::WARN),
+                        );
                     }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button(l10n::text(loc, Key::BtnTest)).clicked() {
                             test = true;
                         }
-                        let save_btn = ui.add_enabled(can_save, egui::Button::new(l10n::text(loc, Key::BtnSaveConnect)));
+                        let save_btn = ui.add_enabled(
+                            can_save,
+                            egui::Button::new(l10n::text(loc, Key::BtnSaveConnect)),
+                        );
                         if save_btn.clicked() {
                             save = true;
                         }
@@ -2316,14 +2917,21 @@ impl App {
                         }
                     });
                     if !can_save {
-                        ui.label(RichText::new(l10n::text(loc, Key::NoteSaveUnlock)).small().color(w::DIM));
+                        ui.label(
+                            RichText::new(l10n::text(loc, Key::NoteSaveUnlock))
+                                .small()
+                                .color(w::DIM),
+                        );
                     }
                     if stale_test {
-                        ui.add(egui::Label::new(
-                            RichText::new(l10n::text(loc, Key::NoteFieldsChanged))
-                                .small()
-                                .color(w::WARN),
-                        ).wrap());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(l10n::text(loc, Key::NoteFieldsChanged))
+                                    .small()
+                                    .color(w::WARN),
+                            )
+                            .wrap(),
+                        );
                     }
                     if ob.testing {
                         ui.label(RichText::new(l10n::text(loc, Key::Testing)).color(w::DIM));
@@ -2337,15 +2945,28 @@ impl App {
                     if let Some(d) = &ob.failure {
                         draw_failure(ui, loc, d);
                         if let Some(p) = store::log_path() {
-                            ui.add(egui::Label::new(
-                                RichText::new(l10n::fmt(loc, Key::LogLine, &[&p.display().to_string()])).small().monospace().color(w::DIM),
-                            ).wrap());
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(l10n::fmt(
+                                        loc,
+                                        Key::LogLine,
+                                        &[&p.display().to_string()],
+                                    ))
+                                    .small()
+                                    .monospace()
+                                    .color(w::DIM),
+                                )
+                                .wrap(),
+                            );
                         }
                         ui.horizontal(|ui| {
                             if ui.button(l10n::text(loc, Key::BtnOpenLogs)).clicked() {
                                 open_logs = true;
                             }
-                            if ui.button(l10n::text(loc, Key::BtnCopySupportSummary)).clicked() {
+                            if ui
+                                .button(l10n::text(loc, Key::BtnCopySupportSummary))
+                                .clicked()
+                            {
                                 copy_summary = true;
                             }
                         });
@@ -2360,15 +2981,12 @@ impl App {
                 if begin_pair {
                     self.onboard_begin_pair();
                 }
-                if pair_start
-                    && let Some(p) = self.onboard.as_mut().and_then(|ob| ob.pair.as_mut())
+                if pair_start && let Some(p) = self.onboard.as_mut().and_then(|ob| ob.pair.as_mut())
                 {
                     p.start();
                 }
-                if pair_cancel {
-                    if let Some(ob) = self.onboard.as_mut() {
-                        ob.pair = None;
-                    }
+                if pair_cancel && let Some(ob) = self.onboard.as_mut() {
+                    ob.pair = None;
                 }
                 if open_logs
                     && let Err(e) = store::open_logs()
@@ -2415,10 +3033,14 @@ impl App {
                     match r {
                         Ok(host) => {
                             self.source_failure = None;
-                            self.source_msg = Some(l10n::fmt(self.loc(), Key::ConnectedTo, &[&host]));
+                            self.source_msg =
+                                Some(l10n::fmt(self.loc(), Key::ConnectedTo, &[&host]));
                         }
                         Err(e) => {
-                            let d = client::Diagnosis::from_error(&client::redact(e, self.token.as_deref()));
+                            let d = client::Diagnosis::from_error(&client::redact(
+                                e,
+                                self.token.as_deref(),
+                            ));
                             store::append_log(&format!("source test {}", d.log_line()));
                             self.source_msg = None;
                             self.source_failure = Some(d);
@@ -2445,7 +3067,10 @@ impl App {
                         #[cfg(not(feature = "store"))]
                         (SettingsTab::Updates, l10n::text(loc, Key::TabUpdates)),
                     ] {
-                        if ui.selectable_label(self.settings_tab == tab, label).clicked() {
+                        if ui
+                            .selectable_label(self.settings_tab == tab, label)
+                            .clicked()
+                        {
                             self.settings_tab = tab;
                         }
                     }
@@ -2488,7 +3113,10 @@ impl App {
             // fixed range never indexes past the end.
             let mut removed = false;
             ui.horizontal(|ui| {
-                if ui.selectable_label(is_active, &name).on_hover_text(l10n::text(loc, Key::HoverSetActiveSource)).clicked()
+                if ui
+                    .selectable_label(is_active, &name)
+                    .on_hover_text(l10n::text(loc, Key::HoverSetActiveSource))
+                    .clicked()
                     && !is_active
                 {
                     self.cfg.active = i;
@@ -2496,7 +3124,11 @@ impl App {
                     self.use_active_source(ctx);
                 }
                 ui.label(RichText::new(&url).monospace().small().color(w::DIM));
-                if ui.button(l10n::text(loc, Key::BtnTest)).on_hover_text(l10n::fmt(loc, Key::HoverConnectOnce, &[&name])).clicked() {
+                if ui
+                    .button(l10n::text(loc, Key::BtnTest))
+                    .on_hover_text(l10n::fmt(loc, Key::HoverConnectOnce, &[&name]))
+                    .clicked()
+                {
                     self.start_probe(i);
                 }
                 if ui.button(l10n::text(loc, Key::BtnRemove)).clicked() {
@@ -2524,17 +3156,25 @@ impl App {
                 open_logs = true;
             }
         }
-        if open_logs
-            && let Err(e) = store::open_logs()
-        {
+        if open_logs && let Err(e) = store::open_logs() {
             self.source_msg = Some(open_logs_note(loc, e));
         }
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(l10n::text(loc, Key::LabelName));
-            ui.add(egui::TextEdit::singleline(&mut self.source_name_edit).desired_width(110.0).hint_text(l10n::text(loc, Key::HintServerName))).accessible_name(l10n::text(loc, Key::AccessNewSourceName));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.source_name_edit)
+                    .desired_width(110.0)
+                    .hint_text(l10n::text(loc, Key::HintServerName)),
+            )
+            .accessible_name(l10n::text(loc, Key::AccessNewSourceName));
             ui.label(l10n::text(loc, Key::LabelUrl));
-            ui.add(egui::TextEdit::singleline(&mut self.source_url_edit).desired_width(220.0).hint_text(l10n::text(loc, Key::HintUrlShort))).accessible_name(l10n::text(loc, Key::AccessNewSourceUrl));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.source_url_edit)
+                    .desired_width(220.0)
+                    .hint_text(l10n::text(loc, Key::HintUrlShort)),
+            )
+            .accessible_name(l10n::text(loc, Key::AccessNewSourceUrl));
             if ui.button(l10n::text(loc, Key::BtnAdd)).clicked() {
                 let name = self.source_name_edit.clone();
                 let url = self.source_url_edit.clone();
@@ -2553,12 +3193,16 @@ impl App {
         // ---- Pair a new host (the wizard's flow, from Settings) ----------
         ui.add_space(6.0);
         ui.separator();
-        ui.label(RichText::new(l10n::text(loc, Key::PairNewHost)).strong().color(w::TEXT));
+        ui.label(
+            RichText::new(l10n::text(loc, Key::PairNewHost))
+                .strong()
+                .color(w::TEXT),
+        );
         ui.add(
             egui::Label::new(
                 RichText::new(l10n::text(loc, Key::PairRunHint))
-                .small()
-                .color(w::DIM),
+                    .small()
+                    .color(w::DIM),
             )
             .wrap(),
         );
@@ -2604,16 +3248,16 @@ impl App {
             let url = self.pair_addr_edit.trim().to_string();
             match client::normalize_base_url(&url) {
                 Ok(_) => {
-                    self.pair_new =
-                        Some(Pairing::for_address(if name.is_empty() { "host" } else { &name }, &url));
+                    self.pair_new = Some(Pairing::for_address(
+                        if name.is_empty() { "host" } else { &name },
+                        &url,
+                    ));
                     self.pair_msg = None;
                 }
                 Err(e) => self.pair_msg = Some(l10n::fmt(loc, Key::BadUrl, &[&e.to_string()])),
             }
         }
-        if pair_start
-            && let Some(p) = self.pair_new.as_mut()
-        {
+        if pair_start && let Some(p) = self.pair_new.as_mut() {
             p.start();
         }
         if pair_cancel {
@@ -2623,38 +3267,67 @@ impl App {
 
     fn settings_display(&mut self, ui: &mut Ui) {
         let loc = self.loc();
-        ui.label(RichText::new(l10n::text(loc, Key::PanelsHeader)).strong().color(w::TEXT));
-        egui::Grid::new("panels").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
-            let changed_cpu = ui.checkbox(&mut self.cfg.show_cpu, l10n::text(loc, Key::PanelCpu)).changed();
-            let changed_gpu = ui.checkbox(&mut self.cfg.show_gpu, l10n::text(loc, Key::PanelGpu)).changed();
-            let changed_mem = ui.checkbox(&mut self.cfg.show_mem, l10n::text(loc, Key::PanelMem)).changed();
-            ui.end_row();
-            let changed_net = ui.checkbox(&mut self.cfg.show_net, l10n::text(loc, Key::PanelNet)).changed();
-            let changed_disk = ui.checkbox(&mut self.cfg.show_disk, l10n::text(loc, Key::PanelDisk)).changed();
-            if changed_cpu || changed_gpu || changed_mem || changed_net || changed_disk {
-                let _ = store::save_config(&self.cfg);
-            }
-        });
+        ui.label(
+            RichText::new(l10n::text(loc, Key::PanelsHeader))
+                .strong()
+                .color(w::TEXT),
+        );
+        egui::Grid::new("panels")
+            .num_columns(3)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                let changed_cpu = ui
+                    .checkbox(&mut self.cfg.show_cpu, l10n::text(loc, Key::PanelCpu))
+                    .changed();
+                let changed_gpu = ui
+                    .checkbox(&mut self.cfg.show_gpu, l10n::text(loc, Key::PanelGpu))
+                    .changed();
+                let changed_mem = ui
+                    .checkbox(&mut self.cfg.show_mem, l10n::text(loc, Key::PanelMem))
+                    .changed();
+                ui.end_row();
+                let changed_net = ui
+                    .checkbox(&mut self.cfg.show_net, l10n::text(loc, Key::PanelNet))
+                    .changed();
+                let changed_disk = ui
+                    .checkbox(&mut self.cfg.show_disk, l10n::text(loc, Key::PanelDisk))
+                    .changed();
+                if changed_cpu || changed_gpu || changed_mem || changed_net || changed_disk {
+                    let _ = store::save_config(&self.cfg);
+                }
+            });
         let top_height = ui
-            .add(egui::Slider::new(&mut self.cfg.top_frac, 0.25..=0.75).text(l10n::text(loc, Key::TopHeight)))
+            .add(
+                egui::Slider::new(&mut self.cfg.top_frac, 0.25..=0.75)
+                    .text(l10n::text(loc, Key::TopHeight)),
+            )
             .accessible_name(l10n::text(loc, Key::TopHeight));
         if top_height.changed() {
             let _ = store::save_config(&self.cfg);
         }
         ui.separator();
         ui.horizontal(|ui| {
-            if ui.selectable_label(self.cfg.compact, l10n::text(loc, Key::Dense)).on_hover_text(l10n::text(loc, Key::HoverDense)).clicked() {
+            if ui
+                .selectable_label(self.cfg.compact, l10n::text(loc, Key::Dense))
+                .on_hover_text(l10n::text(loc, Key::HoverDense))
+                .clicked()
+            {
                 self.cfg.compact = !self.cfg.compact;
                 let _ = store::save_config(&self.cfg);
                 style_with(ui.ctx(), self.cfg.compact);
             }
             for (s, l) in [(300u32, "5m"), (60, "60s")] {
-                if ui.selectable_label(self.cfg.window_s == s, l).clicked() && self.cfg.window_s != s {
+                if ui.selectable_label(self.cfg.window_s == s, l).clicked()
+                    && self.cfg.window_s != s
+                {
                     self.cfg.window_s = s;
                     let _ = store::save_config(&self.cfg);
                 }
             }
-            if ui.checkbox(&mut self.cfg.log_scale, l10n::text(loc, Key::LogScale)).changed() {
+            if ui
+                .checkbox(&mut self.cfg.log_scale, l10n::text(loc, Key::LogScale))
+                .changed()
+            {
                 let _ = store::save_config(&self.cfg);
             }
         });
@@ -2664,7 +3337,11 @@ impl App {
         // A pick is persisted through the same atomic config save as every
         // other display setting; the next frame repaints in the new language.
         ui.horizontal(|ui| {
-            ui.label(RichText::new(l10n::text(loc, Key::LanguageLabel)).strong().color(w::TEXT));
+            ui.label(
+                RichText::new(l10n::text(loc, Key::LanguageLabel))
+                    .strong()
+                    .color(w::TEXT),
+            );
             let mut chosen = None;
             for opt in Locale::ALL {
                 let picked = ui
@@ -2714,7 +3391,11 @@ impl App {
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
                 ui.set_max_width(560.0);
-                ui.label(RichText::new(l10n::text(loc, Key::NoticeHeading)).strong().color(w::TEXT));
+                ui.label(
+                    RichText::new(l10n::text(loc, Key::NoticeHeading))
+                        .strong()
+                        .color(w::TEXT),
+                );
                 ui.add(
                     egui::Label::new(
                         RichText::new(l10n::text(loc, Key::NoticeIntro))
@@ -2735,7 +3416,11 @@ impl App {
                     );
                 }
                 ui.separator();
-                ui.label(RichText::new(l10n::text(loc, Key::NoticeLicenseLabel)).small().color(w::TEXT));
+                ui.label(
+                    RichText::new(l10n::text(loc, Key::NoticeLicenseLabel))
+                        .small()
+                        .color(w::TEXT),
+                );
                 egui::ScrollArea::vertical()
                     .id_salt("font-license-text")
                     .max_height(320.0)
@@ -2761,34 +3446,58 @@ impl App {
         let loc = self.loc();
         let mut save = false;
         if let Some(s) = self.cfg.active_source() {
-            ui.label(RichText::new(l10n::fmt(loc, Key::SourceLine, &[&s.name])).strong().color(w::TEXT));
+            ui.label(
+                RichText::new(l10n::fmt(loc, Key::SourceLine, &[&s.name]))
+                    .strong()
+                    .color(w::TEXT),
+            );
         } else {
             ui.label(RichText::new(l10n::text(loc, Key::NoSourcesAddUnder)).color(w::WARN));
         }
-        egui::Grid::new("conn").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label(l10n::text(loc, Key::LabelAgentUrl));
-            ui.add(egui::TextEdit::singleline(&mut self.url_edit).desired_width(300.0).hint_text(l10n::text(loc, Key::HintUrlShort))).accessible_name(l10n::text(loc, Key::LabelAgentUrl));
-            ui.end_row();
-            ui.label(l10n::text(loc, Key::LabelToken));
-            ui.add(egui::TextEdit::singleline(&mut self.token_edit).password(true).desired_width(300.0)
-                .hint_text(l10n::text(loc, Key::HintKeepSavedToken)))
+        egui::Grid::new("conn")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(l10n::text(loc, Key::LabelAgentUrl));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.url_edit)
+                        .desired_width(300.0)
+                        .hint_text(l10n::text(loc, Key::HintUrlShort)),
+                )
+                .accessible_name(l10n::text(loc, Key::LabelAgentUrl));
+                ui.end_row();
+                ui.label(l10n::text(loc, Key::LabelToken));
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.token_edit)
+                        .password(true)
+                        .desired_width(300.0)
+                        .hint_text(l10n::text(loc, Key::HintKeepSavedToken)),
+                )
                 .accessible_name(l10n::text(loc, Key::AccessAgentToken));
-            ui.end_row();
-            ui.label(l10n::text(loc, Key::LabelStored));
-            ui.label(match &self.token_src {
-                TokenSource::Env => l10n::text(loc, Key::StoredEnv).to_string(),
-                TokenSource::Keyring => l10n::text(loc, Key::StoredKeyring).to_string(),
-                TokenSource::Missing => l10n::text(loc, Key::StoredMissing).to_string(),
-                TokenSource::Error(e) => l10n::fmt(loc, Key::StoredError, &[e]),
+                ui.end_row();
+                ui.label(l10n::text(loc, Key::LabelStored));
+                ui.label(match &self.token_src {
+                    TokenSource::Env => l10n::text(loc, Key::StoredEnv).to_string(),
+                    TokenSource::Keyring => l10n::text(loc, Key::StoredKeyring).to_string(),
+                    TokenSource::Missing => l10n::text(loc, Key::StoredMissing).to_string(),
+                    TokenSource::Error(e) => l10n::fmt(loc, Key::StoredError, &[e]),
+                });
+                ui.end_row();
             });
-            ui.end_row();
-        });
         ui.add_space(6.0);
         if let Some(p) = store::config_path() {
-            ui.label(RichText::new(l10n::fmt(loc, Key::ConfigPath, &[&p.display().to_string()])).small().color(w::DIM));
+            ui.label(
+                RichText::new(l10n::fmt(loc, Key::ConfigPath, &[&p.display().to_string()]))
+                    .small()
+                    .color(w::DIM),
+            );
         }
         if let Some(p) = store::log_path() {
-            ui.label(RichText::new(l10n::fmt(loc, Key::LogLine, &[&p.display().to_string()])).small().color(w::DIM));
+            ui.label(
+                RichText::new(l10n::fmt(loc, Key::LogLine, &[&p.display().to_string()]))
+                    .small()
+                    .color(w::DIM),
+            );
         }
         ui.horizontal(|ui| {
             if ui.button(l10n::text(loc, Key::BtnOpenLogs)).clicked()
@@ -2796,7 +3505,10 @@ impl App {
             {
                 self.settings_msg = Some(open_logs_note(loc, e));
             }
-            if ui.button(l10n::text(loc, Key::BtnCopySupportSummary)).clicked() {
+            if ui
+                .button(l10n::text(loc, Key::BtnCopySupportSummary))
+                .clicked()
+            {
                 let m = self.support_summary_action(ui.ctx());
                 self.settings_msg = Some(m);
             }
@@ -2833,7 +3545,11 @@ impl App {
         let t = t.trim();
         if !t.is_empty() {
             self.token = Some(t.to_string());
-            let user = self.cfg.active_source().map(|s| s.name.clone()).unwrap_or_default();
+            let user = self
+                .cfg
+                .active_source()
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
             match store::save_token_for(&user, t) {
                 Ok(()) => self.token_src = TokenSource::Keyring,
                 Err(e) => {
@@ -2852,25 +3568,29 @@ impl App {
     #[cfg(not(feature = "store"))]
     fn settings_updates(&mut self, ui: &mut Ui) {
         let loc = self.loc();
-        ui.label(RichText::new(format!("EbbTop {}", version::current_version())).strong().color(w::TEXT));
+        ui.label(
+            RichText::new(format!("EbbTop {}", version::current_version()))
+                .strong()
+                .color(w::TEXT),
+        );
         let status = match self.update.status() {
             UpdateStatus::Idle => l10n::text(loc, Key::UpdatesNeverChecked).to_string(),
             UpdateStatus::Checking => l10n::text(loc, Key::UpdatesChecking).to_string(),
             UpdateStatus::Available { version, .. } => {
-                l10n::fmt(loc, Key::UpdatesAvailable, &[&version])
+                l10n::fmt(loc, Key::UpdatesAvailable, &[version])
             }
-            UpdateStatus::UpToDate { version } => l10n::fmt(loc, Key::UpdatesUpToDate, &[&version]),
-            UpdateStatus::Failed(e) => l10n::fmt(loc, Key::UpdatesFailed, &[&e]),
+            UpdateStatus::UpToDate { version } => l10n::fmt(loc, Key::UpdatesUpToDate, &[version]),
+            UpdateStatus::Failed(e) => l10n::fmt(loc, Key::UpdatesFailed, &[e]),
             UpdateStatus::Accepted { version, .. } => {
-                l10n::fmt(loc, Key::UpdatesApproved, &[&version])
+                l10n::fmt(loc, Key::UpdatesApproved, &[version])
             }
             UpdateStatus::Downloading { version, done } => l10n::fmt(
                 loc,
                 Key::UpdatesDownloading,
-                &[&version, &(done / 1_000_000).to_string()],
+                &[version, &(done / 1_000_000).to_string()],
             ),
             UpdateStatus::Ready { version, .. } => {
-                l10n::fmt(loc, Key::UpdatesReadyRestart, &[&version])
+                l10n::fmt(loc, Key::UpdatesReadyRestart, &[version])
             }
         };
         ui.label(RichText::new(status).monospace().color(w::DIM));
@@ -2883,7 +3603,10 @@ impl App {
         if let UpdateStatus::Available { version, .. } = self.update.status() {
             let version = version.clone();
             ui.add_space(6.0);
-            if ui.button(l10n::fmt(loc, Key::BtnDownloadUpdate, &[&version])).clicked() {
+            if ui
+                .button(l10n::fmt(loc, Key::BtnDownloadUpdate, &[&version]))
+                .clicked()
+            {
                 self.update_open = true;
                 self.update.mark_notified();
             }
@@ -2912,17 +3635,19 @@ impl App {
         }
         let mut act = Act::None;
         let mut open = self.update_open;
-        let title: &str;
-        match self.update.status() {
-            UpdateStatus::Available { .. } | UpdateStatus::Accepted { .. } => title = l10n::text(loc, Key::UpdateAvailTitle),
-            UpdateStatus::Downloading { .. } => title = l10n::text(loc, Key::UpdateDownloadingTitle),
-            UpdateStatus::Ready { .. } => title = l10n::text(loc, Key::UpdateRestartTitle),
-            UpdateStatus::Failed(_) => title = l10n::text(loc, Key::UpdateFailedTitle),
+
+        let title: &str = match self.update.status() {
+            UpdateStatus::Available { .. } | UpdateStatus::Accepted { .. } => {
+                l10n::text(loc, Key::UpdateAvailTitle)
+            }
+            UpdateStatus::Downloading { .. } => l10n::text(loc, Key::UpdateDownloadingTitle),
+            UpdateStatus::Ready { .. } => l10n::text(loc, Key::UpdateRestartTitle),
+            UpdateStatus::Failed(_) => l10n::text(loc, Key::UpdateFailedTitle),
             _ => {
                 self.update_open = false;
                 return;
             }
-        }
+        };
         // Fixed id: the title is localized, and window identity must not depend
         // on the locale.
         egui::Window::new(title)
@@ -2938,7 +3663,7 @@ impl App {
                         ui.label(l10n::fmt(
                             loc,
                             Key::UpdateAvailBody,
-                            &[&version, update::current_version()],
+                            &[version, update::current_version()],
                         ));
                         ui.horizontal(|ui| {
                             if ui.button(l10n::text(loc, Key::BtnDownload)).clicked() {
@@ -2953,11 +3678,11 @@ impl App {
                         ui.label(l10n::fmt(
                             loc,
                             Key::UpdateDownloadingBody,
-                            &[&version, &(done / 1_000_000).to_string()],
+                            &[version, &(done / 1_000_000).to_string()],
                         ));
                     }
                     UpdateStatus::Ready { version, .. } => {
-                        ui.label(l10n::fmt(loc, Key::UpdateReadyBody, &[&version]));
+                        ui.label(l10n::fmt(loc, Key::UpdateReadyBody, &[version]));
                         ui.horizontal(|ui| {
                             if ui.button(l10n::text(loc, Key::BtnRestartUpdate)).clicked() {
                                 act = Act::Restart;
@@ -2971,7 +3696,10 @@ impl App {
                         let e = e.clone();
                         // `e` is the canonical English failure detail from the
                         // update worker: painted verbatim inside the localized frame.
-                        ui.label(RichText::new(l10n::fmt(loc, Key::UpdateFailedBody, &[&e])).color(w::WARN));
+                        ui.label(
+                            RichText::new(l10n::fmt(loc, Key::UpdateFailedBody, &[&e]))
+                                .color(w::WARN),
+                        );
                         if ui.button(l10n::text(loc, Key::BtnCheckAgain)).clicked() {
                             act = Act::Recheck;
                         }
@@ -3016,7 +3744,8 @@ impl App {
             _ => return,
         };
         let Some(asset) = core_update::asset_name_for_current_platform() else {
-            self.update.set_failed("updates are not served for this platform".into());
+            self.update
+                .set_failed("updates are not served for this platform".into());
             return;
         };
         let urls = match (
@@ -3025,7 +3754,9 @@ impl App {
         ) {
             (Some(a), Some(s)) => (a, s),
             _ => {
-                self.update.set_failed(format!("release {version} has no download for this platform"));
+                self.update.set_failed(format!(
+                    "release {version} has no download for this platform"
+                ));
                 return;
             }
         };
@@ -3038,12 +3769,16 @@ impl App {
         let extra = update::windows_installer_extra(&version, &assets, &urls.1);
         #[cfg(windows)]
         if extra.is_none() {
-            self.update.set_failed(format!("release {version} has no installer for this platform"));
+            self.update.set_failed(format!(
+                "release {version} has no installer for this platform"
+            ));
             return;
         }
         #[cfg(not(windows))]
         let extra: Option<update::ExtraDownload> = None;
-        store::append_log(&format!("update download start version={version} asset={asset}"));
+        store::append_log(&format!(
+            "update download start version={version} asset={asset}"
+        ));
         self.update
             .start_download(version, urls.0, urls.1, asset.to_string(), dest, extra);
     }
@@ -3097,9 +3832,9 @@ impl App {
         {
             let exe = std::env::current_exe().unwrap_or_default();
             match update::app_bundle_dir(&exe) {
-                None => self.update.set_failed(
-                    "not running from EbbTop.app; replace the bundle by hand".into(),
-                ),
+                None => self
+                    .update
+                    .set_failed("not running from EbbTop.app; replace the bundle by hand".into()),
                 Some(bundle) => match update::apply_update_macos(&path, &bundle) {
                     Ok(()) => {
                         store::append_log(&format!(
@@ -3116,9 +3851,7 @@ impl App {
             let ps1 = update::windows_installer_dest(&version);
             match update::apply_update_windows(&path, &ps1) {
                 Ok(()) => {
-                    store::append_log(&format!(
-                        "update applied version={version}; restarting"
-                    ));
+                    store::append_log(&format!("update applied version={version}; restarting"));
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 Err(e) => self.update.set_failed(e),
@@ -3127,7 +3860,8 @@ impl App {
         #[cfg(not(any(windows, target_os = "macos")))]
         {
             let _ = (ctx, &version, &path);
-            self.update.set_failed("updates are not served for this platform".into());
+            self.update
+                .set_failed("updates are not served for this platform".into());
         }
     }
 }
@@ -3151,7 +3885,11 @@ pub fn style_with(ctx: &egui::Context, compact: bool) {
         s.visuals.extreme_bg_color = w::BG;
         s.visuals.faint_bg_color = Color32::from_rgb(0x1b, 0x1f, 0x26);
         // Density is a spacing constant only — zero per-frame cost.
-        s.spacing.item_spacing = if compact { egui::vec2(4.0, 2.0) } else { egui::vec2(6.0, 3.0) };
+        s.spacing.item_spacing = if compact {
+            egui::vec2(4.0, 2.0)
+        } else {
+            egui::vec2(6.0, 3.0)
+        };
     });
 }
 
@@ -3159,7 +3897,9 @@ pub fn style_with(ctx: &egui::Context, compact: bool) {
 mod tests {
     use super::*;
     use ebbtop_core::client::Event;
-    use ebbtop_core::wire::{DiskInfo, DiskIo, GpuMetrics, Metrics, NetworkInfo, Process, Processes};
+    use ebbtop_core::wire::{
+        DiskInfo, DiskIo, GpuMetrics, Metrics, NetworkInfo, Process, Processes,
+    };
 
     mod a11y;
     mod l10n;
@@ -3169,47 +3909,91 @@ mod tests {
         s.apply(Event::Connected, now);
         for k in 0..70u64 {
             let t = now - (70 - k) * 1000;
-            s.apply(Event::Metrics {
-                m: Metrics {
-                    sampled_at_ms: t,
-                    cpu_total: (k % 100) as f32,
-                    cpu_per_core: (0..12).map(|c| ((c * 7 + k) % 100) as f32).collect(),
-                    mem_total: 32 << 30,
-                    mem_used: 12 << 30,
-                    swap_total: 8 << 30,
-                    swap_used: 1 << 30,
-                    hostname: "k-server".into(),
-                    cpu_temp_c: Some(51.0),
-                    disks: vec![],
-                    networks: vec![
-                        NetworkInfo { name: "lo".into(), received: k * 10, transmitted: k * 10 },
-                        NetworkInfo { name: "wlp59s0".into(), received: k * 1_000_000, transmitted: k * 50_000 },
-                    ],
-                    gpus: Some(vec![GpuMetrics {
-                        name: "NVIDIA GeForce GTX 1650".into(),
-                        utilization_gpu_pct: 37,
-                        mem_used_bytes: 1 << 30,
-                        mem_total_bytes: 4 << 30,
-                        temperature_c: Some(56.0),
-                    }]),
-                    load_avg: Some([1.25, 0.9, 0.7]),
-                    uptime_s: Some(453_201),
-                    disk_io: vec![ebbtop_core::wire::DiskIo { name: "nvme0n1".into(), read_bytes: k * 4_000_000, written_bytes: k * 1_000_000 }],
-                    cpu_model: Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz".into()),
-                    agent_version: Some("0.2.8".into()),
-                    boot_nonce: Some("00112233445566778899aabbccddeeff".into()),
+            s.apply(
+                Event::Metrics {
+                    m: Metrics {
+                        sampled_at_ms: t,
+                        cpu_total: (k % 100) as f32,
+                        cpu_per_core: (0..12).map(|c| ((c * 7 + k) % 100) as f32).collect(),
+                        mem_total: 32 << 30,
+                        mem_used: 12 << 30,
+                        swap_total: 8 << 30,
+                        swap_used: 1 << 30,
+                        hostname: "k-server".into(),
+                        cpu_temp_c: Some(51.0),
+                        disks: vec![],
+                        networks: vec![
+                            NetworkInfo {
+                                name: "lo".into(),
+                                received: k * 10,
+                                transmitted: k * 10,
+                            },
+                            NetworkInfo {
+                                name: "wlp59s0".into(),
+                                received: k * 1_000_000,
+                                transmitted: k * 50_000,
+                            },
+                        ],
+                        gpus: Some(vec![GpuMetrics {
+                            name: "NVIDIA GeForce GTX 1650".into(),
+                            utilization_gpu_pct: 37,
+                            mem_used_bytes: 1 << 30,
+                            mem_total_bytes: 4 << 30,
+                            temperature_c: Some(56.0),
+                        }]),
+                        load_avg: Some([1.25, 0.9, 0.7]),
+                        uptime_s: Some(453_201),
+                        disk_io: vec![ebbtop_core::wire::DiskIo {
+                            name: "nvme0n1".into(),
+                            read_bytes: k * 4_000_000,
+                            written_bytes: k * 1_000_000,
+                        }],
+                        cpu_model: Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz".into()),
+                        agent_version: Some("0.2.8".into()),
+                        boot_nonce: Some("00112233445566778899aabbccddeeff".into()),
+                    },
+                    recv_ms: t + 3,
                 },
-                recv_ms: t + 3,
-            }, t);
+                t,
+            );
         }
         let mut rows: Vec<Process> = (1..=400)
-            .map(|i| Process { pid: i, name: format!("proc{i}"), cpu_usage: 0.1, mem_bytes: 1 << 20,
-                user: if i % 3 == 0 { "root".into() } else { "kyler".into() }, state: "Sleeping".into(),
-                start_time_ms: 1_700_000_000_000 + i as u64, cgroup: String::new() })
+            .map(|i| Process {
+                pid: i,
+                name: format!("proc{i}"),
+                cpu_usage: 0.1,
+                mem_bytes: 1 << 20,
+                user: if i % 3 == 0 {
+                    "root".into()
+                } else {
+                    "kyler".into()
+                },
+                state: "Sleeping".into(),
+                start_time_ms: 1_700_000_000_000 + i as u64,
+                cgroup: String::new(),
+            })
             .collect();
-        rows.push(Process { pid: 4242, name: "hottest-proc".into(), cpu_usage: 87.5, mem_bytes: 3 << 30,
-            user: "kyler".into(), state: "Runnable".into(), start_time_ms: 1_700_000_002_500, cgroup: String::new() });
-        s.apply(Event::Processes { p: Processes { process_count: 401, rows, sampled_at_ms: now - 500 }, recv_ms: now - 497 }, now);
+        rows.push(Process {
+            pid: 4242,
+            name: "hottest-proc".into(),
+            cpu_usage: 87.5,
+            mem_bytes: 3 << 30,
+            user: "kyler".into(),
+            state: "Runnable".into(),
+            start_time_ms: 1_700_000_002_500,
+            cgroup: String::new(),
+        });
+        s.apply(
+            Event::Processes {
+                p: Processes {
+                    process_count: 401,
+                    rows,
+                    sampled_at_ms: now - 500,
+                },
+                recv_ms: now - 497,
+            },
+            now,
+        );
         // Detail for the hottest pid: 30 points of CPU history so the
         // proc-detail graph has something to draw. Only shown when 4242 is
         // selected, so tests without a selection are unaffected.
@@ -3217,40 +4001,54 @@ mod tests {
             use ebbtop_core::wire::{DetailedProcessInfo, ProcessMetricsResponse};
             for k in 0..30u64 {
                 let cached = (now - (30 - k) * 1000) / 1000;
-                s.apply(Event::ProcessDetail {
-                    d: ProcessMetricsResponse {
-                        process: DetailedProcessInfo {
-                            pid: 4242,
-                            name: "hottest-proc".into(),
-                            command: "hottest-proc".into(),
-                            cpu_usage: 60.0 + (k as f32 % 30.0),
-                            mem_bytes: 3 << 30,
-                            virtual_mem_bytes: 4 << 30,
-                            shared_mem_bytes: None,
-                            thread_count: 3,
-                            fd_count: None,
-                            status: "Running".into(),
-                            parent_pid: Some(1),
-                            user_id: 1000,
-                            group_id: 1000,
-                            start_time: 1_762_500_000,
-                            cpu_time_user: 0,
-                            cpu_time_system: 0,
-                            read_bytes: None,
-                            write_bytes: None,
-                            working_directory: None,
-                            executable_path: None,
-                            child_processes: vec![],
-                            threads: vec![],
+                s.apply(
+                    Event::ProcessDetail {
+                        d: ProcessMetricsResponse {
+                            process: DetailedProcessInfo {
+                                pid: 4242,
+                                name: "hottest-proc".into(),
+                                command: "hottest-proc".into(),
+                                cpu_usage: 60.0 + (k as f32 % 30.0),
+                                mem_bytes: 3 << 30,
+                                virtual_mem_bytes: 4 << 30,
+                                shared_mem_bytes: None,
+                                thread_count: 3,
+                                fd_count: None,
+                                status: "Running".into(),
+                                parent_pid: Some(1),
+                                user_id: 1000,
+                                group_id: 1000,
+                                start_time: 1_762_500_000,
+                                cpu_time_user: 0,
+                                cpu_time_system: 0,
+                                read_bytes: None,
+                                write_bytes: None,
+                                working_directory: None,
+                                executable_path: None,
+                                child_processes: vec![],
+                                threads: vec![],
+                            },
+                            cached_at: cached,
                         },
-                        cached_at: cached,
+                        recv_ms: now - (30 - k) * 1000 + 10,
                     },
-                    recv_ms: now - (30 - k) * 1000 + 10,
-                }, now);
+                    now,
+                );
             }
         }
-        s.apply(Event::Disks { d: vec![DiskInfo { name: "/dev/nvme0n1".into(), total: 1 << 40, available: 1 << 39,
-            temperature: None, is_partition: false }], recv_ms: now }, now);
+        s.apply(
+            Event::Disks {
+                d: vec![DiskInfo {
+                    name: "/dev/nvme0n1".into(),
+                    total: 1 << 40,
+                    available: 1 << 39,
+                    temperature: None,
+                    is_partition: false,
+                }],
+                recv_ms: now,
+            },
+            now,
+        );
         *app.shared().lock().unwrap() = s;
     }
 
@@ -3273,22 +4071,92 @@ mod tests {
         };
         let rows = vec![
             mk(1, "systemd", "root", 16 << 20, 0.2, "/init.scope".into()),
-            mk(2730, "postgres", "100998", 640 << 20, 3.4, format!("{base}/davy-pg.service/libpod-payload-{PG}")),
-            mk(2862, "postgres", "100998", 240 << 20, 1.1, format!("{base}/davy-pg.service/libpod-payload-{PG}")),
-            mk(2727, "conmon", "kyler", 3 << 20, 0.4, format!("{base}/davy-pg.service/runtime")),
-            mk(2920, "hindsight-api", "kyler", 900 << 20, 6.2, format!("{base}/davy-hindsight.service/libpod-payload-{HS}")),
-            mk(2855, "postgres", "100998", 180 << 20, 0.9, format!("{base}/davy-hindsight.service/libpod-payload-{HS}")),
-            mk(2853, "conmon", "kyler", 2 << 20, 0.3, format!("{base}/davy-hindsight.service/runtime")),
-            mk(2066, "Runner.Worker", "kyler", 210 << 20, 2.7, format!("{base}/wn-ci-runner-2.service/libpod-payload-{CI}")),
-            mk(2061, "node", "kyler", 300 << 20, 4.0, format!("{base}/wn-ci-runner-2.service/libpod-payload-{CI}")),
-            mk(2106, "hermes", "kyler", 660 << 20, 0.8, format!("{base}/hermes-gateway.service")),
+            mk(
+                2730,
+                "postgres",
+                "100998",
+                640 << 20,
+                3.4,
+                format!("{base}/davy-pg.service/libpod-payload-{PG}"),
+            ),
+            mk(
+                2862,
+                "postgres",
+                "100998",
+                240 << 20,
+                1.1,
+                format!("{base}/davy-pg.service/libpod-payload-{PG}"),
+            ),
+            mk(
+                2727,
+                "conmon",
+                "kyler",
+                3 << 20,
+                0.4,
+                format!("{base}/davy-pg.service/runtime"),
+            ),
+            mk(
+                2920,
+                "hindsight-api",
+                "kyler",
+                900 << 20,
+                6.2,
+                format!("{base}/davy-hindsight.service/libpod-payload-{HS}"),
+            ),
+            mk(
+                2855,
+                "postgres",
+                "100998",
+                180 << 20,
+                0.9,
+                format!("{base}/davy-hindsight.service/libpod-payload-{HS}"),
+            ),
+            mk(
+                2853,
+                "conmon",
+                "kyler",
+                2 << 20,
+                0.3,
+                format!("{base}/davy-hindsight.service/runtime"),
+            ),
+            mk(
+                2066,
+                "Runner.Worker",
+                "kyler",
+                210 << 20,
+                2.7,
+                format!("{base}/wn-ci-runner-2.service/libpod-payload-{CI}"),
+            ),
+            mk(
+                2061,
+                "node",
+                "kyler",
+                300 << 20,
+                4.0,
+                format!("{base}/wn-ci-runner-2.service/libpod-payload-{CI}"),
+            ),
+            mk(
+                2106,
+                "hermes",
+                "kyler",
+                660 << 20,
+                0.8,
+                format!("{base}/hermes-gateway.service"),
+            ),
         ];
         let shared = app.shared();
         let mut s = shared.lock().unwrap();
-        s.apply(Event::Processes {
-            p: Processes { process_count: rows.len() as u64, rows, sampled_at_ms: now },
-            recv_ms: now,
-        }, now);
+        s.apply(
+            Event::Processes {
+                p: Processes {
+                    process_count: rows.len() as u64,
+                    rows,
+                    sampled_at_ms: now,
+                },
+                recv_ms: now,
+            },
+            now,
+        );
     }
 
     fn texts(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
@@ -3321,7 +4189,13 @@ mod tests {
     /// for a fixture that was live when it was applied. Tests that assert the
     /// badge state it here (Some(5_000) for STALE) instead of relying on
     /// scheduling.
-    fn render_age(app: &mut App, w: f32, h: f32, events: Vec<egui::Event>, age_ms: Option<u64>) -> Vec<String> {
+    fn render_age(
+        app: &mut App,
+        w: f32,
+        h: f32,
+        events: Vec<egui::Event>,
+        age_ms: Option<u64>,
+    ) -> Vec<String> {
         let ctx = egui::Context::default();
         style(&ctx);
         let mut last = vec![];
@@ -3335,7 +4209,10 @@ mod tests {
                 }
             }
             let mut input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(w, h),
+                )),
                 focused: true,
                 ..Default::default()
             };
@@ -3394,25 +4271,39 @@ mod tests {
             let bar = fills
                 .iter()
                 .find(|(r, c)| *c == BAR_FILL && r.top() <= 0.5 && (r.width() - w).abs() < 1.0)
-                .unwrap_or_else(|| panic!("{w}x{h}: no bar fill in the palette colour; wide top fills: {wide:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{w}x{h}: no bar fill in the palette colour; wide top fills: {wide:?}")
+                })
                 .0;
-            assert_ne!(BAR_FILL, PAGE_BG, "{w}x{h}: the bar must not be the page fill");
-            assert!(bar.height() >= 24.0, "{w}x{h}: bar reads as a strip, not a bar: {bar:?}");
+            assert_ne!(
+                BAR_FILL, PAGE_BG,
+                "{w}x{h}: the bar must not be the page fill"
+            );
+            assert!(
+                bar.height() >= 24.0,
+                "{w}x{h}: bar reads as a strip, not a bar: {bar:?}"
+            );
             assert!(
                 bar.height() <= 38.0,
                 "{w}x{h}: the bar grew past the 6 px budget (32 -> {}): {bar:?}",
                 bar.height()
             );
             assert!(
-                fills.iter().any(|(r, c)| *c == PAGE_BG && r.width() > w * 0.9 && r.top() >= bar.bottom()),
+                fills
+                    .iter()
+                    .any(|(r, c)| *c == PAGE_BG && r.width() > w * 0.9 && r.top() >= bar.bottom()),
                 "{w}x{h}: page fill must begin below the bar: {fills:?}"
             );
 
             // (1b) 1 px rule on the bar's bottom edge, full window width.
             let rule = fills
                 .iter()
-                .find(|(r, c)| *c == BAR_RULE && (r.height() - 1.0).abs() < 0.01 && (r.width() - w).abs() < 1.0)
-                .unwrap_or_else(|| panic!("{w}x{h}: no full-width bottom rule; wide top fills: {wide:?}"))
+                .find(|(r, c)| {
+                    *c == BAR_RULE && (r.height() - 1.0).abs() < 0.01 && (r.width() - w).abs() < 1.0
+                })
+                .unwrap_or_else(|| {
+                    panic!("{w}x{h}: no full-width bottom rule; wide top fills: {wide:?}")
+                })
                 .0;
             assert!(
                 (rule.bottom() - bar.bottom()).abs() < 0.01,
@@ -3426,7 +4317,10 @@ mod tests {
                 .find(|(s, _)| s == BRAND)
                 .unwrap_or_else(|| panic!("{w}x{h}: no wordmark on the bar: {:?}", texts(&shapes)))
                 .1;
-            assert!(brand.left() < 20.0, "{w}x{h}: wordmark must lead the bar: {brand:?}");
+            assert!(
+                brand.left() < 20.0,
+                "{w}x{h}: wordmark must lead the bar: {brand:?}"
+            );
             let live = labels
                 .iter()
                 .find(|(s, _)| s.contains(" LIVE "))
@@ -3460,7 +4354,10 @@ mod tests {
         assert!(has(&t, " STALE "), "stale chip: {t:?}");
         // Connection reason note.
         app.shared().lock().unwrap().apply(
-            Event::Disconnected { reason: "refused".into(), retry_in: std::time::Duration::from_secs(3) },
+            Event::Disconnected {
+                reason: "refused".into(),
+                retry_in: std::time::Duration::from_secs(3),
+            },
             now,
         );
         let t = render(&mut app, 960.0, 1040.0);
@@ -3469,7 +4366,10 @@ mod tests {
         // CONNECTING, with the attempt note past the first try.
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         app.onboard = None;
-        app.shared().lock().unwrap().apply(Event::Connecting { attempt: 2 }, now);
+        app.shared()
+            .lock()
+            .unwrap()
+            .apply(Event::Connecting { attempt: 2 }, now);
         let t = render(&mut app, 960.0, 1040.0);
         assert!(has(&t, " CONNECTING "), "connecting chip: {t:?}");
         assert!(has(&t, "attempt 2"), "attempt note: {t:?}");
@@ -3492,7 +4392,10 @@ mod tests {
         );
         for (w, h) in [(960.0f32, 1040.0f32), (640.0, 520.0)] {
             let t = render(&mut app, w, h);
-            assert!(has(&t, "kill 4242 refused: pid 1"), "{w}: kill refusal: {t:?}");
+            assert!(
+                has(&t, "kill 4242 refused: pid 1"),
+                "{w}: kill refusal: {t:?}"
+            );
         }
 
         // Release prompt and its Update button. Store builds have neither:
@@ -3548,12 +4451,21 @@ mod tests {
         assert!(app.cfg.compact, "the Dense toggle must still flip density");
         assert_eq!(app.cfg.window_s, 60, "setup: the 60 s window is active");
         click(&ctx, &mut app, "5m");
-        assert_eq!(app.cfg.window_s, 300, "the 5m toggle must still switch the window");
+        assert_eq!(
+            app.cfg.window_s, 300,
+            "the 5m toggle must still switch the window"
+        );
         click(&ctx, &mut app, "60s");
-        assert_eq!(app.cfg.window_s, 60, "the 60s toggle must still switch the window");
+        assert_eq!(
+            app.cfg.window_s, 60,
+            "the 60s toggle must still switch the window"
+        );
         assert!(!app.settings_open, "setup: settings closed");
         click(&ctx, &mut app, "Settings");
-        assert!(app.settings_open, "the Settings button must still open settings");
+        assert!(
+            app.settings_open,
+            "the Settings button must still open settings"
+        );
 
         // The bar's Update button still opens the update dialog. draw() pops
         // that dialog on its own for a fresh version, so close it first and
@@ -3570,9 +4482,15 @@ mod tests {
             frame(&ctx, &mut app, w, h, vec![]);
             app.update_open = false;
             let t = texts(&frame(&ctx, &mut app, w, h, vec![]));
-            assert!(has(&t, "update v99.7.0 ready"), "update prompt in the bar: {t:?}");
+            assert!(
+                has(&t, "update v99.7.0 ready"),
+                "update prompt in the bar: {t:?}"
+            );
             click(&ctx, &mut app, "Update");
-            assert!(app.update_open, "the bar's Update button must still open the dialog");
+            assert!(
+                app.update_open,
+                "the bar's Update button must still open the dialog"
+            );
         }
     }
 
@@ -3585,7 +4503,10 @@ mod tests {
             let has = |s: &str| t.iter().any(|x| x.contains(s));
             assert!(has(" LIVE "), "{w}: status not LIVE: {t:?}");
             assert!(has("k-server"), "{w}");
-            assert!(has("hottest-proc"), "{w}: top cpu process not first visible row");
+            assert!(
+                has("hottest-proc"),
+                "{w}: top cpu process not first visible row"
+            );
             assert!(has("87.5"), "{w}");
             assert!(has("C11"), "{w}: per-core meters missing");
             assert!(has("wlp59s0"), "{w}: busiest non-lo iface not default");
@@ -3596,30 +4517,59 @@ mod tests {
             // At the minimum size the disk and GPU boxes sit in the scrolled
             // part of the upper area, so check them only when wide enough.
             if w >= 960.0 {
-                assert!(t.iter().any(|x| x.contains("nvme0n1 r")), "{w}: busiest-disk graph missing: {t:?}");
-                assert!(t.iter().any(|x| x.contains("GTX 1650")), "{w}: GPU name missing");
+                assert!(
+                    t.iter().any(|x| x.contains("nvme0n1 r")),
+                    "{w}: busiest-disk graph missing: {t:?}"
+                );
+                assert!(
+                    t.iter().any(|x| x.contains("GTX 1650")),
+                    "{w}: GPU name missing"
+                );
                 assert!(t.iter().any(|x| x.contains("37%")), "{w}: GPU load missing");
-                assert!(t.iter().any(|x| x.contains("56°C")), "{w}: GPU temp missing");
-                assert!(t.iter().any(|x| x.contains("1.0 GiB / 4.0 GiB")), "{w}: VRAM missing");
+                assert!(
+                    t.iter().any(|x| x.contains("56°C")),
+                    "{w}: GPU temp missing"
+                );
+                assert!(
+                    t.iter().any(|x| x.contains("1.0 GiB / 4.0 GiB")),
+                    "{w}: VRAM missing"
+                );
             }
         }
     }
 
     #[test]
     fn collapsed_panels_hide_content_but_keep_title() {
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
-        cfg.collapsed_gpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            collapsed_gpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 1920.0, 1080.0);
-        assert!(t.iter().any(|x| x.contains("> cpu")), "collapsed cpu title missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("69.0%")), "cpu content should be hidden");
-        assert!(t.iter().any(|x| x.contains("> gpu")), "collapsed gpu title missing");
+        assert!(
+            t.iter().any(|x| x.contains("> cpu")),
+            "collapsed cpu title missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("69.0%")),
+            "cpu content should be hidden"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("> gpu")),
+            "collapsed gpu title missing"
+        );
         // The header line itself carries the model (stays visible collapsed),
         // so the body is what has to disappear: per-GPU row label and VRAM.
-        assert!(!t.iter().any(|x| x.contains("VRAM")), "gpu content should be hidden: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("G0 ")), "gpu body row should be hidden: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("VRAM")),
+            "gpu content should be hidden: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("G0 ")),
+            "gpu body row should be hidden: {t:?}"
+        );
         // Expand again: titles flip back to v.
         app.cfg.collapsed_cpu = false;
         app.cfg.collapsed_gpu = false;
@@ -3633,9 +4583,15 @@ mod tests {
     /// Matching on the boundary keeps `cpu` from also matching `cpu-something`.
     fn header_text(t: &[String], kind: &str) -> Option<String> {
         t.iter()
-            .find(|s| ["> ", "v "].iter().any(|a| s.strip_prefix(a).is_some_and(|r| {
-                r == kind || r.strip_prefix(kind).is_some_and(|rest| rest.starts_with(" · "))
-            })))
+            .find(|s| {
+                ["> ", "v "].iter().any(|a| {
+                    s.strip_prefix(a).is_some_and(|r| {
+                        r == kind
+                            || r.strip_prefix(kind)
+                                .is_some_and(|rest| rest.starts_with(" · "))
+                    })
+                })
+            })
             .cloned()
     }
 
@@ -3644,27 +4600,46 @@ mod tests {
     /// `> gpu` with no model anywhere while collapsed.
     #[test]
     fn gpu_header_shows_model_when_collapsed() {
-        let mut cfg = Config::default();
-        cfg.collapsed_gpu = true;
+        let cfg = Config {
+            collapsed_gpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 1920.0, 1080.0);
         let h = header_text(&t, "gpu").unwrap_or_else(|| panic!("gpu header missing: {t:?}"));
-        assert!(h.contains("GTX 1650"), "collapsed gpu header must name the model: {h:?}");
+        assert!(
+            h.contains("GTX 1650"),
+            "collapsed gpu header must name the model: {h:?}"
+        );
         // Same short form the body rows use: the "NVIDIA " prefix is stripped.
-        assert!(!h.contains("NVIDIA"), "header must use the body's short form: {h:?}");
-        assert!(h.starts_with("> gpu"), "collapsed header keeps the > glyph: {h:?}");
+        assert!(
+            !h.contains("NVIDIA"),
+            "header must use the body's short form: {h:?}"
+        );
+        assert!(
+            h.starts_with("> gpu"),
+            "collapsed header keeps the > glyph: {h:?}"
+        );
         // The body really is hidden (the model in the header is all that is left).
-        assert!(!t.iter().any(|x| x.contains("VRAM")), "collapsed gpu body leaked: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("VRAM")),
+            "collapsed gpu body leaked: {t:?}"
+        );
         // Expanded: the header keeps the same model.
         app.cfg.collapsed_gpu = false;
         let t = render(&mut app, 1920.0, 1080.0);
         let h = header_text(&t, "gpu").expect("gpu header while expanded");
-        assert!(h.starts_with("v gpu") && h.contains("GTX 1650"), "expanded header: {h:?}");
+        assert!(
+            h.starts_with("v gpu") && h.contains("GTX 1650"),
+            "expanded header: {h:?}"
+        );
         // Invariant 6: the per-GPU body row keeps its own `G0` label and the
         // full name (tooltip source) is untouched by the header going short.
-        assert!(t.iter().any(|x| x.contains("G0 GeForce GTX 1650")),
-            "per-GPU body row must keep its G0 label: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("G0 GeForce GTX 1650")),
+            "per-GPU body row must keep its G0 label: {t:?}"
+        );
     }
 
     /// CPU model rides on the header line and survives collapsing, in both
@@ -3672,18 +4647,29 @@ mod tests {
     /// `panel`) leaves this compiling and fails on the model assertion.
     #[test]
     fn cpu_header_shows_model_when_collapsed() {
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 1920.0, 1080.0);
         let h = header_text(&t, "cpu").unwrap_or_else(|| panic!("cpu header missing: {t:?}"));
-        assert!(h.starts_with("> cpu"), "collapsed header keeps the > glyph: {h:?}");
-        assert!(h.contains("i7-9750H"), "collapsed cpu header must name the model: {h:?}");
+        assert!(
+            h.starts_with("> cpu"),
+            "collapsed header keeps the > glyph: {h:?}"
+        );
+        assert!(
+            h.contains("i7-9750H"),
+            "collapsed cpu header must name the model: {h:?}"
+        );
         app.cfg.collapsed_cpu = false;
         let t = render(&mut app, 1920.0, 1080.0);
         let h = header_text(&t, "cpu").expect("cpu header while expanded");
-        assert!(h.starts_with("v cpu") && h.contains("i7-9750H"), "expanded header: {h:?}");
+        assert!(
+            h.starts_with("v cpu") && h.contains("i7-9750H"),
+            "expanded header: {h:?}"
+        );
     }
 
     /// The three sizes `screenshot` writes. The model must be on both headers
@@ -3697,8 +4683,14 @@ mod tests {
             let t = render(&mut app, w, h);
             let cpu = header_text(&t, "cpu").unwrap_or_else(|| panic!("{w}x{h}: no cpu header"));
             let gpu = header_text(&t, "gpu").unwrap_or_else(|| panic!("{w}x{h}: no gpu header"));
-            assert!(cpu.contains("i7-9750H"), "{w}x{h}: cpu model missing: {cpu:?}");
-            assert!(gpu.contains("GTX 1650"), "{w}x{h}: gpu model missing: {gpu:?}");
+            assert!(
+                cpu.contains("i7-9750H"),
+                "{w}x{h}: cpu model missing: {cpu:?}"
+            );
+            assert!(
+                gpu.contains("GTX 1650"),
+                "{w}x{h}: gpu model missing: {gpu:?}"
+            );
         }
     }
 
@@ -3707,8 +4699,10 @@ mod tests {
     /// and the window still renders end to end.
     #[test]
     fn headers_show_label_alone_without_model() {
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         {
@@ -3719,18 +4713,39 @@ mod tests {
             m.gpus = None; // no GPU on this host
         }
         let t = render(&mut app, 1920.0, 1080.0);
-        assert_eq!(header_text(&t, "cpu").as_deref(), Some("> cpu"),
-            "absent model must leave the bare label, no dangling separator: {t:?}");
-        assert!(header_text(&t, "gpu").is_none(), "no gpu panel without GPUs: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("None")), "placeholder leaked: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("unknown")), "placeholder leaked: {t:?}");
+        assert_eq!(
+            header_text(&t, "cpu").as_deref(),
+            Some("> cpu"),
+            "absent model must leave the bare label, no dangling separator: {t:?}"
+        );
+        assert!(
+            header_text(&t, "gpu").is_none(),
+            "no gpu panel without GPUs: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("None")),
+            "placeholder leaked: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("unknown")),
+            "placeholder leaked: {t:?}"
+        );
         // End to end still renders: the window, and the cpu body once expanded.
-        assert!(t.iter().any(|x| x.contains("k-server")), "window must still render: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("k-server")),
+            "window must still render: {t:?}"
+        );
         app.cfg.collapsed_cpu = false;
         let t = render(&mut app, 1920.0, 1080.0);
-        assert_eq!(header_text(&t, "cpu").as_deref(), Some("v cpu"),
-            "expanded header without a model is still the bare label: {t:?}");
-        assert!(t.iter().any(|x| x.contains("C11")), "cpu body must still render: {t:?}");
+        assert_eq!(
+            header_text(&t, "cpu").as_deref(),
+            Some("v cpu"),
+            "expanded header without a model is still the bare label: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("C11")),
+            "cpu body must still render: {t:?}"
+        );
     }
 
     /// A header click still toggles the panel after the label gained the model:
@@ -3751,7 +4766,10 @@ mod tests {
             .into_iter()
             .find(|(s, _)| s.starts_with("v cpu"))
             .expect("cpu header");
-        assert!(text.contains("i7-9750H"), "header carries the model: {text:?}");
+        assert!(
+            text.contains("i7-9750H"),
+            "header carries the model: {text:?}"
+        );
         let target = egui::pos2(rect.right() - 6.0, rect.center().y);
 
         let click = |ctx: &egui::Context, app: &mut App| {
@@ -3769,18 +4787,28 @@ mod tests {
             frame(ctx, app, w, h, vec![])
         };
         let s = click(&ctx, &mut app);
-        assert!(app.cfg.collapsed_cpu, "clicking the header must collapse the cpu panel");
+        assert!(
+            app.cfg.collapsed_cpu,
+            "clicking the header must collapse the cpu panel"
+        );
         let t = texts(&s);
         let h_text = header_text(&t, "cpu").expect("collapsed cpu header");
-        assert!(h_text.starts_with("> cpu") && h_text.contains("i7-9750H"),
-            "collapsed after the click, model still visible: {h_text:?}");
+        assert!(
+            h_text.starts_with("> cpu") && h_text.contains("i7-9750H"),
+            "collapsed after the click, model still visible: {h_text:?}"
+        );
 
         let s = click(&ctx, &mut app);
-        assert!(!app.cfg.collapsed_cpu, "a second click must expand it again");
+        assert!(
+            !app.cfg.collapsed_cpu,
+            "a second click must expand it again"
+        );
         let t = texts(&s);
         let h_text = header_text(&t, "cpu").expect("expanded cpu header");
-        assert!(h_text.starts_with("v cpu") && h_text.contains("i7-9750H"),
-            "expanded after the click, model still visible: {h_text:?}");
+        assert!(
+            h_text.starts_with("v cpu") && h_text.contains("i7-9750H"),
+            "expanded after the click, model still visible: {h_text:?}"
+        );
     }
 
     /// Height of the text line box each rendered `Shape::Text` occupies, in
@@ -3819,7 +4847,8 @@ mod tests {
             style(&ctx);
             let boxes = line_boxes(&frame(&ctx, &mut app, w, h, vec![]));
             let height = |prefix: &str| -> f32 {
-                boxes.iter()
+                boxes
+                    .iter()
                     .find(|(t, _)| t.starts_with(prefix))
                     .unwrap_or_else(|| panic!("{w}x{h}: no rendered text starting {prefix:?}"))
                     .1
@@ -3855,7 +4884,10 @@ mod tests {
             .into_iter()
             .find(|(s, _)| s.starts_with("v cpu"))
             .expect("cpu title");
-        assert!(text.contains("i7-9750H"), "title carries the model: {text:?}");
+        assert!(
+            text.contains("i7-9750H"),
+            "title carries the model: {text:?}"
+        );
         let target = egui::pos2(rect.left() + 12.0, rect.center().y);
 
         let click = |ctx: &egui::Context, app: &mut App| {
@@ -3871,7 +4903,10 @@ mod tests {
             frame(ctx, app, w, h, vec![])
         };
         let s = click(&ctx, &mut app);
-        assert!(app.cfg.collapsed_cpu, "clicking the title must collapse the cpu panel");
+        assert!(
+            app.cfg.collapsed_cpu,
+            "clicking the title must collapse the cpu panel"
+        );
         let t = texts(&s);
         let h_text = header_text(&t, "cpu").expect("collapsed cpu title");
         assert!(
@@ -3879,7 +4914,10 @@ mod tests {
             "collapsed title keeps the > glyph and the model: {h_text:?}"
         );
         let s = click(&ctx, &mut app);
-        assert!(!app.cfg.collapsed_cpu, "a second title click must expand it again");
+        assert!(
+            !app.cfg.collapsed_cpu,
+            "a second title click must expand it again"
+        );
         let t = texts(&s);
         let h_text = header_text(&t, "cpu").expect("expanded cpu title");
         assert!(
@@ -3907,7 +4945,10 @@ mod tests {
         let mut icon = egui::CursorIcon::Default;
         for _ in 0..3 {
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(w, h),
+                )),
                 focused: true,
                 events: vec![egui::Event::PointerMoved(target)],
                 ..Default::default()
@@ -3949,8 +4990,14 @@ mod tests {
                     && r.width() > 20.0
             })
         };
-        assert!(under(w::LINE, w::TITLE_RULE), "missing LINE rule under the title: {fills:?}");
-        assert!(under(w::ACCENT, 1.0), "missing ACCENT hairline under the title");
+        assert!(
+            under(w::LINE, w::TITLE_RULE),
+            "missing LINE rule under the title: {fills:?}"
+        );
+        assert!(
+            under(w::ACCENT, 1.0),
+            "missing ACCENT hairline under the title"
+        );
     }
 
     /// Invariant 3: the header row grew by at most 4 pt. Measured where it
@@ -3975,7 +5022,10 @@ mod tests {
             .into_iter()
             .find(|(s, _)| s.starts_with("v cpu"))
             .expect("cpu title");
-        assert!(title_text.contains("i7-9750H"), "title carries the model: {title_text:?}");
+        assert!(
+            title_text.contains("i7-9750H"),
+            "title carries the model: {title_text:?}"
+        );
         // The first line of the cpu body: the total-usage readout.
         let body_top = text_rects(&shapes)
             .iter()
@@ -3998,12 +5048,20 @@ mod tests {
         // still fits there), so elision is genuinely exercised.
         const LONG: &str = "Intel(R) Xeon(R) Platinum 8480C CPU @ 2.00GHz \
 (preproduction qualification sample, 2 sockets, microcode 0x2b000590, all-core turbo 3.80GHz)";
-        let mut cfg = Config::default();
-        cfg.collapsed_cpu = true;
-        cfg.collapsed_gpu = true;
+        let cfg = Config {
+            collapsed_cpu: true,
+            collapsed_gpu: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
-        app.shared().lock().unwrap().metrics.as_mut().unwrap().cpu_model = Some(LONG.into());
+        app.shared()
+            .lock()
+            .unwrap()
+            .metrics
+            .as_mut()
+            .unwrap()
+            .cpu_model = Some(LONG.into());
 
         let ctx = egui::Context::default();
         style(&ctx);
@@ -4033,15 +5091,27 @@ mod tests {
 
         let (rows, height) = header(&frame(&ctx, &mut app, w, h, vec![]));
         assert_eq!(rows.len(), 1, "header must stay one row: {rows:?}");
-        assert!(rows[0].ends_with('…'), "over-long model must elide: {:?}", rows[0]);
+        assert!(
+            rows[0].ends_with('…'),
+            "over-long model must elide: {:?}",
+            rows[0]
+        );
 
         // Row height is the plain label's row height: the model does not grow
         // it, so siblings below the header never shift at the minimum size.
-        app.shared().lock().unwrap().metrics.as_mut().unwrap().cpu_model = None;
+        app.shared()
+            .lock()
+            .unwrap()
+            .metrics
+            .as_mut()
+            .unwrap()
+            .cpu_model = None;
         let (bare, bare_height) = header(&frame(&ctx, &mut app, w, h, vec![]));
         assert_eq!(bare, vec!["> cpu".to_string()]);
-        assert!((height - bare_height).abs() < 0.5,
-            "header row grew: {bare_height} -> {height}");
+        assert!(
+            (height - bare_height).abs() < 0.5,
+            "header row grew: {bare_height} -> {height}"
+        );
     }
 
     #[test]
@@ -4065,16 +5135,33 @@ mod tests {
         assert!(t.iter().any(|x| x.contains(" STALE ")), "{t:?}");
         assert!(t.iter().any(|x| x == "133 of 401"));
         app.shared().lock().unwrap().apply(
-            Event::Disconnected { reason: "connect timed out".into(), retry_in: Duration::from_secs(2) }, now);
+            Event::Disconnected {
+                reason: "connect timed out".into(),
+                retry_in: Duration::from_secs(2),
+            },
+            now,
+        );
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains(" DOWN ")));
-        assert!(t.iter().any(|x| x.contains("connect timed out; retry 2.0s")));
+        assert!(
+            t.iter()
+                .any(|x| x.contains("connect timed out; retry 2.0s"))
+        );
     }
 
     #[test]
     fn keyboard_selection_moves_in_filtered_order() {
         fn proc(pid: u32) -> Process {
-            Process { pid, name: format!("p{pid}"), cpu_usage: 0.0, mem_bytes: 0, user: "kyler".into(), state: "Sleeping".into(), start_time_ms: 1, cgroup: String::new() }
+            Process {
+                pid,
+                name: format!("p{pid}"),
+                cpu_usage: 0.0,
+                mem_bytes: 0,
+                user: "kyler".into(),
+                state: "Sleeping".into(),
+                start_time_ms: 1,
+                cgroup: String::new(),
+            }
         }
         let rows = vec![proc(10), proc(20), proc(30)];
         let idx = vec![0, 1, 2];
@@ -4098,14 +5185,23 @@ mod tests {
         app.token_edit = "supersecret".into();
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("no token saved")));
-        assert!(!t.iter().any(|x| x.contains("supersecret")), "password field leaked");
+        assert!(
+            !t.iter().any(|x| x.contains("supersecret")),
+            "password field leaked"
+        );
     }
 
     fn two_source_cfg() -> Config {
         Config {
             sources: vec![
-                store::Source { name: "k-server".into(), url: "ws://10.0.0.1:1/ws".into() },
-                store::Source { name: "lab".into(), url: "ws://10.0.0.2:1/ws".into() },
+                store::Source {
+                    name: "k-server".into(),
+                    url: "ws://10.0.0.1:1/ws".into(),
+                },
+                store::Source {
+                    name: "lab".into(),
+                    url: "ws://10.0.0.2:1/ws".into(),
+                },
             ],
             active: 1,
             ..Config::default()
@@ -4144,7 +5240,10 @@ mod tests {
         // code called use_active_source here and blocked forever.
         let shared = app.shared();
         let _held = shared.lock().unwrap();
-        assert!(shared.try_lock().is_err(), "precondition: draw holds the lock");
+        assert!(
+            shared.try_lock().is_err(),
+            "precondition: draw holds the lock"
+        );
         app.pending_source = Some(1);
         drop(_held);
         // draw()'s post-drop apply, verbatim.
@@ -4171,8 +5270,14 @@ mod tests {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         app.settings_open = true;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("Sources")), "sources tab missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("Display")), "display tab missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("Sources")),
+            "sources tab missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("Display")),
+            "display tab missing: {t:?}"
+        );
     }
 
     /// Spin a locally injected check to completion without touching the
@@ -4195,9 +5300,18 @@ mod tests {
         app.settings_open = true;
         app.settings_tab = SettingsTab::Updates;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("Updates")), "updates tab missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("Check for updates")), "manual check missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains(version::current_version())), "current version missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("Updates")),
+            "updates tab missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("Check for updates")),
+            "manual check missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains(version::current_version())),
+            "current version missing: {t:?}"
+        );
     }
 
     /// Store builds have no updater at all (`--features store`): the Updates
@@ -4256,22 +5370,46 @@ mod tests {
         settle_update(&mut app);
         // The frame pops the dialog on its own; no manual open needed.
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("v99.7.0")), "new version missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("Download update")), "accept missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("Later")), "decline missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("update v99.7.0 ready")), "status note missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("v99.7.0")),
+            "new version missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("Download update")),
+            "accept missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("Later")),
+            "decline missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("update v99.7.0 ready")),
+            "status note missing: {t:?}"
+        );
     }
 
     #[cfg(not(feature = "store"))]
     #[test]
     fn downloading_update_shows_progress() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
-        app.update.test_set_status(UpdateStatus::Downloading { version: "v9.9.9".into(), done: 3_000_000 });
+        app.update.test_set_status(UpdateStatus::Downloading {
+            version: "v9.9.9".into(),
+            done: 3_000_000,
+        });
         app.update_open = true;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("Downloading")), "progress missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("v9.9.9")), "version missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("Restart to update")), "no restart while downloading: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("Downloading")),
+            "progress missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("v9.9.9")),
+            "version missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("Restart to update")),
+            "no restart while downloading: {t:?}"
+        );
     }
 
     #[cfg(not(feature = "store"))]
@@ -4284,8 +5422,14 @@ mod tests {
         });
         app.update_open = true;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("Restart to update")), "restart missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("v9.9.9")), "version missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("Restart to update")),
+            "restart missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("v9.9.9")),
+            "version missing: {t:?}"
+        );
     }
 
     #[cfg(not(feature = "store"))]
@@ -4296,9 +5440,18 @@ mod tests {
         app.update.start(|| Err("offline".into()));
         settle_update(&mut app);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("update check failed")), "quiet note missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains(" LIVE ")), "app should run as before: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("Download update")), "no dialog on failure: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("update check failed")),
+            "quiet note missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains(" LIVE ")),
+            "app should run as before: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("Download update")),
+            "no dialog on failure: {t:?}"
+        );
     }
 
     #[test]
@@ -4307,10 +5460,19 @@ mod tests {
         app.settings_open = true;
         app.settings_tab = SettingsTab::Sources;
         let t = render(&mut app, 960.0, 1000.0);
-        for s in ["k-server", "lab", "ws://10.0.0.1:1/ws", "ws://10.0.0.2:1/ws", "Test"] {
+        for s in [
+            "k-server",
+            "lab",
+            "ws://10.0.0.1:1/ws",
+            "ws://10.0.0.2:1/ws",
+            "Test",
+        ] {
             assert!(t.iter().any(|x| x.contains(s)), "{s} missing: {t:?}");
         }
-        assert!(!t.iter().any(|x| x.contains("Top height")), "display controls leak: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("Top height")),
+            "display controls leak: {t:?}"
+        );
     }
 
     #[test]
@@ -4322,7 +5484,10 @@ mod tests {
         for s in ["Panels", "Top height", "log scale"] {
             assert!(t.iter().any(|x| x.contains(s)), "{s} missing: {t:?}");
         }
-        assert!(!t.iter().any(|x| x.contains("Agent URL")), "connection fields leak: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("Agent URL")),
+            "connection fields leak: {t:?}"
+        );
     }
 
     #[test]
@@ -4331,8 +5496,14 @@ mod tests {
         app.settings_open = true;
         app.settings_tab = SettingsTab::Connection;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("Agent URL")), "agent url missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("Top height")), "display controls leak: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("Agent URL")),
+            "agent url missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("Top height")),
+            "display controls leak: {t:?}"
+        );
     }
 
     #[test]
@@ -4347,7 +5518,15 @@ mod tests {
     fn onboarding_renders_welcome_fields() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         let t = render(&mut app, 960.0, 1000.0);
-        for s in ["Welcome", "Name", "URL", "Token", "Test", "Save and connect", "Skip"] {
+        for s in [
+            "Welcome",
+            "Name",
+            "URL",
+            "Token",
+            "Test",
+            "Save and connect",
+            "Skip",
+        ] {
             assert!(t.iter().any(|x| x.contains(s)), "{s} missing: {t:?}");
         }
     }
@@ -4357,14 +5536,23 @@ mod tests {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         app.onboard.as_mut().unwrap().token = "supersecret".into();
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("supersecret")), "password field leaked");
+        assert!(
+            !t.iter().any(|x| x.contains("supersecret")),
+            "password field leaked"
+        );
     }
 
     #[test]
     fn onboarding_test_validates_fields() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
         app.onboard_test();
-        let m = app.onboard.as_ref().unwrap().msg.clone().unwrap_or_default();
+        let m = app
+            .onboard
+            .as_ref()
+            .unwrap()
+            .msg
+            .clone()
+            .unwrap_or_default();
         assert!(m.contains("name"), "unhelpful: {m}");
     }
 
@@ -4393,14 +5581,18 @@ mod tests {
     #[test]
     fn validate_source_rejects_empty_name() {
         let app = App::with(Config::default(), None, TokenSource::Missing, None);
-        let e = app.validate_source("", "ws://h/ws").expect_err("empty name must fail");
+        let e = app
+            .validate_source("", "ws://h/ws")
+            .expect_err("empty name must fail");
         assert!(e.contains("name"), "unhelpful: {e}");
     }
 
     #[test]
     fn source_add_rejects_bad_url() {
         let mut app = App::with(Config::default(), None, TokenSource::Missing, None);
-        let e = app.add_source("x", "http://not-ws/ws").expect_err("bad url must fail");
+        let e = app
+            .add_source("x", "http://not-ws/ws")
+            .expect_err("bad url must fail");
         assert!(e.contains("ws://"), "unhelpful: {e}");
         assert!(app.cfg.sources.is_empty());
     }
@@ -4408,7 +5600,9 @@ mod tests {
     #[test]
     fn source_add_rejects_duplicate_name() {
         let mut app = App::with(two_source_cfg(), None, TokenSource::Missing, None);
-        let e = app.add_source("lab", "ws://10.0.0.9:1/ws").expect_err("dup name must fail");
+        let e = app
+            .add_source("lab", "ws://10.0.0.9:1/ws")
+            .expect_err("dup name must fail");
         assert!(e.contains("lab"), "unhelpful: {e}");
         assert_eq!(app.cfg.sources.len(), 2);
     }
@@ -4424,7 +5618,9 @@ mod tests {
     #[test]
     fn validate_source_normalizes_bare_host() {
         let app = App::with(Config::default(), None, TokenSource::Missing, None);
-        let normalized = app.validate_source("h", "myserver").expect("bare host must pass");
+        let normalized = app
+            .validate_source("h", "myserver")
+            .expect("bare host must pass");
         assert_eq!(normalized, "ws://myserver:45976/ws");
     }
 
@@ -4439,15 +5635,28 @@ mod tests {
         }
         let ctx = egui::Context::default();
         app.onboard_save(&ctx);
-        assert!(app.onboard.is_some(), "save must not complete before a green Test");
+        assert!(
+            app.onboard.is_some(),
+            "save must not complete before a green Test"
+        );
         assert!(app.cfg.sources.is_empty(), "no source without a green Test");
-        let m = app.onboard.as_ref().unwrap().msg.clone().unwrap_or_default();
+        let m = app
+            .onboard
+            .as_ref()
+            .unwrap()
+            .msg
+            .clone()
+            .unwrap_or_default();
         assert!(m.contains("Test"), "unhelpful: {m}");
     }
 
     fn ring_with_rate(rx: f64, tx: f64) -> Ring<NetRate> {
         let mut r = Ring::new(8);
-        r.push(NetRate { t_ms: 1, rx_bps: rx, tx_bps: tx });
+        r.push(NetRate {
+            t_ms: 1,
+            rx_bps: rx,
+            tx_bps: tx,
+        });
         r
     }
 
@@ -4455,30 +5664,58 @@ mod tests {
     fn status_bar_shows_source_picker_with_two_sources() {
         let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("source")), "picker label missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("lab")), "active name missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("source")),
+            "picker label missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("lab")),
+            "active name missing: {t:?}"
+        );
     }
 
     #[test]
     fn status_bar_names_source_without_metrics() {
-        let mut cfg = Config::default();
-        cfg.sources = vec![store::Source { name: "solo".into(), url: "ws://s/ws".into() }];
+        let cfg = Config {
+            sources: vec![store::Source {
+                name: "solo".into(),
+                url: "ws://s/ws".into(),
+            }],
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("solo")), "source name missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("solo")),
+            "source name missing: {t:?}"
+        );
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("no source")), "empty state missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("k-server")), "legacy name leaks: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("no source")),
+            "empty state missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("k-server")),
+            "legacy name leaks: {t:?}"
+        );
     }
 
     #[test]
     fn status_bar_hides_picker_with_one_source() {
-        let mut cfg = Config::default();
-        cfg.sources = vec![store::Source { name: "solo".into(), url: "ws://s/ws".into() }];
+        let cfg = Config {
+            sources: vec![store::Source {
+                name: "solo".into(),
+                url: "ws://s/ws".into(),
+            }],
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("source")), "picker should hide: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("source")),
+            "picker should hide: {t:?}"
+        );
     }
 
     /// Minimal live state with two disks carrying I/O, so the picker has
@@ -4489,32 +5726,43 @@ mod tests {
         s.apply(Event::Connected, now);
         for k in 0..5u64 {
             let t = now - (5 - k) * 1000;
-            s.apply(Event::Metrics {
-                m: Metrics {
-                    sampled_at_ms: t,
-                    cpu_total: 10.0,
-                    cpu_per_core: vec![10.0],
-                    mem_total: 8 << 30,
-                    mem_used: 4 << 30,
-                    swap_total: 0,
-                    swap_used: 0,
-                    hostname: "t".into(),
-                    cpu_temp_c: None,
-                    disks: vec![],
-                    networks: vec![],
-                    gpus: None,
-                    load_avg: None,
-                    uptime_s: None,
-                    disk_io: vec![
-                        DiskIo { name: "nvme0n1".into(), read_bytes: k * 1_000_000, written_bytes: k * 100_000 },
-                        DiskIo { name: "sda".into(), read_bytes: k * 100, written_bytes: k * 10 },
-                    ],
-                    cpu_model: None,
-                    agent_version: Some("0.2.8".into()),
-                    boot_nonce: Some("00112233445566778899aabbccddeeff".into()),
+            s.apply(
+                Event::Metrics {
+                    m: Metrics {
+                        sampled_at_ms: t,
+                        cpu_total: 10.0,
+                        cpu_per_core: vec![10.0],
+                        mem_total: 8 << 30,
+                        mem_used: 4 << 30,
+                        swap_total: 0,
+                        swap_used: 0,
+                        hostname: "t".into(),
+                        cpu_temp_c: None,
+                        disks: vec![],
+                        networks: vec![],
+                        gpus: None,
+                        load_avg: None,
+                        uptime_s: None,
+                        disk_io: vec![
+                            DiskIo {
+                                name: "nvme0n1".into(),
+                                read_bytes: k * 1_000_000,
+                                written_bytes: k * 100_000,
+                            },
+                            DiskIo {
+                                name: "sda".into(),
+                                read_bytes: k * 100,
+                                written_bytes: k * 10,
+                            },
+                        ],
+                        cpu_model: None,
+                        agent_version: Some("0.2.8".into()),
+                        boot_nonce: Some("00112233445566778899aabbccddeeff".into()),
+                    },
+                    recv_ms: t + 20,
                 },
-                recv_ms: t + 20,
-            }, now);
+                now,
+            );
         }
         *app.shared().lock().unwrap() = s;
     }
@@ -4524,9 +5772,15 @@ mod tests {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         two_disk_state(&app);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("auto")), "disk auto missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("auto")),
+            "disk auto missing: {t:?}"
+        );
         // The picker costs no rows: graphs stay above the fold with it.
-        assert!(t.iter().any(|x| x.contains("nvme0n1 r")), "busiest graph missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("nvme0n1 r")),
+            "busiest graph missing: {t:?}"
+        );
     }
 
     #[test]
@@ -4534,8 +5788,14 @@ mod tests {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("auto")), "picker should hide: {t:?}");
-        assert!(t.iter().any(|x| x.contains("nvme0n1 r")), "graph missing: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("auto")),
+            "picker should hide: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("nvme0n1 r")),
+            "graph missing: {t:?}"
+        );
     }
 
     #[test]
@@ -4574,16 +5834,34 @@ mod tests {
         fake_state(&app, client::now_ms());
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("proc-detail")), "detail title missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("4242 hottest-proc")), "detail pid/name missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("proc-detail")),
+            "detail title missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("4242 hottest-proc")),
+            "detail pid/name missing: {t:?}"
+        );
         assert!(t.iter().any(|x| x.contains("kyler")), "detail user missing");
-        assert!(t.iter().any(|x| x.contains("Running")), "detail state missing");
-        assert!(t.iter().any(|x| x.contains("%") && x.contains("3.0 GiB")), "detail cpu/mem/rss missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("no detail")), "detail should be loaded");
+        assert!(
+            t.iter().any(|x| x.contains("Running")),
+            "detail state missing"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("%") && x.contains("3.0 GiB")),
+            "detail cpu/mem/rss missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("no detail")),
+            "detail should be loaded"
+        );
         // Clearing the selection hides the pane entirely.
         app.selected = None;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("proc-detail")), "detail should hide without selection");
+        assert!(
+            !t.iter().any(|x| x.contains("proc-detail")),
+            "detail should hide without selection"
+        );
     }
 
     #[test]
@@ -4594,12 +5872,21 @@ mod tests {
         app.selected = Some(7);
         app.shared().lock().unwrap().proc_detail = None;
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("proc-detail")), "detail title missing: {t:?}");
-        assert!(t.iter().any(|x| x == "waiting for data"), "waiting copy missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("proc-detail")),
+            "detail title missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x == "waiting for data"),
+            "waiting copy missing: {t:?}"
+        );
         // 4242 has detail in fake_state; pick a pid without one: stale state.
         fake_state(&app, client::now_ms());
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("no detail")), "stale state missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("no detail")),
+            "stale state missing: {t:?}"
+        );
     }
 
     #[test]
@@ -4609,29 +5896,46 @@ mod tests {
         // No selection: no detail pane, no Kill button anywhere.
         let t = render(&mut app, 960.0, 1000.0);
         assert!(!t.iter().any(|x| x.contains("proc-detail")), "{t:?}");
-        assert!(!t.iter().any(|x| x == "Kill"), "kill should hide without selection: {t:?}");
+        assert!(
+            !t.iter().any(|x| x == "Kill"),
+            "kill should hide without selection: {t:?}"
+        );
         // Selection with detail: header carries the Kill action.
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x == "Kill"), "kill button missing from detail header: {t:?}");
+        assert!(
+            t.iter().any(|x| x == "Kill"),
+            "kill button missing from detail header: {t:?}"
+        );
         // Root-owned selection: button present but the dialog never opens
         // from it (disabled). Disabled state is visual; the guard is covered
         // by the enable expression on is_root_owned.
         app.selected = Some(3); // pid 3 is root in fake_state
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x == "Kill"), "kill button should render disabled for root: {t:?}");
+        assert!(
+            t.iter().any(|x| x == "Kill"),
+            "kill button should render disabled for root: {t:?}"
+        );
     }
 
     #[test]
     fn proc_detail_collapses_like_other_panels() {
-        let mut cfg = Config::default();
-        cfg.collapsed_proc_detail = true;
+        let cfg = Config {
+            collapsed_proc_detail: true,
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("> proc-detail")), "collapsed detail title missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("4242 hottest-proc")), "detail header should hide when collapsed");
+        assert!(
+            t.iter().any(|x| x.contains("> proc-detail")),
+            "collapsed detail title missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("4242 hottest-proc")),
+            "detail header should hide when collapsed"
+        );
         app.cfg.collapsed_proc_detail = false;
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("v proc-detail")));
@@ -4642,7 +5946,11 @@ mod tests {
     fn kill_dialog_names_process_and_pid() {
         let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
-        app.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1_700_000_002_500 });
+        app.kill_confirm = Some(KillConfirm {
+            pid: 4242,
+            name: "hottest-proc".into(),
+            start_time_ms: 1_700_000_002_500,
+        });
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("Kill process")), "{t:?}");
         assert!(t.iter().any(|x| x.contains("Send SIGTERM to")), "{t:?}");
@@ -4650,14 +5958,21 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("Send TERM")), "{t:?}");
         assert!(t.iter().any(|x| x.contains("Send INT")), "{t:?}");
         assert!(t.iter().any(|x| x.contains("Cancel")), "{t:?}");
-        assert!(t.iter().any(|x| x.contains("The server will terminate")), "{t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("The server will terminate")),
+            "{t:?}"
+        );
     }
 
     #[test]
     fn kill_dialog_names_active_source() {
         let mut app = App::with(two_source_cfg(), Some("t".into()), TokenSource::Env, None);
         fake_state(&app, client::now_ms());
-        app.kill_confirm = Some(KillConfirm { pid: 4242, name: "hottest-proc".into(), start_time_ms: 1_700_000_002_500 });
+        app.kill_confirm = Some(KillConfirm {
+            pid: 4242,
+            name: "hottest-proc".into(),
+            start_time_ms: 1_700_000_002_500,
+        });
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("lab will terminate")), "{t:?}");
     }
@@ -4675,7 +5990,10 @@ mod tests {
         app.shared().lock().unwrap().apply(
             Event::KillResult {
                 r: ebbtop_core::wire::KillResult {
-                    ok, pid: 4242, signal: "TERM".into(), error: error.map(str::to_string),
+                    ok,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: error.map(str::to_string),
                 },
                 recv_ms: now,
             },
@@ -4692,7 +6010,11 @@ mod tests {
         assert!(t.iter().any(|x| x.contains("kill 4242 TERM sent")), "{t:?}");
         kill_reply(&app, false, Some("stale start_time"));
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("kill 4242 refused: stale start_time")), "{t:?}");
+        assert!(
+            t.iter()
+                .any(|x| x.contains("kill 4242 refused: stale start_time")),
+            "{t:?}"
+        );
     }
 
     #[test]
@@ -4703,18 +6025,29 @@ mod tests {
         // A success received a minute ago is expired: hidden.
         app.shared().lock().unwrap().apply(
             Event::KillResult {
-                r: ebbtop_core::wire::KillResult { ok: true, pid: 4242, signal: "TERM".into(), error: None },
+                r: ebbtop_core::wire::KillResult {
+                    ok: true,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: None,
+                },
                 recv_ms: now - 60_000,
             },
             now,
         );
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("kill 4242")), "expired success should hide: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("kill 4242")),
+            "expired success should hide: {t:?}"
+        );
         // A fresh refusal shows...
         app.shared().lock().unwrap().apply(
             Event::KillResult {
                 r: ebbtop_core::wire::KillResult {
-                    ok: false, pid: 4242, signal: "TERM".into(), error: Some("stale start_time".into()),
+                    ok: false,
+                    pid: 4242,
+                    signal: "TERM".into(),
+                    error: Some("stale start_time".into()),
                 },
                 recv_ms: now,
             },
@@ -4725,7 +6058,10 @@ mod tests {
         // ...until the selection changes, which retires it via the mirror.
         app.selected = Some(7);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("kill 4242")), "selection change should clear: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("kill 4242")),
+            "selection change should clear: {t:?}"
+        );
     }
 
     fn rich_detail(app: &App) {
@@ -4738,10 +6074,7 @@ mod tests {
         p.cpu_time_system = 500_000;
         p.working_directory = Some("/home/user/work".into());
         p.executable_path = Some("/usr/bin/hottest-proc".into());
-        p.child_processes = vec![
-            kid(5001, "worker-a"),
-            kid(5002, "worker-b"),
-        ];
+        p.child_processes = vec![kid(5001, "worker-a"), kid(5002, "worker-b")];
         p.threads = (0..7u32)
             .map(|k| ebbtop_core::wire::ThreadInfo {
                 tid: 9001 + k,
@@ -4754,7 +6087,11 @@ mod tests {
     }
 
     fn kid(pid: u32, name: &str) -> ebbtop_core::wire::DetailedProcessInfo {
-        ebbtop_core::wire::DetailedProcessInfo { pid, name: name.into(), ..Default::default() }
+        ebbtop_core::wire::DetailedProcessInfo {
+            pid,
+            name: name.into(),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -4772,10 +6109,19 @@ mod tests {
         rich_detail(&app);
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        for s in ["vmem 4.0 GiB", "shared 512 MiB", "cpu 2.0s", "cwd /home/user/work", "Copy"] {
+        for s in [
+            "vmem 4.0 GiB",
+            "shared 512 MiB",
+            "cpu 2.0s",
+            "cwd /home/user/work",
+            "Copy",
+        ] {
             assert!(t.iter().any(|x| x.contains(s)), "{s} missing: {t:?}");
         }
-        assert!(t.iter().any(|x| x.contains("started 20")), "started missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("started 20")),
+            "started missing: {t:?}"
+        );
     }
 
     #[test]
@@ -4797,10 +6143,22 @@ mod tests {
         rich_detail(&app);
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("TID")), "thread header missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("9001")), "top thread missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("9001 t0 R 7.0s")), "top thread row wrong: {t:?}");
-        assert!(t.iter().any(|x| x.contains("+2 more")), "overflow missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("TID")),
+            "thread header missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("9001")),
+            "top thread missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("9001 t0 R 7.0s")),
+            "top thread row wrong: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("+2 more")),
+            "overflow missing: {t:?}"
+        );
     }
 
     #[test]
@@ -4809,8 +6167,14 @@ mod tests {
         fake_state(&app, client::now_ms());
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(!t.iter().any(|x| x.contains("TID")), "threads should hide: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("children:")), "children should hide: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("TID")),
+            "threads should hide: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("children:")),
+            "children should hide: {t:?}"
+        );
     }
 
     #[test]
@@ -4829,10 +6193,22 @@ mod tests {
         }
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("--serve --port 8080")), "command missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("threads 3 · fds 42 · ppid 1")), "facts missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("r 1.0 GiB · w 1.0 MiB")), "io missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("/usr/bin/hottest-proc")), "exe missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("--serve --port 8080")),
+            "command missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("threads 3 · fds 42 · ppid 1")),
+            "facts missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("r 1.0 GiB · w 1.0 MiB")),
+            "io missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("/usr/bin/hottest-proc")),
+            "exe missing: {t:?}"
+        );
     }
 
     #[test]
@@ -4850,13 +6226,31 @@ mod tests {
                 is_partition: false,
             })
             .collect();
-        app.shared().lock().unwrap().apply(Event::Disks { d: disks, recv_ms: now }, now);
+        app.shared().lock().unwrap().apply(
+            Event::Disks {
+                d: disks,
+                recv_ms: now,
+            },
+            now,
+        );
         let t = render(&mut app, 1920.0, 1080.0);
         assert!(t.iter().any(|x| x == "sdf"), "fullest disk missing: {t:?}");
-        assert!(!t.iter().any(|x| x == "sda"), "emptiest disk should be capped: {t:?}");
-        assert!(!t.iter().any(|x| x == "sdb"), "fifth disk should be capped: {t:?}");
-        assert!(t.iter().any(|x| x.contains("+2 more")), "overflow count missing: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("/s  w")), "per-disk text lines should be gone: {t:?}");
+        assert!(
+            !t.iter().any(|x| x == "sda"),
+            "emptiest disk should be capped: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x == "sdb"),
+            "fifth disk should be capped: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("+2 more")),
+            "overflow count missing: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("/s  w")),
+            "per-disk text lines should be gone: {t:?}"
+        );
     }
 
     #[test]
@@ -4867,9 +6261,18 @@ mod tests {
         let t = render(&mut app, 1920.0, 1080.0);
         assert!(t.iter().any(|x| x.contains(" LIVE ")), "{t:?}");
         assert!(t.iter().any(|x| x.contains("k-server")), "{t:?}");
-        assert!(!t.iter().any(|x| x.contains("sample ")), "sample belongs in the tooltip: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("tick p95")), "tick p95 belongs in the tooltip: {t:?}");
-        assert!(!t.iter().any(|x| x.contains("reconnects")), "reconnects belong in the tooltip: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("sample ")),
+            "sample belongs in the tooltip: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("tick p95")),
+            "tick p95 belongs in the tooltip: {t:?}"
+        );
+        assert!(
+            !t.iter().any(|x| x.contains("reconnects")),
+            "reconnects belong in the tooltip: {t:?}"
+        );
     }
 
     #[test]
@@ -4878,9 +6281,15 @@ mod tests {
         fake_state(&app, client::now_ms());
         app.selected = Some(4242);
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("proc-detail")), "setup: detail should show");
+        assert!(
+            t.iter().any(|x| x.contains("proc-detail")),
+            "setup: detail should show"
+        );
         let t = render_with(&mut app, 960.0, 1000.0, vec![esc_key()]);
-        assert!(!t.iter().any(|x| x.contains("proc-detail")), "esc should clear selection: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("proc-detail")),
+            "esc should clear selection: {t:?}"
+        );
     }
 
     #[test]
@@ -4893,11 +6302,17 @@ mod tests {
         // Refusal stays visible at 640 px.
         kill_reply(&app, false, Some("pid 1"));
         let t = render(&mut app, 640.0, 520.0);
-        assert!(t.iter().any(|x| x.contains("kill 4242 refused")), "refusal must show narrow: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("kill 4242 refused")),
+            "refusal must show narrow: {t:?}"
+        );
         // Transient success hides at 640 px but shows wide.
         kill_reply(&app, true, None);
         let t = render(&mut app, 640.0, 520.0);
-        assert!(!t.iter().any(|x| x.contains("kill 4242")), "success should hide narrow: {t:?}");
+        assert!(
+            !t.iter().any(|x| x.contains("kill 4242")),
+            "success should hide narrow: {t:?}"
+        );
         kill_reply(&app, true, None);
         let t = render(&mut app, 960.0, 1000.0);
         assert!(t.iter().any(|x| x.contains("kill 4242 TERM sent")), "{t:?}");
@@ -4928,7 +6343,8 @@ mod tests {
             img.save(&path).expect("save");
             eprintln!("wrote {}", path.display());
         }
-        let dir = std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
+        let dir =
+            std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
         for (w, h) in [(960.0f32, 1040.0f32), (1920.0, 1080.0), (640.0, 520.0)] {
             let mut app = App::with(Config::default(), Some("t".into()), TokenSource::Env, None);
             app.onboard = None;
@@ -5029,9 +6445,11 @@ mod tests {
         // model can appear, so this is the visual proof for the collapsed state.
         {
             let (w, h) = (960.0f32, 1040.0f32);
-            let mut cfg = Config::default();
-            cfg.collapsed_cpu = true;
-            cfg.collapsed_gpu = true;
+            let cfg = Config {
+                collapsed_cpu: true,
+                collapsed_gpu: true,
+                ..Default::default()
+            };
             let mut app = App::with(cfg, Some("t".into()), TokenSource::Env, None);
             app.onboard = None;
             fake_state(&app, client::now_ms());
@@ -5140,7 +6558,7 @@ mod tests {
     fn store_screenshots() {
         let dir =
             std::path::PathBuf::from(std::env::var("EBBTOP_SHOT_DIR").expect("EBBTOP_SHOT_DIR"));
-        let mut shot = |name: &str, mut app: App| {
+        let shot = |name: &str, mut app: App| {
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1366.0, 768.0))
                 .wgpu()
@@ -5234,7 +6652,10 @@ mod tests {
             (Locale::ZhHantTw, "zh-tw"),
         ] {
             let mut app = App::with(
-                Config { language: loc.id().to_string(), ..Config::default() },
+                Config {
+                    language: loc.id().to_string(),
+                    ..Config::default()
+                },
                 Some("t".into()),
                 TokenSource::Env,
                 None,
@@ -5243,7 +6664,10 @@ mod tests {
             let now = client::now_ms() + 60_000;
             fake_state(&app, now);
             workload_rows(&app, now);
-            shot(&format!("ebbtop-store-1366x768-dashboard-{suffix}.png"), app);
+            shot(
+                &format!("ebbtop-store-1366x768-dashboard-{suffix}.png"),
+                app,
+            );
         }
         // 9-11. The process table in the same three languages.
         for (loc, suffix) in [
@@ -5252,7 +6676,10 @@ mod tests {
             (Locale::ZhHantTw, "zh-tw"),
         ] {
             let mut app = App::with(
-                Config { language: loc.id().to_string(), ..Config::default() },
+                Config {
+                    language: loc.id().to_string(),
+                    ..Config::default()
+                },
                 Some("t".into()),
                 TokenSource::Env,
                 None,
@@ -5263,7 +6690,10 @@ mod tests {
             workload_rows(&app, now);
             rich_detail(&app);
             app.selected = Some(4242);
-            shot(&format!("ebbtop-store-1366x768-process-detail-{suffix}.png"), app);
+            shot(
+                &format!("ebbtop-store-1366x768-process-detail-{suffix}.png"),
+                app,
+            );
         }
     }
 
@@ -5279,7 +6709,10 @@ mod tests {
         style(&ctx);
         let run = |app: &mut App| {
             let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 1040.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(960.0, 1040.0),
+                )),
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| app.draw(ui));
@@ -5287,11 +6720,24 @@ mod tests {
             let prims = ctx.tessellate(out.shapes, 1.0);
             std::hint::black_box(prims);
         };
-        for _ in 0..10 { run(&mut app); }
+        for _ in 0..10 {
+            run(&mut app);
+        }
         let n = 200;
-        let mut v: Vec<f64> = (0..n).map(|_| { let t = std::time::Instant::now(); run(&mut app); t.elapsed().as_secs_f64() * 1e3 }).collect();
+        let mut v: Vec<f64> = (0..n)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                run(&mut app);
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
         v.sort_by(f64::total_cmp);
-        eprintln!("frame_cost_ms p50={:.2} p95={:.2} max={:.2} (n={n})", v[n / 2], v[n * 95 / 100], v[n - 1]);
+        eprintln!(
+            "frame_cost_ms p50={:.2} p95={:.2} max={:.2} (n={n})",
+            v[n / 2],
+            v[n * 95 / 100],
+            v[n - 1]
+        );
     }
 
     /// Workloads pane and per-row workload column, rendered headlessly with
@@ -5305,43 +6751,114 @@ mod tests {
         let now = client::now_ms();
         let base = "/user.slice/user-1000.slice/user@1000.service/app.slice";
         let rows = vec![
-            Process { pid: 1, name: "systemd".into(), cpu_usage: 0.1, mem_bytes: 1 << 20, user: "root".into(),
-                state: "Sleeping".into(), start_time_ms: 1, cgroup: "/init.scope".into() },
-            Process { pid: 2730, name: "postgres".into(), cpu_usage: 4.0, mem_bytes: 900 << 20, user: "100998".into(),
-                state: "Sleeping".into(), start_time_ms: 2,
-                cgroup: format!("{base}/davy-pg.service/libpod-payload-{PG_ID}") },
-            Process { pid: 2727, name: "conmon".into(), cpu_usage: 0.5, mem_bytes: 3 << 20, user: "kyler".into(),
-                state: "Sleeping".into(), start_time_ms: 3,
-                cgroup: format!("{base}/davy-pg.service/runtime") },
-            Process { pid: 2920, name: "hindsight-api".into(), cpu_usage: 1.0, mem_bytes: 700 << 20, user: "kyler".into(),
-                state: "Sleeping".into(), start_time_ms: 4,
-                cgroup: format!("{base}/davy-hindsight.service/libpod-payload-{HS_ID}") },
+            Process {
+                pid: 1,
+                name: "systemd".into(),
+                cpu_usage: 0.1,
+                mem_bytes: 1 << 20,
+                user: "root".into(),
+                state: "Sleeping".into(),
+                start_time_ms: 1,
+                cgroup: "/init.scope".into(),
+            },
+            Process {
+                pid: 2730,
+                name: "postgres".into(),
+                cpu_usage: 4.0,
+                mem_bytes: 900 << 20,
+                user: "100998".into(),
+                state: "Sleeping".into(),
+                start_time_ms: 2,
+                cgroup: format!("{base}/davy-pg.service/libpod-payload-{PG_ID}"),
+            },
+            Process {
+                pid: 2727,
+                name: "conmon".into(),
+                cpu_usage: 0.5,
+                mem_bytes: 3 << 20,
+                user: "kyler".into(),
+                state: "Sleeping".into(),
+                start_time_ms: 3,
+                cgroup: format!("{base}/davy-pg.service/runtime"),
+            },
+            Process {
+                pid: 2920,
+                name: "hindsight-api".into(),
+                cpu_usage: 1.0,
+                mem_bytes: 700 << 20,
+                user: "kyler".into(),
+                state: "Sleeping".into(),
+                start_time_ms: 4,
+                cgroup: format!("{base}/davy-hindsight.service/libpod-payload-{HS_ID}"),
+            },
             // Legacy agent row: no cgroup reported, belongs to the host group.
-            Process { pid: 999, name: "legacy-proc".into(), cpu_usage: 0.0, mem_bytes: 2 << 20, user: "kyler".into(),
-                state: "Sleeping".into(), start_time_ms: 5, cgroup: String::new() },
+            Process {
+                pid: 999,
+                name: "legacy-proc".into(),
+                cpu_usage: 0.0,
+                mem_bytes: 2 << 20,
+                user: "kyler".into(),
+                state: "Sleeping".into(),
+                start_time_ms: 5,
+                cgroup: String::new(),
+            },
         ];
         {
             let shared = app.shared();
             let mut s = shared.lock().unwrap();
             s.apply(Event::Connected, now);
-            s.apply(Event::Processes {
-                p: Processes { process_count: 5, rows, sampled_at_ms: now },
-                recv_ms: now,
-            }, now);
+            s.apply(
+                Event::Processes {
+                    p: Processes {
+                        process_count: 5,
+                        rows,
+                        sampled_at_ms: now,
+                    },
+                    recv_ms: now,
+                },
+                now,
+            );
         }
         let t = render(&mut app, 1600.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("workloads")), "pane title missing: {t:?}");
-        assert!(t.iter().any(|x| x == "Workload"), "workload column header missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("davy-pg")), "davy-pg group missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("davy-hindsight")), "hindsight group missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("init.scope")), "unit group missing: {t:?}");
-        assert!(t.iter().any(|x| x.contains("(host)")), "host group missing: {t:?}");
+        assert!(
+            t.iter().any(|x| x.contains("workloads")),
+            "pane title missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x == "Workload"),
+            "workload column header missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("davy-pg")),
+            "davy-pg group missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("davy-hindsight")),
+            "hindsight group missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("init.scope")),
+            "unit group missing: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("(host)")),
+            "host group missing: {t:?}"
+        );
 
         app.workload_filter = Some("davy-pg.service".into());
         let t2 = render(&mut app, 1600.0, 1000.0);
-        assert!(t2.iter().any(|x| x.contains("2 of 5")), "workload filter not applied: {t2:?}");
-        assert!(t2.iter().any(|x| x.contains("workload: davy-pg")), "active chip missing: {t2:?}");
-        assert!(!t2.iter().any(|x| x.contains("hindsight-api")), "unrelated row still listed: {t2:?}");
+        assert!(
+            t2.iter().any(|x| x.contains("2 of 5")),
+            "workload filter not applied: {t2:?}"
+        );
+        assert!(
+            t2.iter().any(|x| x.contains("workload: davy-pg")),
+            "active chip missing: {t2:?}"
+        );
+        assert!(
+            !t2.iter().any(|x| x.contains("hindsight-api")),
+            "unrelated row still listed: {t2:?}"
+        );
     }
 
     // ---- Linked tables: group scroll, independent inner scrolls, hover ----
@@ -5349,7 +6866,9 @@ mod tests {
     fn text_rects(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, egui::Rect)> {
         fn walk(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
             match s {
-                egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.visual_bounding_rect())),
+                egui::Shape::Text(t) => {
+                    out.push((t.galley.text().to_string(), t.visual_bounding_rect()))
+                }
                 egui::Shape::Vec(v) => v.iter().for_each(|x| walk(x, out)),
                 _ => {}
             }
@@ -5374,7 +6893,13 @@ mod tests {
 
     /// One frame on a caller-owned context, so scroll offsets and hover state
     /// accumulate across frames (unlike `render`, which resets the context).
-    fn frame(ctx: &egui::Context, app: &mut App, w: f32, h: f32, events: Vec<egui::Event>) -> Vec<egui::epaint::ClippedShape> {
+    fn frame(
+        ctx: &egui::Context,
+        app: &mut App,
+        w: f32,
+        h: f32,
+        events: Vec<egui::Event>,
+    ) -> Vec<egui::epaint::ClippedShape> {
         {
             let shared = app.shared();
             let mut s = shared.lock().unwrap();
@@ -5383,7 +6908,10 @@ mod tests {
             }
         }
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w, h),
+            )),
             focused: true,
             events,
             ..Default::default()
@@ -5409,7 +6937,9 @@ mod tests {
         let mut rows = vec![];
         let mut pid = 1000u32;
         for w in 0..30u32 {
-            let cg = format!("/user.slice/user-1000.slice/user@1000.service/app.slice/wl-{w:02}.service");
+            let cg = format!(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/wl-{w:02}.service"
+            );
             for k in 0..8u32 {
                 rows.push(Process {
                     pid,
@@ -5427,10 +6957,17 @@ mod tests {
         let shared = app.shared();
         let mut s = shared.lock().unwrap();
         s.apply(Event::Connected, now);
-        s.apply(Event::Processes {
-            p: Processes { process_count: rows.len() as u64, rows, sampled_at_ms: now },
-            recv_ms: now,
-        }, now);
+        s.apply(
+            Event::Processes {
+                p: Processes {
+                    process_count: rows.len() as u64,
+                    rows,
+                    sampled_at_ms: now,
+                },
+                recv_ms: now,
+            },
+            now,
+        );
     }
 
     #[test]
@@ -5454,14 +6991,26 @@ mod tests {
             s = frame(&ctx, &mut app, 1600.0, 350.0, vec![]);
         }
         let t = texts(&s);
-        assert!(t.iter().any(|x| x.contains("workloads")), "workloads pane should show: {t:?}");
-        assert!(t.iter().any(|x| x.contains("proc")), "proc pane should show: {t:?}");
-        assert!(app.group_scroll_max > 0.0, "group should scroll when panes overflow");
+        assert!(
+            t.iter().any(|x| x.contains("workloads")),
+            "workloads pane should show: {t:?}"
+        );
+        assert!(
+            t.iter().any(|x| x.contains("proc")),
+            "proc pane should show: {t:?}"
+        );
+        assert!(
+            app.group_scroll_max > 0.0,
+            "group should scroll when panes overflow"
+        );
         // Tall window: everything fits, no group scroll (looks like before).
         for _ in 0..3 {
             frame(&ctx, &mut app, 1600.0, 1200.0, vec![]);
         }
-        assert_eq!(app.group_scroll_max, 0.0, "group should not scroll when content fits");
+        assert_eq!(
+            app.group_scroll_max, 0.0,
+            "group should not scroll when content fits"
+        );
     }
 
     #[test]
@@ -5476,30 +7025,60 @@ mod tests {
         let tr1 = text_rects(&s1);
         // Topmost "wl-29" is the workloads pane's first row (biggest memory);
         // the same label also appears lower down in the proc Workload column.
-        let wl_y = tr1.iter().filter(|(s, _)| s == "wl-29")
+        let wl_y = tr1
+            .iter()
+            .filter(|(s, _)| s == "wl-29")
             .map(|(_, r)| r.center().y)
             .min_by(|a, b| a.partial_cmp(b).unwrap())
             .expect("wl-29 workload row visible");
-        let proc_pos = tr1.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center())
+        let proc_pos = tr1
+            .iter()
+            .find(|(s, _)| s == "p00-7")
+            .map(|(_, r)| r.center())
             .expect("a proc row visible");
-        let proc_y_before = tr1.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center().y).unwrap();
+        let proc_y_before = tr1
+            .iter()
+            .find(|(s, _)| s == "p00-7")
+            .map(|(_, r)| r.center().y)
+            .unwrap();
         // Wheel down over the proc table only.
         for _ in 0..3 {
-            frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos), wheel(-400.0)]);
+            frame(
+                &ctx,
+                &mut app,
+                w,
+                h,
+                vec![egui::Event::PointerMoved(proc_pos), wheel(-400.0)],
+            );
         }
-        let s2 = frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(proc_pos)]);
+        let s2 = frame(
+            &ctx,
+            &mut app,
+            w,
+            h,
+            vec![egui::Event::PointerMoved(proc_pos)],
+        );
         let tr2 = text_rects(&s2);
         // The proc body scrolled: the aimed row moved up or off the top.
-        let proc_y_after = tr2.iter().find(|(s, _)| s == "p00-7").map(|(_, r)| r.center().y);
-        assert!(proc_y_after.map_or(true, |y| y < proc_y_before - 1.0),
-            "proc table should have scrolled under the wheel");
+        let proc_y_after = tr2
+            .iter()
+            .find(|(s, _)| s == "p00-7")
+            .map(|(_, r)| r.center().y);
+        assert!(
+            proc_y_after.is_none_or(|y| y < proc_y_before - 1.0),
+            "proc table should have scrolled under the wheel"
+        );
         // The workloads body did NOT follow: its first row stays put.
-        let wl_y_after = tr2.iter().filter(|(s, _)| s == "wl-29")
+        let wl_y_after = tr2
+            .iter()
+            .filter(|(s, _)| s == "wl-29")
             .map(|(_, r)| r.center().y)
             .min_by(|a, b| a.partial_cmp(b).unwrap())
             .expect("wl-29 still visible");
-        assert!((wl_y_after - wl_y).abs() < 0.5,
-            "workloads must not follow the proc scroll: {wl_y:.1} -> {wl_y_after:.1}");
+        assert!(
+            (wl_y_after - wl_y).abs() < 0.5,
+            "workloads must not follow the proc scroll: {wl_y:.1} -> {wl_y_after:.1}"
+        );
     }
 
     /// Fill egui paints for a hovered table row under `Visuals::dark()`
@@ -5512,7 +7091,9 @@ mod tests {
     /// painted as hovered.
     fn row_highlighted(shapes: &[egui::epaint::ClippedShape], label: &egui::Rect) -> bool {
         let c = label.center();
-        fill_rects(shapes).iter().any(|(fr, fill)| *fill == row_hover_fill() && fr.contains(c))
+        fill_rects(shapes)
+            .iter()
+            .any(|(fr, fill)| *fill == row_hover_fill() && fr.contains(c))
     }
 
     /// Y centre of the topmost rendered label with exactly this text. Both
@@ -5550,7 +7131,13 @@ mod tests {
 
     /// Aim at a row for a few frames: egui's own row hover is captured for the
     /// next frame, so a single frame would race it.
-    fn aim_at(ctx: &egui::Context, app: &mut App, w: f32, h: f32, target: egui::Pos2) -> Vec<egui::epaint::ClippedShape> {
+    fn aim_at(
+        ctx: &egui::Context,
+        app: &mut App,
+        w: f32,
+        h: f32,
+        target: egui::Pos2,
+    ) -> Vec<egui::epaint::ClippedShape> {
         let mut shapes = frame(ctx, app, w, h, vec![]);
         for _ in 0..4 {
             shapes = frame(ctx, app, w, h, vec![egui::Event::PointerMoved(target)]);
@@ -5564,13 +7151,23 @@ mod tests {
             .into_iter()
             .find(|(s, _)| s == label)
             .map(|(_, r)| r)
-            .unwrap_or_else(|| panic!("no row labelled {label:?} in the {} table",
-                if pids { "proc" } else { "workloads" }))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no row labelled {label:?} in the {} table",
+                    if pids { "proc" } else { "workloads" }
+                )
+            })
     }
 
     /// The single row the pointer is aimed at (its leading-column label rect).
-    fn aim_row(ctx: &egui::Context, app: &mut App, w: f32, h: f32, label: &str, pids: bool)
-        -> (Vec<egui::epaint::ClippedShape>, egui::Rect) {
+    fn aim_row(
+        ctx: &egui::Context,
+        app: &mut App,
+        w: f32,
+        h: f32,
+        label: &str,
+        pids: bool,
+    ) -> (Vec<egui::epaint::ClippedShape>, egui::Rect) {
         let idle = frame(ctx, app, w, h, vec![]);
         let row = row_labelled(&idle, label, pids);
         let shapes = aim_at(ctx, app, w, h, row_aim(&row));
@@ -5592,21 +7189,29 @@ mod tests {
         // Workload -> proc: davy-pg owns pid 2730, 2862 and 2727, so a mirror
         // would light exactly those.
         let (shapes, row) = aim_row(&ctx, &mut app, w, h, "davy-pg", false);
-        assert!(row_highlighted(&shapes, &row),
-            "the hovered workload row must still show its own hover highlight");
+        assert!(
+            row_highlighted(&shapes, &row),
+            "the hovered workload row must still show its own hover highlight"
+        );
         for (label, rect) in table_rows(&shapes, true) {
-            assert!(!row_highlighted(&shapes, &rect),
-                "hovering workload davy-pg lit proc row pid {label}: {rect:?}");
+            assert!(
+                !row_highlighted(&shapes, &rect),
+                "hovering workload davy-pg lit proc row pid {label}: {rect:?}"
+            );
         }
 
         // Proc -> workload: hovering pid 2730 (a davy-pg process) must not light
         // the davy-pg roll-up row or any other workload row.
         let (shapes, row) = aim_row(&ctx, &mut app, w, h, "2730", true);
-        assert!(row_highlighted(&shapes, &row),
-            "the hovered proc row must still show its own hover highlight");
+        assert!(
+            row_highlighted(&shapes, &row),
+            "the hovered proc row must still show its own hover highlight"
+        );
         for (label, rect) in table_rows(&shapes, false) {
-            assert!(!row_highlighted(&shapes, &rect),
-                "hovering proc row 2730 lit workload row {label:?}: {rect:?}");
+            assert!(
+                !row_highlighted(&shapes, &rect),
+                "hovering proc row 2730 lit workload row {label:?}: {rect:?}"
+            );
         }
     }
 
@@ -5625,25 +7230,49 @@ mod tests {
         // Proc table: exactly the aimed-at pid row is highlighted.
         let (shapes, _) = aim_row(&ctx, &mut app, w, h, "2730", true);
         let rows = table_rows(&shapes, true);
-        assert!(rows.len() > 2, "proc table should show several rows: {rows:?}");
-        let lit: Vec<&str> = rows.iter().filter(|(_, r)| row_highlighted(&shapes, r))
-            .map(|(s, _)| s.as_str()).collect();
-        assert_eq!(lit, vec!["2730"], "only the hovered proc row may be highlighted: {lit:?}");
+        assert!(
+            rows.len() > 2,
+            "proc table should show several rows: {rows:?}"
+        );
+        let lit: Vec<&str> = rows
+            .iter()
+            .filter(|(_, r)| row_highlighted(&shapes, r))
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert_eq!(
+            lit,
+            vec!["2730"],
+            "only the hovered proc row may be highlighted: {lit:?}"
+        );
         for (label, rect) in table_rows(&shapes, false) {
-            assert!(!row_highlighted(&shapes, &rect),
-                "workload row {label:?} highlighted while hovering a proc row: {rect:?}");
+            assert!(
+                !row_highlighted(&shapes, &rect),
+                "workload row {label:?} highlighted while hovering a proc row: {rect:?}"
+            );
         }
 
         // Workload table: exactly the aimed-at workload row is highlighted.
         let (shapes, _) = aim_row(&ctx, &mut app, w, h, "davy-pg", false);
         let rows = table_rows(&shapes, false);
-        assert!(rows.len() > 2, "workloads table should show several rows: {rows:?}");
-        let lit: Vec<&str> = rows.iter().filter(|(_, r)| row_highlighted(&shapes, r))
-            .map(|(s, _)| s.as_str()).collect();
-        assert_eq!(lit, vec!["davy-pg"], "only the hovered workload row may be highlighted: {lit:?}");
+        assert!(
+            rows.len() > 2,
+            "workloads table should show several rows: {rows:?}"
+        );
+        let lit: Vec<&str> = rows
+            .iter()
+            .filter(|(_, r)| row_highlighted(&shapes, r))
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert_eq!(
+            lit,
+            vec!["davy-pg"],
+            "only the hovered workload row may be highlighted: {lit:?}"
+        );
         for (label, rect) in table_rows(&shapes, true) {
-            assert!(!row_highlighted(&shapes, &rect),
-                "proc row {label:?} highlighted while hovering a workload row: {rect:?}");
+            assert!(
+                !row_highlighted(&shapes, &rect),
+                "proc row {label:?} highlighted while hovering a workload row: {rect:?}"
+            );
         }
     }
 
@@ -5701,51 +7330,106 @@ mod tests {
         fill_wizard(&mut app, "h", "ws://127.0.0.1:1/ws", SENTINEL);
         deliver_probe(&mut app, Ok("fakehost".into()));
         let t = render(&mut app, 960.0, 1000.0);
-        assert!(t.iter().any(|x| x.contains("connected: fakehost")), "no success line: {t:?}");
         assert!(
-            !t.iter().any(|x| x.contains("Save unlocks after a green Test")),
+            t.iter().any(|x| x.contains("connected: fakehost")),
+            "no success line: {t:?}"
+        );
+        assert!(
+            !t.iter()
+                .any(|x| x.contains("Save unlocks after a green Test")),
             "green Test must drop the locked note: {t:?}"
         );
         // The gate itself (same function the Save button and Save use): a
         // green Test of exactly these values opens it.
-        assert!(app.onboard_save_gate(), "green Test of the exact values must unlock Save");
+        assert!(
+            app.onboard_save_gate(),
+            "green Test of the exact values must unlock Save"
+        );
     }
 
     #[test]
     fn wizard_distinguishes_auth_refusal_from_an_unreachable_endpoint() {
         let mut auth = wizard_app();
         fill_wizard(&mut auth, "h", "ws://10.0.0.5/ws", SENTINEL);
-        deliver_probe(&mut auth, Err("get_metrics: agent closed the connection (wrong token?)".into()));
+        deliver_probe(
+            &mut auth,
+            Err("get_metrics: agent closed the connection (wrong token?)".into()),
+        );
         let a = joined(&render(&mut auth, 960.0, 1000.0));
 
         let mut unreachable = wizard_app();
         fill_wizard(&mut unreachable, "h", "ws://10.0.0.5/ws", SENTINEL);
-        deliver_probe(&mut unreachable, Err("get_metrics: IO error: Connection refused (os error 111)".into()));
+        deliver_probe(
+            &mut unreachable,
+            Err("get_metrics: IO error: Connection refused (os error 111)".into()),
+        );
         let u = joined(&render(&mut unreachable, 960.0, 1000.0));
 
-        assert!(a.contains("Closed right after the handshake"), "no auth headline:\n{a}");
-        assert!(a.contains("Re-copy the token"), "auth refusal must name the token:\n{a}");
+        assert!(
+            a.contains("Closed right after the handshake"),
+            "no auth headline:\n{a}"
+        );
+        assert!(
+            a.contains("Re-copy the token"),
+            "auth refusal must name the token:\n{a}"
+        );
         // F1: the wire cannot confirm a refusal, so the wizard must say the
         // class is an inference and name the non-agent close possibility
         // plus an endpoint-identity check.
         assert!(a.contains("infers"), "auth block claims confirmation:\n{a}");
-        assert!(a.contains("another WebSocket service"), "non-agent case unnamed:\n{a}");
-        assert!(a.contains("host and port point at the EbbTop agent"), "no identity check:\n{a}");
-        assert!(!a.contains("private network"), "auth refusal got network advice:\n{a}");
-        assert!(!a.contains("No route to the agent"), "auth refusal mislabelled:\n{a}");
-        assert!(!a.contains("Nothing is reachable at that address"), "auth refusal got network advice:\n{a}");
+        assert!(
+            a.contains("another WebSocket service"),
+            "non-agent case unnamed:\n{a}"
+        );
+        assert!(
+            a.contains("host and port point at the EbbTop agent"),
+            "no identity check:\n{a}"
+        );
+        assert!(
+            !a.contains("private network"),
+            "auth refusal got network advice:\n{a}"
+        );
+        assert!(
+            !a.contains("No route to the agent"),
+            "auth refusal mislabelled:\n{a}"
+        );
+        assert!(
+            !a.contains("Nothing is reachable at that address"),
+            "auth refusal got network advice:\n{a}"
+        );
 
-        assert!(u.contains("No route to the agent"), "no unreachable headline:\n{u}");
-        assert!(u.contains("private network or VPN"), "unreachable must name the network:\n{u}");
-        assert!(!u.contains("Closed right after the handshake"), "network failure mislabelled as close:\n{u}");
-        assert!(!u.contains("Re-copy the token"), "network failure got token advice:\n{u}");
+        assert!(
+            u.contains("No route to the agent"),
+            "no unreachable headline:\n{u}"
+        );
+        assert!(
+            u.contains("private network or VPN"),
+            "unreachable must name the network:\n{u}"
+        );
+        assert!(
+            !u.contains("Closed right after the handshake"),
+            "network failure mislabelled as close:\n{u}"
+        );
+        assert!(
+            !u.contains("Re-copy the token"),
+            "network failure got token advice:\n{u}"
+        );
 
         // The scrubbed detail is shown, and the token never is.
-        assert!(a.contains("detail: get_metrics: agent closed the connection"), "detail missing:\n{a}");
+        assert!(
+            a.contains("detail: get_metrics: agent closed the connection"),
+            "detail missing:\n{a}"
+        );
         assert!(!a.contains(SENTINEL), "wizard leaked the token:\n{a}");
         // Save stays locked after a failed Test.
-        assert!(!auth.onboard_save_gate(), "a failed Test must not unlock Save");
-        assert!(!unreachable.onboard_save_gate(), "a failed Test must not unlock Save");
+        assert!(
+            !auth.onboard_save_gate(),
+            "a failed Test must not unlock Save"
+        );
+        assert!(
+            !unreachable.onboard_save_gate(),
+            "a failed Test must not unlock Save"
+        );
     }
 
     #[test]
@@ -5764,7 +7448,10 @@ mod tests {
                 assert!(j.contains(word), "{err}: guidance misses {word}:\n{j}");
             }
             assert!(j.contains("Open logs"), "{err}: no route to the logs:\n{j}");
-            assert!(j.contains("Copy support summary"), "{err}: no support summary:\n{j}");
+            assert!(
+                j.contains("Copy support summary"),
+                "{err}: no support summary:\n{j}"
+            );
         }
     }
 
@@ -5783,10 +7470,14 @@ mod tests {
         app.onboard.as_mut().unwrap().token = format!("{SENTINEL}-edited");
         let t = render(&mut app, 960.0, 1000.0);
         assert!(
-            t.iter().any(|x| x.contains("fields changed since the last green Test")),
+            t.iter()
+                .any(|x| x.contains("fields changed since the last green Test")),
             "no stale-Test note after an edit: {t:?}"
         );
-        assert!(!app.onboard_save_gate(), "edited values must not pass the old Test");
+        assert!(
+            !app.onboard_save_gate(),
+            "edited values must not pass the old Test"
+        );
     }
 
     #[test]
@@ -5797,14 +7488,32 @@ mod tests {
         // The user edits the token while the probe is in flight.
         app.onboard.as_mut().unwrap().token = format!("{SENTINEL}-typed-later");
         // The old probe now completes green.
-        tx.send(Ok("stalehost".into())).expect("deliver stale completion");
+        tx.send(Ok("stalehost".into()))
+            .expect("deliver stale completion");
         let t = render(&mut app, 960.0, 1000.0);
         let j = joined(&t);
-        let tested = app.onboard.as_ref().and_then(|ob| ob.tested.clone()).expect("the green Test is recorded");
-        assert_ne!(Some(tested), Some(app.onboard_current()), "a stale completion must not cover edited values");
-        assert!(j.contains("fields changed since the last green Test"), "no stale note:\n{j}");
-        assert!(j.contains("connected: stalehost"), "the completion is still reported:\n{j}");
-        assert!(!app.onboard_save_gate(), "a stale completion must not unlock Save");
+        let tested = app
+            .onboard
+            .as_ref()
+            .and_then(|ob| ob.tested.clone())
+            .expect("the green Test is recorded");
+        assert_ne!(
+            Some(tested),
+            Some(app.onboard_current()),
+            "a stale completion must not cover edited values"
+        );
+        assert!(
+            j.contains("fields changed since the last green Test"),
+            "no stale note:\n{j}"
+        );
+        assert!(
+            j.contains("connected: stalehost"),
+            "the completion is still reported:\n{j}"
+        );
+        assert!(
+            !app.onboard_save_gate(),
+            "a stale completion must not unlock Save"
+        );
     }
 
     #[test]
@@ -5817,22 +7526,32 @@ mod tests {
         fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
         app.token = Some(SENTINEL.to_string());
         // An error that a careless library could have built from the URL.
-        deliver_probe(&mut app, Err(format!("get_metrics: connect failed ws://h/ws?token={SENTINEL}")));
+        deliver_probe(
+            &mut app,
+            Err(format!(
+                "get_metrics: connect failed ws://h/ws?token={SENTINEL}"
+            )),
+        );
         let _ = render(&mut app, 960.0, 1000.0);
         store::set_test_log(None);
         let written = std::fs::read_to_string(&log).expect("a log line for the failed probe");
         assert!(written.contains("probe"), "no classified line: {written}");
-        assert!(!written.contains(SENTINEL), "log leaked the token:\n{written}");
+        assert!(
+            !written.contains(SENTINEL),
+            "log leaked the token:\n{written}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn support_summary_from_the_app_carries_no_token_or_address() {
-        let mut cfg = Config::default();
-        cfg.sources = vec![store::Source {
-            name: "k-server".into(),
-            url: format!("ws://10.9.9.9:45976/ws?token={SENTINEL}"),
-        }];
+        let cfg = Config {
+            sources: vec![store::Source {
+                name: "k-server".into(),
+                url: format!("ws://10.9.9.9:45976/ws?token={SENTINEL}"),
+            }],
+            ..Default::default()
+        };
         let mut app = App::with(cfg, Some(SENTINEL.to_string()), TokenSource::Env, None);
         // An auth refusal whose detail quotes the connect URL: both the
         // address and the token must be gone from the summary.
@@ -5842,9 +7561,18 @@ mod tests {
         let s = app.support_summary_text();
         assert!(!s.contains(SENTINEL), "summary leaked the token:\n{s}");
         assert!(!s.contains("10.9.9.9"), "summary leaked the address:\n{s}");
-        assert!(s.contains("Closed right after the handshake"), "summary lost the classified failure:\n{s}");
-        assert!(s.contains("endpoint: ws, default port, /ws"), "summary lost the endpoint shape:\n{s}");
-        assert!(s.contains(&format!("version: {}", version::current_version())), "no version:\n{s}");
+        assert!(
+            s.contains("Closed right after the handshake"),
+            "summary lost the classified failure:\n{s}"
+        );
+        assert!(
+            s.contains("endpoint: ws, default port, /ws"),
+            "summary lost the endpoint shape:\n{s}"
+        );
+        assert!(
+            s.contains(&format!("version: {}", version::current_version())),
+            "no version:\n{s}"
+        );
     }
 
     #[test]
@@ -5855,7 +7583,10 @@ mod tests {
         let t = render(&mut app, 960.0, 1000.0);
         let j = joined(&t);
         assert!(j.contains("Open logs"), "no logs link:\n{j}");
-        assert!(j.contains("Copy support summary"), "no support summary:\n{j}");
+        assert!(
+            j.contains("Copy support summary"),
+            "no support summary:\n{j}"
+        );
         assert!(j.contains("log: "), "no log path shown:\n{j}");
     }
 
@@ -5869,13 +7600,25 @@ mod tests {
         ));
         let t = render(&mut app, 960.0, 1000.0);
         let j = joined(&t);
-        assert!(j.contains("Closed right after the handshake"), "no headline:\n{j}");
+        assert!(
+            j.contains("Closed right after the handshake"),
+            "no headline:\n{j}"
+        );
         assert!(j.contains("Re-copy the token"), "no action:\n{j}");
         // F1 on the Settings surface: same uncertainty text, same endpoint
         // identity check as the wizard.
-        assert!(j.contains("infers"), "settings block claims confirmation:\n{j}");
-        assert!(j.contains("another WebSocket service"), "settings block hides the non-agent case:\n{j}");
-        assert!(j.contains("host and port point at the EbbTop agent"), "settings block has no identity check:\n{j}");
+        assert!(
+            j.contains("infers"),
+            "settings block claims confirmation:\n{j}"
+        );
+        assert!(
+            j.contains("another WebSocket service"),
+            "settings block hides the non-agent case:\n{j}"
+        );
+        assert!(
+            j.contains("host and port point at the EbbTop agent"),
+            "settings block has no identity check:\n{j}"
+        );
         assert!(j.contains("Open logs"), "no logs link:\n{j}");
     }
 
@@ -5886,7 +7629,10 @@ mod tests {
         // including at the app's minimum window size.
         for (w, h) in [(960.0f32, 1000.0f32), (480.0, 420.0)] {
             // The close-after-handshake guidance is the longest block.
-            for err in ["connect timed out", "get_metrics: agent closed the connection (wrong token?)"] {
+            for err in [
+                "connect timed out",
+                "get_metrics: agent closed the connection (wrong token?)",
+            ] {
                 let mut app = wizard_app();
                 fill_wizard(&mut app, "h", "ws://10.0.0.5/ws", SENTINEL);
                 deliver_probe(&mut app, Err(err.into()));
@@ -5910,8 +7656,14 @@ mod tests {
     #[ignore]
     fn e4_guidance_evidence() {
         for (label, err) in [
-            ("close after the handshake", "get_metrics: agent closed the connection (wrong token?)"),
-            ("unreachable endpoint", "get_metrics: IO error: Connection refused (os error 111)"),
+            (
+                "close after the handshake",
+                "get_metrics: agent closed the connection (wrong token?)",
+            ),
+            (
+                "unreachable endpoint",
+                "get_metrics: IO error: Connection refused (os error 111)",
+            ),
             ("timeout", "connect timed out"),
             ("ambiguous", "get_metrics: no answer, cause unknown"),
         ] {
@@ -5920,18 +7672,34 @@ mod tests {
             deliver_probe(&mut app, Err(err.into()));
             let j = joined(&render(&mut app, 960.0, 1000.0));
             println!("=== {label}: rendered wizard frame ===\n{j}\n");
-            let d = app.onboard.as_ref().and_then(|ob| ob.failure.clone()).expect("failure is shown");
+            let d = app
+                .onboard
+                .as_ref()
+                .and_then(|ob| ob.failure.clone())
+                .expect("failure is shown");
             assert!(j.contains(d.headline()), "{label}: headline not rendered");
-            assert!(j.contains(d.next_action()), "{label}: next action not rendered");
+            assert!(
+                j.contains(d.next_action()),
+                "{label}: next action not rendered"
+            );
             assert!(!j.contains(SENTINEL), "{label}: token rendered");
             if label == "close after the handshake" {
                 // The rendered frame, not just the core string, carries the
                 // inference and the non-agent close possibility.
-                assert!(j.contains("another WebSocket service"), "{label}: non-agent case not rendered");
-                assert!(j.contains("host and port point at the EbbTop agent"), "{label}: identity check not rendered");
+                assert!(
+                    j.contains("another WebSocket service"),
+                    "{label}: non-agent case not rendered"
+                );
+                assert!(
+                    j.contains("host and port point at the EbbTop agent"),
+                    "{label}: identity check not rendered"
+                );
             }
         }
-        println!("=== support summary (no failure) ===\n{}", wizard_app().support_summary_text());
+        println!(
+            "=== support summary (no failure) ===\n{}",
+            wizard_app().support_summary_text()
+        );
     }
 
     // ---- P3b: discovery list and pairing-code entry ----------------------
@@ -5951,7 +7719,9 @@ mod tests {
     /// A 64-hex credential shape built at run time: no compile-time literal
     /// in this file looks like a secret.
     fn issued_token() -> String {
-        let digit = ['0', 'f', '1', 'e', '2', 'd', '3', 'c', '4', 'b', '5', 'a', '6', '9', '7', '8'];
+        let digit = [
+            '0', 'f', '1', 'e', '2', 'd', '3', 'c', '4', 'b', '5', 'a', '6', '9', '7', '8',
+        ];
         (0..64).map(|i| digit[i % digit.len()]).collect()
     }
 
@@ -5988,18 +7758,31 @@ mod tests {
         let t = joined(&render(&mut app, 960.0, 1000.0));
         // Name, version and address for every discovered agent.
         for s in [
-            "k-server", "v0.2.8", "10.0.0.5:45976",
-            "pi", "v0.2.7", "10.0.0.22:45977",
+            "k-server",
+            "v0.2.8",
+            "10.0.0.5:45976",
+            "pi",
+            "v0.2.7",
+            "10.0.0.22:45977",
             "Use this host",
         ] {
             assert!(t.contains(s), "{s} missing from the discovered list:\n{t}");
         }
         // The scan's real limit is stated, and the manual path is still on
         // screen next to the list (discovery is a convenience, not a gate).
-        assert!(t.contains("broadcast does not cross"), "scan limit not stated:\n{t}");
-        assert!(t.contains("Or enter the address yourself"), "manual path missing:\n{t}");
+        assert!(
+            t.contains("broadcast does not cross"),
+            "scan limit not stated:\n{t}"
+        );
+        assert!(
+            t.contains("Or enter the address yourself"),
+            "manual path missing:\n{t}"
+        );
         // No scan has been run, so the "nothing answered" result is not shown.
-        assert!(!t.contains("No agent answered"), "empty state before any scan:\n{t}");
+        assert!(
+            !t.contains("No agent answered"),
+            "empty state before any scan:\n{t}"
+        );
     }
 
     #[test]
@@ -6010,8 +7793,13 @@ mod tests {
         for s in [
             "Find agents on this network",
             "Or enter the address yourself",
-            "Name", "URL", "Token",
-            "Test", "Save and connect", "Use a pairing code", "Skip",
+            "Name",
+            "URL",
+            "Token",
+            "Test",
+            "Save and connect",
+            "Use a pairing code",
+            "Skip",
         ] {
             assert!(t.contains(s), "{s} missing from the wizard:\n{t}");
         }
@@ -6020,13 +7808,21 @@ mod tests {
         fill_wizard(&mut app, "h", "ws://127.0.0.1:1/ws", SENTINEL);
         deliver_probe(&mut app, Ok("manualhost".into()));
         let _ = render(&mut app, 960.0, 1000.0);
-        assert!(app.onboard_save_gate(), "a manual green Test must unlock Save");
+        assert!(
+            app.onboard_save_gate(),
+            "a manual green Test must unlock Save"
+        );
         let ctx = egui::Context::default();
         app.onboard_save(&ctx);
         assert_eq!(app.cfg.sources.len(), 1);
         assert_eq!(app.cfg.sources[0].name, "h");
         assert_eq!(store::load_token_for("h").0.as_deref(), Some(SENTINEL));
-        assert!(creds.borrow().iter().any(|(u, t)| u == "h" && t == SENTINEL));
+        assert!(
+            creds
+                .borrow()
+                .iter()
+                .any(|(u, t)| u == "h" && t == SENTINEL)
+        );
         clear_isolated_state(&dir);
     }
 
@@ -6060,19 +7856,33 @@ mod tests {
             pressed,
             modifiers: Default::default(),
         };
-        frame(&ctx, &mut app, w, h, vec![egui::Event::PointerMoved(target)]);
+        frame(
+            &ctx,
+            &mut app,
+            w,
+            h,
+            vec![egui::Event::PointerMoved(target)],
+        );
         frame(&ctx, &mut app, w, h, vec![btn(true)]);
         let t = joined(&texts(&frame(&ctx, &mut app, w, h, vec![btn(false)])));
 
         let ob = app.onboard.as_ref().expect("wizard open");
-        let p = ob.pair.as_ref().expect("picking a host must open the code prompt");
+        let p = ob
+            .pair
+            .as_ref()
+            .expect("picking a host must open the code prompt");
         assert_eq!(p.name, "k-server");
         assert_eq!(p.url, "ws://10.0.0.5:45976/ws");
         // The fields were prefilled from the reply, and the prompt asks for
         // the six-digit code: name/version/address were already chosen.
         assert_eq!(ob.name, "k-server");
         assert_eq!(ob.url, "ws://10.0.0.5:45976/ws");
-        for s in ["Pair with k-server", "Pairing code", "Pair", "ebbtop-agent --pair"] {
+        for s in [
+            "Pair with k-server",
+            "Pairing code",
+            "Pair",
+            "ebbtop-agent --pair",
+        ] {
             assert!(t.contains(s), "{s} missing from the pair step:\n{t}");
         }
     }
@@ -6080,12 +7890,16 @@ mod tests {
     #[test]
     fn wizard_pair_step_renders_the_code_entry() {
         let mut app = wizard_app();
-        app.onboard.as_mut().unwrap().pair = Some(Pairing::for_address("k-server", "ws://10.0.0.5/ws"));
+        app.onboard.as_mut().unwrap().pair =
+            Some(Pairing::for_address("k-server", "ws://10.0.0.5/ws"));
         let t = joined(&render(&mut app, 960.0, 1000.0));
         for s in ["Pair with k-server", "Pairing code", "Pair"] {
             assert!(t.contains(s), "{s} missing:\n{t}");
         }
-        assert!(t.contains("ws://10.0.0.5:45976/ws"), "prompt address missing:\n{t}");
+        assert!(
+            t.contains("ws://10.0.0.5:45976/ws"),
+            "prompt address missing:\n{t}"
+        );
         assert!(t.contains("6-digit code"), "no code instruction:\n{t}");
     }
 
@@ -6094,9 +7908,18 @@ mod tests {
         // Every refusal class the accepted contract defines, plus the
         // transport classes, rendered with its own headline and next action.
         let cases = [
-            (Some((404, "no pending pairing code")), PairFailure::NoPendingCode),
-            (Some((403, "invalid pairing code")), PairFailure::InvalidCode),
-            (Some((403, "pairing code expired")), PairFailure::ExpiredCode),
+            (
+                Some((404, "no pending pairing code")),
+                PairFailure::NoPendingCode,
+            ),
+            (
+                Some((403, "invalid pairing code")),
+                PairFailure::InvalidCode,
+            ),
+            (
+                Some((403, "pairing code expired")),
+                PairFailure::ExpiredCode,
+            ),
             (Some((429, "too many attempts")), PairFailure::LockedOut),
             (Some((400, "bad pair request")), PairFailure::BadRequest),
             (None, PairFailure::Unreachable),
@@ -6121,12 +7944,28 @@ mod tests {
             p.error = Some(err.clone());
             app.onboard.as_mut().unwrap().pair = Some(p);
             let t = joined(&render(&mut app, 960.0, 1000.0));
-            assert!(t.contains(err.headline()), "{:?}: headline missing:\n{t}", want.tag());
-            assert!(t.contains(err.next_action()), "{:?}: next action missing:\n{t}", want.tag());
-            assert!(t.contains(&format!("detail: {}", err.detail)), "{:?}: detail missing:\n{t}", want.tag());
+            assert!(
+                t.contains(err.headline()),
+                "{:?}: headline missing:\n{t}",
+                want.tag()
+            );
+            assert!(
+                t.contains(err.next_action()),
+                "{:?}: next action missing:\n{t}",
+                want.tag()
+            );
+            assert!(
+                t.contains(&format!("detail: {}", err.detail)),
+                "{:?}: detail missing:\n{t}",
+                want.tag()
+            );
             // The prompt's own code field is empty here, so a rendered code
             // would be an echo from the failure text: there must not be one.
-            assert!(!t.contains("123456"), "{:?}: code echoed in the UI:\n{t}", want.tag());
+            assert!(
+                !t.contains("123456"),
+                "{:?}: code echoed in the UI:\n{t}",
+                want.tag()
+            );
         }
     }
 
@@ -6152,38 +7991,69 @@ mod tests {
             let ob = app.onboard.as_ref().expect("wizard open");
             assert_eq!(ob.name, "k-server");
             assert_eq!(ob.url, "ws://10.0.0.5:45976/ws");
-            assert!(ob.token.is_empty(), "the issued token must stay out of the field");
+            assert!(
+                ob.token.is_empty(),
+                "the issued token must stay out of the field"
+            );
             assert_eq!(ob.issued.as_deref(), Some(token.as_str()));
             assert!(ob.pair.is_none(), "the prompt closes on success");
         }
         // It was written to the existing per-host credential store under the
         // source name, and nowhere else.
-        assert_eq!(store::load_token_for("k-server").0.as_deref(), Some(token.as_str()));
+        assert_eq!(
+            store::load_token_for("k-server").0.as_deref(),
+            Some(token.as_str())
+        );
 
         // The Save gate is unchanged: a paired credential is not a green Test.
-        assert!(!app.onboard_save_gate(), "pairing must not unlock Save by itself");
+        assert!(
+            !app.onboard_save_gate(),
+            "pairing must not unlock Save by itself"
+        );
         let t = joined(&render(&mut app, 960.0, 1000.0));
         assert!(!t.contains(&token), "the token rendered:\n{t}");
-        assert!(t.contains("credential: issued by pairing"), "no credential note:\n{t}");
-        assert!(t.contains("Save unlocks after a green Test"), "gate note missing:\n{t}");
-        assert!(t.contains("Test to unlock Save"), "next action missing:\n{t}");
+        assert!(
+            t.contains("credential: issued by pairing"),
+            "no credential note:\n{t}"
+        );
+        assert!(
+            t.contains("Save unlocks after a green Test"),
+            "gate note missing:\n{t}"
+        );
+        assert!(
+            t.contains("Test to unlock Save"),
+            "next action missing:\n{t}"
+        );
 
         // Test -> Save is the existing flow: a green Test of these exact
         // values unlocks Save, and Save stores the source with the same token.
         deliver_probe(&mut app, Ok("k-server".into()));
         let _ = render(&mut app, 960.0, 1000.0);
-        assert!(app.onboard_save_gate(), "a green Test of the paired values unlocks Save");
+        assert!(
+            app.onboard_save_gate(),
+            "a green Test of the paired values unlocks Save"
+        );
         let ctx = egui::Context::default();
         app.onboard_save(&ctx);
         assert!(app.onboard.is_none(), "save completes the wizard");
         assert_eq!(app.cfg.sources.len(), 1);
         assert_eq!(app.cfg.sources[0].url, "ws://10.0.0.5:45976/ws");
-        assert_eq!(store::load_token_for("k-server").0.as_deref(), Some(token.as_str()));
-        assert_eq!(creds.borrow().len(), 2, "pairing + save both wrote the one entry");
+        assert_eq!(
+            store::load_token_for("k-server").0.as_deref(),
+            Some(token.as_str())
+        );
+        assert_eq!(
+            creds.borrow().len(),
+            2,
+            "pairing + save both wrote the one entry"
+        );
 
         // The log records the class and host, never the secret or the code.
         let logged = std::fs::read_to_string(&log).unwrap_or_default();
-        assert!(logged.contains("pairing ok host=k-server"), "no pairing log line:\n{logged}");
+        assert!(
+            logged.contains("pairing ok host=k-server"),
+            "no pairing log line:\n{logged}"
+        );
         assert!(!logged.contains(&token), "token logged:\n{logged}");
         assert!(!logged.contains("read_only") || !logged.contains(&token));
         clear_isolated_state(&dir);
@@ -6207,7 +8077,10 @@ mod tests {
         // will use, and the paired credential stops standing in.
         app.onboard.as_mut().unwrap().token = "typed-token".into();
         assert_eq!(app.onboard_current().2, "typed-token");
-        assert!(!app.onboard_save_gate(), "an edit after pairing cannot inherit a Test");
+        assert!(
+            !app.onboard_save_gate(),
+            "an edit after pairing cannot inherit a Test"
+        );
         let _ = creds;
         clear_isolated_state(&dir);
     }
@@ -6226,7 +8099,9 @@ mod tests {
         for s in [
             "Pair a new host",
             "Find agents on this network",
-            "k-server", "v0.2.8", "10.0.0.5:45976",
+            "k-server",
+            "v0.2.8",
+            "10.0.0.5:45976",
             "Use this host",
             "Pair with code",
             "Address",
@@ -6237,15 +8112,27 @@ mod tests {
         // Picking a discovered host opens the same code prompt as the wizard.
         app.pair_new = Some(Pairing::for_agent(&app.pair_discovery.agents[0].clone()));
         let t = joined(&render(&mut app, 960.0, 1000.0));
-        assert!(t.contains("Pair with k-server"), "no code prompt in Settings:\n{t}");
-        assert!(t.contains("Pairing code"), "no code field in Settings:\n{t}");
+        assert!(
+            t.contains("Pair with k-server"),
+            "no code prompt in Settings:\n{t}"
+        );
+        assert!(
+            t.contains("Pairing code"),
+            "no code field in Settings:\n{t}"
+        );
 
         // A refusal renders the same E4 block here, not a generic failure.
         app.pair_new.as_mut().unwrap().error =
             Some(PairError::from_status(403, "invalid pairing code"));
         let t = joined(&render(&mut app, 960.0, 1000.0));
-        assert!(t.contains("Pairing code not accepted"), "refusal headline missing:\n{t}");
-        assert!(t.contains("Re-type the six digits"), "refusal action missing:\n{t}");
+        assert!(
+            t.contains("Pairing code not accepted"),
+            "refusal headline missing:\n{t}"
+        );
+        assert!(
+            t.contains("Re-type the six digits"),
+            "refusal action missing:\n{t}"
+        );
 
         // A success adds the source under a free name and stores its token;
         // "k-server" is taken by the existing fixture, so it suffixes.
@@ -6263,12 +8150,24 @@ mod tests {
         );
         assert!(app.pair_new.is_none(), "the prompt closes on success");
         assert_eq!(app.cfg.sources.len(), 3, "the paired host was added");
-        let added = app.cfg.sources.iter().find(|s| s.url == "ws://10.0.0.5:45976/ws");
+        let added = app
+            .cfg
+            .sources
+            .iter()
+            .find(|s| s.url == "ws://10.0.0.5:45976/ws");
         let added = added.expect("paired source present");
         assert_eq!(added.name, "k-server-2", "a taken name must not be reused");
-        assert_eq!(store::load_token_for("k-server-2").0.as_deref(), Some(token.as_str()));
+        assert_eq!(
+            store::load_token_for("k-server-2").0.as_deref(),
+            Some(token.as_str())
+        );
         assert!(!app.pair_msg.clone().unwrap_or_default().contains(&token));
-        assert!(app.pair_msg.clone().unwrap_or_default().contains("paired k-server-2"));
+        assert!(
+            app.pair_msg
+                .clone()
+                .unwrap_or_default()
+                .contains("paired k-server-2")
+        );
         // The existing sources keep their names and tokens.
         assert_eq!(app.cfg.sources[0].name, "k-server");
         assert!(creds.borrow().iter().any(|(u, _)| u == "k-server-2"));
@@ -6306,18 +8205,45 @@ mod tests {
         scene("wizard: manual path (no discovery)", manual);
 
         let mut code = wizard_app();
-        code.onboard.as_mut().unwrap().pair = Some(Pairing::for_address("k-server", "ws://10.0.0.164/ws"));
+        code.onboard.as_mut().unwrap().pair =
+            Some(Pairing::for_address("k-server", "ws://10.0.0.164/ws"));
         scene("wizard: pairing-code step", code);
 
         for (label, err) in [
-            ("refusal: no pending code", PairError::from_status(404, "no pending pairing code")),
-            ("refusal: invalid code", PairError::from_status(403, "invalid pairing code")),
-            ("refusal: expired code", PairError::from_status(403, "pairing code expired")),
-            ("refusal: locked out", PairError::from_status(429, "too many attempts; run ebbtop-agent --pair again")),
-            ("refusal: bad request", PairError::from_status(400, "bad pair request")),
-            ("refusal: unreachable", PairError::from_transport("error sending request: Connection refused (os error 111)")),
-            ("refusal: timeout", PairError::from_transport("error sending request: operation timed out")),
-            ("refusal: not the agent", PairError::from_transport("HTTP format error: invalid status")),
+            (
+                "refusal: no pending code",
+                PairError::from_status(404, "no pending pairing code"),
+            ),
+            (
+                "refusal: invalid code",
+                PairError::from_status(403, "invalid pairing code"),
+            ),
+            (
+                "refusal: expired code",
+                PairError::from_status(403, "pairing code expired"),
+            ),
+            (
+                "refusal: locked out",
+                PairError::from_status(429, "too many attempts; run ebbtop-agent --pair again"),
+            ),
+            (
+                "refusal: bad request",
+                PairError::from_status(400, "bad pair request"),
+            ),
+            (
+                "refusal: unreachable",
+                PairError::from_transport(
+                    "error sending request: Connection refused (os error 111)",
+                ),
+            ),
+            (
+                "refusal: timeout",
+                PairError::from_transport("error sending request: operation timed out"),
+            ),
+            (
+                "refusal: not the agent",
+                PairError::from_transport("HTTP format error: invalid status"),
+            ),
         ] {
             let mut app = wizard_app();
             let mut p = Pairing::for_address("k-server", "ws://10.0.0.164/ws");

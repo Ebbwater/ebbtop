@@ -2,3 +2,5 @@ target/
 *.env
 *.token
 dist/
+dist.pre-*-bak/
+__pycache__/

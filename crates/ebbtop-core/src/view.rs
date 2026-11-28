@@ -81,7 +81,13 @@ pub fn bytes(n: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{n} B") } else if v >= 100.0 { format!("{v:.0} {}", U[i]) } else { format!("{v:.1} {}", U[i]) }
+    if i == 0 {
+        format!("{n} B")
+    } else if v >= 100.0 {
+        format!("{v:.0} {}", U[i])
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
 }
 
 /// Bytes per second as bits per second, btop style: "1.2 Mbps".
@@ -96,7 +102,11 @@ pub fn rate_bits(bps: f64) -> String {
     } else {
         (b, "bps")
     };
-    if u == "bps" { format!("{v:.0} {u}") } else { format!("{v:.1} {u}") }
+    if u == "bps" {
+        format!("{v:.0} {u}")
+    } else {
+        format!("{v:.1} {u}")
+    }
 }
 
 /// Millisecond age as "0.3s" / "12s" / "4m".
@@ -114,7 +124,13 @@ pub fn age(ms: i64) -> String {
 /// Uptime as "5d 5h", "3h 12m" or "7m".
 pub fn uptime(s: u64) -> String {
     let (d, h, m) = (s / 86_400, s % 86_400 / 3_600, s % 3_600 / 60);
-    if d > 0 { format!("{d}d {h}h") } else if h > 0 { format!("{h}h {m}m") } else { format!("{m}m") }
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    }
 }
 
 /// CPU microseconds as "1.5s", "1m 30s" or "1h 2m".
@@ -123,7 +139,11 @@ pub fn cpu_time(us: u64) -> String {
         format!("{:.1}s", us as f64 / 1_000_000.0)
     } else {
         let s = us / 1_000_000;
-        if s < 3600 { format!("{}m {}s", s / 60, s % 60) } else { format!("{}h {}m", s / 3600, s % 3600 / 60) }
+        if s < 3600 {
+            format!("{}m {}s", s / 60, s % 60)
+        } else {
+            format!("{}h {}m", s / 3600, s % 3600 / 60)
+        }
     }
 }
 
@@ -143,7 +163,11 @@ pub fn cpu_time(us: u64) -> String {
 /// empty key, meaning "the host".
 pub fn workload_key(cgroup: &str) -> String {
     let segs: Vec<&str> = cgroup.split('/').filter(|s| !s.is_empty()).collect();
-    if let Some(s) = segs.iter().rev().find(|s| s.ends_with(".service") && !s.starts_with("user@")) {
+    if let Some(s) = segs
+        .iter()
+        .rev()
+        .find(|s| s.ends_with(".service") && !s.starts_with("user@"))
+    {
         return (*s).to_string();
     }
     if let Some(id) = segs.iter().rev().find_map(|s| container_id(s)) {
@@ -177,7 +201,11 @@ pub fn workload_label(key: &str) -> String {
     }
     if let Some(id) = key.strip_prefix("libpod-") {
         let n = id.len().min(12);
-        return format!("libpod-{}", &id[..n]);
+        // get(..n), not &id[..n]: a byte index can land inside a multi-byte
+        // UTF-8 char. Unreachable through values workload_key produces
+        // (container ids are ASCII hex), but this fn is public and takes
+        // any string, so slice defensively instead of panicking.
+        return format!("libpod-{}", id.get(..n).unwrap_or(id));
     }
     key.strip_suffix(".service").unwrap_or(key).to_string()
 }
@@ -209,15 +237,26 @@ pub fn group_by_workload(rows: &[Process]) -> Vec<WorkloadGroup> {
                 let g = &mut out[i];
                 g.pids += 1;
                 g.cpu_usage += r.cpu_usage;
-                g.mem_bytes += r.mem_bytes;
+                // Wire values are untrusted: near-u64::MAX counters must not
+                // panic a debug build or wrap a release one.
+                g.mem_bytes = g.mem_bytes.saturating_add(r.mem_bytes);
             }
             None => {
                 index.insert(key.clone(), out.len());
-                out.push(WorkloadGroup { key, pids: 1, cpu_usage: r.cpu_usage, mem_bytes: r.mem_bytes });
+                out.push(WorkloadGroup {
+                    key,
+                    pids: 1,
+                    cpu_usage: r.cpu_usage,
+                    mem_bytes: r.mem_bytes,
+                });
             }
         }
     }
-    out.sort_by(|a, b| b.mem_bytes.cmp(&a.mem_bytes).then_with(|| a.key.cmp(&b.key)));
+    out.sort_by(|a, b| {
+        b.mem_bytes
+            .cmp(&a.mem_bytes)
+            .then_with(|| a.key.cmp(&b.key))
+    });
     out
 }
 
@@ -226,19 +265,38 @@ mod tests {
     use super::*;
 
     fn p(pid: u32, name: &str, user: &str, cpu: f32, mem: u64) -> Process {
-        Process { pid, name: name.into(), cpu_usage: cpu, mem_bytes: mem, user: user.into(), state: "Sleeping".into(), start_time_ms: 0, cgroup: String::new() }
+        Process {
+            pid,
+            name: name.into(),
+            cpu_usage: cpu,
+            mem_bytes: mem,
+            user: user.into(),
+            state: "Sleeping".into(),
+            start_time_ms: 0,
+            cgroup: String::new(),
+        }
     }
 
     #[test]
     fn sort_cpu_desc_with_pid_tiebreak() {
-        let rows = vec![p(3, "a", "root", 1.0, 0), p(1, "b", "kyler", 5.0, 0), p(2, "c", "kyler", 1.0, 0)];
-        let pids: Vec<u32> = select_rows(&rows, "", SortKey::Cpu, true).iter().map(|&i| rows[i].pid).collect();
+        let rows = vec![
+            p(3, "a", "root", 1.0, 0),
+            p(1, "b", "kyler", 5.0, 0),
+            p(2, "c", "kyler", 1.0, 0),
+        ];
+        let pids: Vec<u32> = select_rows(&rows, "", SortKey::Cpu, true)
+            .iter()
+            .map(|&i| rows[i].pid)
+            .collect();
         assert_eq!(pids, vec![1, 2, 3]);
     }
 
     #[test]
     fn filter_matches_name_user_pid_case_insensitive() {
-        let rows = vec![p(10, "Hermes", "kyler", 0.0, 0), p(222, "sshd", "root", 0.0, 0)];
+        let rows = vec![
+            p(10, "Hermes", "kyler", 0.0, 0),
+            p(222, "sshd", "root", 0.0, 0),
+        ];
         assert_eq!(select_rows(&rows, "herm", SortKey::Pid, false), vec![0]);
         assert_eq!(select_rows(&rows, "ROOT", SortKey::Pid, false), vec![1]);
         assert_eq!(select_rows(&rows, "22", SortKey::Pid, false), vec![1]);
@@ -289,28 +347,67 @@ mod tests {
     const ID: &str = "65326a2caf20c491810c381f5b09e81c74c0fef5819e05ddd4205ec0335d25d7";
 
     fn pg(cgroup: &str, mem: u64, cpu: f32) -> Process {
-        Process { cgroup: cgroup.into(), ..p(1, "x", "kyler", cpu, mem) }
+        Process {
+            cgroup: cgroup.into(),
+            ..p(1, "x", "kyler", cpu, mem)
+        }
     }
 
     #[test]
     fn workload_key_groups_payload_with_its_helpers() {
-        let payload = format!("/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/libpod-payload-{ID}");
-        let conmon = "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/runtime";
+        let payload = format!(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/libpod-payload-{ID}"
+        );
+        let conmon =
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/runtime";
         assert_eq!(workload_key(&payload), "davy-pg.service");
         assert_eq!(workload_key(conmon), "davy-pg.service");
     }
 
+    /// Wire values are untrusted: near-u64::MAX RSS rows must saturate the
+    /// per-workload sum instead of panicking (debug) or wrapping (release).
+    #[test]
+    fn workload_mem_sum_saturates_instead_of_overflowing() {
+        let rows = vec![
+            pg("web.service", u64::MAX, 1.0),
+            pg("web.service", 100, 1.0),
+        ];
+        let groups = group_by_workload(&rows);
+        assert_eq!(groups[0].mem_bytes, u64::MAX);
+    }
+
+    /// `workload_label` is public and takes any string; a multi-byte
+    /// character at the 12-byte cut must slice defensively, not panic.
+    #[test]
+    fn workload_label_slices_on_char_boundaries() {
+        let key = format!(
+            "libpod-{}",
+            "ab\u{e9}".repeat(8) /* 24 bytes, cut lands mid-char */
+        );
+        let label = workload_label(&key);
+        assert!(label.starts_with("libpod-"), "{label}");
+    }
+
     #[test]
     fn workload_key_falls_back_to_container_id_without_a_unit() {
-        let payload = format!("/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-{ID}.scope/container");
-        let conmon = format!("/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-{ID}.scope");
+        let payload = format!(
+            "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-{ID}.scope/container"
+        );
+        let conmon = format!(
+            "/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-conmon-{ID}.scope"
+        );
         assert_eq!(workload_key(&payload), format!("libpod-{ID}"));
         assert_eq!(workload_key(&conmon), format!("libpod-{ID}"));
     }
 
     #[test]
     fn workload_key_units_scopes_and_host() {
-        assert_eq!(workload_key("/user.slice/user-1000.slice/user@1000.service/app.slice/wn-ci-runner-2.service"), "wn-ci-runner-2.service");
+        assert_eq!(
+            workload_key(
+                "/user.slice/user-1000.slice/user@1000.service/app.slice/wn-ci-runner-2.service"
+            ),
+            "wn-ci-runner-2.service"
+        );
         assert_eq!(workload_key("/init.scope"), "init.scope");
         assert_eq!(workload_key(""), "");
         assert_eq!(workload_key("/"), "");
@@ -330,15 +427,26 @@ mod tests {
         assert_eq!(workload_label(""), "(host)");
         assert_eq!(workload_label("davy-pg.service"), "davy-pg");
         assert_eq!(workload_label("init.scope"), "init.scope");
-        assert_eq!(workload_label(&format!("libpod-{ID}")), "libpod-65326a2caf20");
+        assert_eq!(
+            workload_label(&format!("libpod-{ID}")),
+            "libpod-65326a2caf20"
+        );
     }
 
     #[test]
     fn group_by_workload_sums_and_orders() {
-        let payload = format!("/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/libpod-payload-{ID}");
-        let conmon = "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/runtime";
+        let payload = format!(
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/libpod-payload-{ID}"
+        );
+        let conmon =
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/runtime";
         let ci = "/user.slice/user-1000.slice/user@1000.service/app.slice/wn-ci-runner-2.service";
-        let rows = vec![pg(&payload, 900 << 20, 4.0), pg(conmon, 3 << 20, 0.5), pg(ci, 100 << 20, 1.0), pg("", 1 << 20, 0.0)];
+        let rows = vec![
+            pg(&payload, 900 << 20, 4.0),
+            pg(conmon, 3 << 20, 0.5),
+            pg(ci, 100 << 20, 1.0),
+            pg("", 1 << 20, 0.0),
+        ];
         let groups = group_by_workload(&rows);
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].key, "davy-pg.service");

@@ -11,6 +11,10 @@
 //! alongside, swaps it in keeping a `.bak` copy, and relaunches with
 //! `open` (the caller then quits).
 
+// The apply helpers below are Windows/macOS paths, cfg-selected at their call
+// sites in app.rs; on a Linux dev build they are intentionally dead.
+#![cfg_attr(target_os = "linux", allow(dead_code))]
+
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -18,7 +22,8 @@ use ebbtop_core::update::{ReleaseAsset, is_update_available, parse_release_asset
 
 /// GitHub API endpoint for the newest stable release (`/latest` already
 /// excludes drafts and prereleases, so no extra filtering is needed).
-pub const RELEASES_LATEST_URL: &str = "https://api.github.com/repos/Ebbwater/ebbtop/releases/latest";
+pub const RELEASES_LATEST_URL: &str =
+    "https://api.github.com/repos/Ebbwater/ebbtop/releases/latest";
 
 /// Automatic re-check cadence from the spec.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);
@@ -42,8 +47,13 @@ pub fn parse_latest_tag(body: &str) -> Option<String> {
 /// asset list so the download step needs no second fetch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckOutcome {
-    Available { version: String, assets: Vec<ReleaseAsset> },
-    UpToDate { version: String },
+    Available {
+        version: String,
+        assets: Vec<ReleaseAsset>,
+    },
+    UpToDate {
+        version: String,
+    },
     Failed(String),
 }
 
@@ -54,9 +64,10 @@ pub fn decide(current: &str, fetched: Result<String, String>) -> CheckOutcome {
         Err(e) => CheckOutcome::Failed(e),
         Ok(body) => match parse_latest_tag(&body) {
             None => CheckOutcome::Failed("unparseable release body".into()),
-            Some(tag) if is_update_available(current, &tag) => {
-                CheckOutcome::Available { version: tag, assets: parse_release_assets(&body) }
-            }
+            Some(tag) if is_update_available(current, &tag) => CheckOutcome::Available {
+                version: tag,
+                assets: parse_release_assets(&body),
+            },
             Some(tag) => CheckOutcome::UpToDate { version: tag },
         },
     }
@@ -67,16 +78,30 @@ pub fn decide(current: &str, fetched: Result<String, String>) -> CheckOutcome {
 pub enum UpdateStatus {
     Idle,
     Checking,
-    Available { version: String, assets: Vec<ReleaseAsset> },
-    UpToDate { version: String },
+    Available {
+        version: String,
+        assets: Vec<ReleaseAsset>,
+    },
+    UpToDate {
+        version: String,
+    },
     Failed(String),
     /// User approved this version; the dialog starts the verified
     /// download for it on the next frame.
-    Accepted { version: String, assets: Vec<ReleaseAsset> },
+    Accepted {
+        version: String,
+        assets: Vec<ReleaseAsset>,
+    },
     /// Verified download in flight; `done` is bytes written so far.
-    Downloading { version: String, done: u64 },
+    Downloading {
+        version: String,
+        done: u64,
+    },
     /// Verified download on disk, ready for the platform apply step.
-    Ready { version: String, path: std::path::PathBuf },
+    Ready {
+        version: String,
+        path: std::path::PathBuf,
+    },
 }
 
 /// One extra release file fetched (and hash-verified against the same
@@ -288,11 +313,12 @@ impl UpdateCheck {
                         let (null_tx, _) = mpsc::channel();
                         match download_verified(&x.url, &x.sums_url, &x.asset, &x.dest, &null_tx) {
                             Err(e) => Err(e),
-                            Ok(()) => download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx)
-                                .map_err(|e| {
-                                    let _ = std::fs::remove_file(&x.dest);
-                                    e
-                                }),
+                            Ok(()) => {
+                                download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx)
+                                    .inspect_err(|_e| {
+                                        let _ = std::fs::remove_file(&x.dest);
+                                    })
+                            }
                         }
                     }
                     None => download_verified(&asset_url, &sums_url, &asset, &dest, &prog_tx),
@@ -325,7 +351,10 @@ impl UpdateCheck {
     /// download for it on the next frame.
     pub fn accept(&mut self) {
         if let UpdateStatus::Available { version, assets } = &self.status {
-            self.status = UpdateStatus::Accepted { version: version.clone(), assets: assets.clone() };
+            self.status = UpdateStatus::Accepted {
+                version: version.clone(),
+                assets: assets.clone(),
+            };
         }
     }
 
@@ -387,7 +416,11 @@ pub fn download_dest_path(version: &str, asset: &str) -> std::path::PathBuf {
             }
         })
         .collect();
-    let name = if safe.is_empty() { "update".to_string() } else { safe };
+    let name = if safe.is_empty() {
+        "update".to_string()
+    } else {
+        safe
+    };
     std::env::temp_dir().join(format!("ebbtop-update-{name}-{asset}"))
 }
 
@@ -444,8 +477,9 @@ pub fn download_verified(
     let tmp = download_tmp_path(dest);
     let result = download_verified_inner(url, sums_url, asset, &tmp, progress);
     match result {
-        Ok(()) => std::fs::rename(&tmp, dest)
-            .map_err(|e| format!("download {}: {e}", scrub_url(url))),
+        Ok(()) => {
+            std::fs::rename(&tmp, dest).map_err(|e| format!("download {}: {e}", scrub_url(url)))
+        }
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
@@ -473,9 +507,8 @@ fn download_verified_inner(
         .map_err(|e| format!("sums fetch {}: {e}", scrub_url(sums_url)))?
         .text()
         .map_err(|e| format!("sums fetch {}: {e}", scrub_url(sums_url)))?;
-    let expected = find_hash_for_asset(&sums, asset).ok_or_else(|| {
-        format!("no hash for {asset} in {}", scrub_url(sums_url))
-    })?;
+    let expected = find_hash_for_asset(&sums, asset)
+        .ok_or_else(|| format!("no hash for {asset} in {}", scrub_url(sums_url)))?;
 
     let mut resp = client
         .get(url)
@@ -542,7 +575,11 @@ pub fn windows_installer_extra(
     assets: &[ReleaseAsset],
     sums_url: &str,
 ) -> Option<ExtraDownload> {
-    let url = assets.iter().find(|a| a.name == INSTALL_PS1_ASSET)?.url.clone();
+    let url = assets
+        .iter()
+        .find(|a| a.name == INSTALL_PS1_ASSET)?
+        .url
+        .clone();
     Some(ExtraDownload {
         url,
         sums_url: sums_url.to_string(),
@@ -572,7 +609,9 @@ pub fn autostart_enabled_in(config_dir: &std::path::Path) -> bool {
 /// True when the Startup shortcut exists (spec section 3: preserve
 /// Autostart by passing `-Autostart` to `install.ps1`).
 pub fn autostart_enabled() -> bool {
-    dirs::config_dir().map(|d| autostart_enabled_in(&d)).unwrap_or(false)
+    dirs::config_dir()
+        .map(|d| autostart_enabled_in(&d))
+        .unwrap_or(false)
 }
 
 /// argv for the Windows apply step (spec design, section 3): `powershell
@@ -618,15 +657,16 @@ fn spawn_detached(program: &str, args: &[String]) -> std::io::Result<()> {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .creation_flags(
-                CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
-            )
+            .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB)
             .spawn()
             .map(|_| ())
     }
     #[cfg(not(windows))]
     {
-        std::process::Command::new(program).args(args).spawn().map(|_| ())
+        std::process::Command::new(program)
+            .args(args)
+            .spawn()
+            .map(|_| ())
     }
 }
 
@@ -647,7 +687,10 @@ pub fn apply_update_windows(
         return Err(format!("update file missing: {}", downloaded_exe.display()));
     }
     if !install_ps1.is_file() {
-        return Err(format!("installer script missing: {}", install_ps1.display()));
+        return Err(format!(
+            "installer script missing: {}",
+            install_ps1.display()
+        ));
     }
     let autostart = autostart_enabled();
     let argv = windows_apply_argv(install_ps1, downloaded_exe, autostart);
@@ -679,10 +722,7 @@ pub fn macos_stage_dir(running_app: &std::path::Path) -> std::path::PathBuf {
 /// with macOS, so the updater needs no extra dependency; `-o` refreshes a
 /// reused stage dir without prompting. `argv[0]` is the program; the rest
 /// are its arguments.
-pub fn macos_unzip_argv(
-    staged_zip: &std::path::Path,
-    stage_dir: &std::path::Path,
-) -> Vec<String> {
+pub fn macos_unzip_argv(staged_zip: &std::path::Path, stage_dir: &std::path::Path) -> Vec<String> {
     vec![
         "unzip".to_string(),
         "-o".to_string(),
@@ -696,7 +736,10 @@ pub fn macos_unzip_argv(
 /// argv to relaunch the swapped bundle: `open <app>`. Spawned detached;
 /// the caller then quits and the new bundle takes over.
 pub fn macos_relaunch_argv(running_app: &std::path::Path) -> Vec<String> {
-    vec!["open".to_string(), running_app.to_string_lossy().into_owned()]
+    vec![
+        "open".to_string(),
+        running_app.to_string_lossy().into_owned(),
+    ]
 }
 
 /// Run a macOS apply helper (`unzip`), mapping failures to updater errors
@@ -777,9 +820,18 @@ mod tests {
     #[test]
     fn seeded_skip_suppresses_prompt_for_same_version() {
         let mut u = UpdateCheck::with_persisted(0, "v0.3.0".into(), 1_700_000_000_000);
-        u.status = UpdateStatus::Available { version: "v0.3.0".into(), assets: Vec::new() };
-        assert!(!u.should_prompt(), "skipped version must not re-prompt after restart");
-        u.status = UpdateStatus::Available { version: "v0.4.0".into(), assets: Vec::new() };
+        u.status = UpdateStatus::Available {
+            version: "v0.3.0".into(),
+            assets: Vec::new(),
+        };
+        assert!(
+            !u.should_prompt(),
+            "skipped version must not re-prompt after restart"
+        );
+        u.status = UpdateStatus::Available {
+            version: "v0.4.0".into(),
+            assets: Vec::new(),
+        };
         assert!(u.should_prompt(), "a newer version must still prompt");
     }
 
@@ -812,15 +864,22 @@ mod tests {
     fn decide_available_only_when_newer() {
         assert_eq!(
             decide("0.2.0", Ok(r#"{"tag_name": "v0.3.0"}"#.into())),
-            CheckOutcome::Available { version: "v0.3.0".into(), assets: Vec::new() }
+            CheckOutcome::Available {
+                version: "v0.3.0".into(),
+                assets: Vec::new()
+            }
         );
         assert_eq!(
             decide("0.3.0", Ok(r#"{"tag_name": "v0.3.0"}"#.into())),
-            CheckOutcome::UpToDate { version: "v0.3.0".into() }
+            CheckOutcome::UpToDate {
+                version: "v0.3.0".into()
+            }
         );
         assert_eq!(
             decide("0.4.0", Ok(r#"{"tag_name": "v0.3.0"}"#.into())),
-            CheckOutcome::UpToDate { version: "v0.3.0".into() }
+            CheckOutcome::UpToDate {
+                version: "v0.3.0".into()
+            }
         );
         assert_eq!(
             decide("0.2.0", Ok("garbage".into())),
@@ -920,7 +979,11 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(matches!(c.status(), UpdateStatus::Failed(_)), "got {:?}", c.status());
+        assert!(
+            matches!(c.status(), UpdateStatus::Failed(_)),
+            "got {:?}",
+            c.status()
+        );
         assert!(!dest.exists(), "no file left behind");
         assert!(dir_entries(&dir).is_empty(), "partial removed");
     }
@@ -961,7 +1024,11 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(matches!(c.status(), UpdateStatus::Ready { .. }), "got {:?}", c.status());
+        assert!(
+            matches!(c.status(), UpdateStatus::Ready { .. }),
+            "got {:?}",
+            c.status()
+        );
         assert_eq!(std::fs::read(&dest).expect("main asset"), FIXTURE_BYTES);
         assert_eq!(std::fs::read(&helper).expect("helper asset"), FIXTURE_BYTES);
     }
@@ -973,7 +1040,11 @@ mod tests {
         routes.insert("/helper.ps1".to_string(), FIXTURE_BYTES.to_vec());
         routes.insert(
             "/SHA256SUMS".to_string(),
-            format!("{FIXTURE_SHA256}  pkg.bin\n{}  helper.ps1\n", "0".repeat(64)).into_bytes(),
+            format!(
+                "{FIXTURE_SHA256}  pkg.bin\n{}  helper.ps1\n",
+                "0".repeat(64)
+            )
+            .into_bytes(),
         );
         let base = loopback_server(routes, None, 2);
         let dir = scratch_dir("extra-bad");
@@ -999,16 +1070,32 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert!(matches!(c.status(), UpdateStatus::Failed(_)), "got {:?}", c.status());
-        assert!(dir_entries(&dir).is_empty(), "no file or partial left behind");
+        assert!(
+            matches!(c.status(), UpdateStatus::Failed(_)),
+            "got {:?}",
+            c.status()
+        );
+        assert!(
+            dir_entries(&dir).is_empty(),
+            "no file or partial left behind"
+        );
     }
 
     #[test]
     fn windows_installer_extra_resolves_script_url() {
         let assets = vec![
-            ReleaseAsset { name: "ebbtop.exe".into(), url: "http://x/e".into() },
-            ReleaseAsset { name: "SHA256SUMS".into(), url: "http://x/s".into() },
-            ReleaseAsset { name: INSTALL_PS1_ASSET.into(), url: "http://x/i".into() },
+            ReleaseAsset {
+                name: "ebbtop.exe".into(),
+                url: "http://x/e".into(),
+            },
+            ReleaseAsset {
+                name: "SHA256SUMS".into(),
+                url: "http://x/s".into(),
+            },
+            ReleaseAsset {
+                name: INSTALL_PS1_ASSET.into(),
+                url: "http://x/i".into(),
+            },
         ];
         let extra = windows_installer_extra("v0.3.0", &assets, "http://x/s")
             .expect("release carries the installer script");
@@ -1021,8 +1108,14 @@ mod tests {
     #[test]
     fn windows_installer_extra_missing_script_is_none() {
         let assets = vec![
-            ReleaseAsset { name: "ebbtop.exe".into(), url: "http://x/e".into() },
-            ReleaseAsset { name: "SHA256SUMS".into(), url: "http://x/s".into() },
+            ReleaseAsset {
+                name: "ebbtop.exe".into(),
+                url: "http://x/e".into(),
+            },
+            ReleaseAsset {
+                name: "SHA256SUMS".into(),
+                url: "http://x/s".into(),
+            },
         ];
         assert!(windows_installer_extra("v0.3.0", &assets, "http://x/s").is_none());
     }
@@ -1054,7 +1147,10 @@ mod tests {
             app_bundle_dir(exe).as_deref(),
             Some(std::path::Path::new("/Applications/EbbTop.app"))
         );
-        assert_eq!(app_bundle_dir(std::path::Path::new("/usr/local/bin/ebbtop")), None);
+        assert_eq!(
+            app_bundle_dir(std::path::Path::new("/usr/local/bin/ebbtop")),
+            None
+        );
     }
 
     #[test]
@@ -1066,7 +1162,10 @@ mod tests {
         assert!(poll_settled(&mut c), "finished check transitions");
         assert_eq!(
             c.status(),
-            &UpdateStatus::Available { version: "v99.9.9".into(), assets: Vec::new() }
+            &UpdateStatus::Available {
+                version: "v99.9.9".into(),
+                assets: Vec::new()
+            }
         );
         assert!(!c.due(), "just checked: not due");
     }
@@ -1106,7 +1205,10 @@ mod tests {
         c.accept();
         assert_eq!(
             c.status(),
-            &UpdateStatus::Accepted { version: "v99.1.0".into(), assets: Vec::new() }
+            &UpdateStatus::Accepted {
+                version: "v99.1.0".into(),
+                assets: Vec::new()
+            }
         );
         assert!(!c.should_prompt(), "accepted version does not prompt");
     }
@@ -1116,8 +1218,7 @@ mod tests {
     /// Body bytes for the download fixtures. The expected digest below is
     /// the well-known SHA-256 of `"abc"`, independent of this crate.
     const FIXTURE_BYTES: &[u8] = b"abc";
-    const FIXTURE_SHA256: &str =
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    const FIXTURE_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     /// Minimal loopback HTTP server for download tests: `routes` maps a
     /// request path to its canned body. When `cut` names a path, that path
@@ -1134,7 +1235,9 @@ mod tests {
         let addr = listener.local_addr().expect("loopback addr");
         std::thread::spawn(move || {
             for _ in 0..hits {
-                let Ok((mut stream, _)) = listener.accept() else { break };
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
                 let mut buf = vec![0u8; 8192];
                 let n = stream.read(&mut buf).unwrap_or(0);
                 let head = String::from_utf8_lossy(&buf[..n]).into_owned();
@@ -1188,7 +1291,12 @@ mod tests {
     fn dir_entries(dir: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("read scratch dir")
-            .map(|e| e.expect("dir entry").file_name().to_string_lossy().into_owned())
+            .map(|e| {
+                e.expect("dir entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         names.sort();
         names
@@ -1214,7 +1322,10 @@ mod tests {
             &tx,
         )
         .expect("good download verifies");
-        assert_eq!(std::fs::read(&dest).expect("read back download"), FIXTURE_BYTES);
+        assert_eq!(
+            std::fs::read(&dest).expect("read back download"),
+            FIXTURE_BYTES
+        );
         assert_eq!(dir_entries(&dir), vec!["ebbtop.exe"], "no temp left behind");
         let progress: Vec<u64> = rx.try_iter().collect();
         assert!(!progress.is_empty(), "progress reported during download");
@@ -1243,7 +1354,10 @@ mod tests {
         )
         .expect_err("tampered sums must fail");
         assert!(!err.contains("s3cr3t"), "error leaked token: {err}");
-        assert!(dir_entries(&dir).is_empty(), "no file or partial left behind");
+        assert!(
+            dir_entries(&dir).is_empty(),
+            "no file or partial left behind"
+        );
     }
 
     // --- Windows apply and restart (spec section 3, Windows) ---
@@ -1254,15 +1368,32 @@ mod tests {
         let exe = std::path::Path::new("C:\\Temp\\ebbtop.exe");
         assert_eq!(
             windows_apply_argv(ps1, exe, true),
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", "C:\\Tools\\install.ps1", "-Exe", "C:\\Temp\\ebbtop.exe", "-Autostart"]
-                .map(String::from)
-                .to_vec()
+            [
+                "powershell",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "C:\\Tools\\install.ps1",
+                "-Exe",
+                "C:\\Temp\\ebbtop.exe",
+                "-Autostart"
+            ]
+            .map(String::from)
+            .to_vec()
         );
         assert_eq!(
             windows_apply_argv(ps1, exe, false),
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", "C:\\Tools\\install.ps1", "-Exe", "C:\\Temp\\ebbtop.exe"]
-                .map(String::from)
-                .to_vec()
+            [
+                "powershell",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "C:\\Tools\\install.ps1",
+                "-Exe",
+                "C:\\Temp\\ebbtop.exe"
+            ]
+            .map(String::from)
+            .to_vec()
         );
     }
 
@@ -1329,9 +1460,16 @@ mod tests {
         let stage = std::path::Path::new("/Applications/.ebbtop-update-stage");
         assert_eq!(
             macos_unzip_argv(zip, stage),
-            ["unzip", "-o", "-q", "/tmp/EbbTop.app.zip", "-d", "/Applications/.ebbtop-update-stage"]
-                .map(String::from)
-                .to_vec()
+            [
+                "unzip",
+                "-o",
+                "-q",
+                "/tmp/EbbTop.app.zip",
+                "-d",
+                "/Applications/.ebbtop-update-stage"
+            ]
+            .map(String::from)
+            .to_vec()
         );
     }
 
@@ -1340,7 +1478,9 @@ mod tests {
         let app = std::path::Path::new("/Applications/EbbTop.app");
         assert_eq!(
             macos_relaunch_argv(app),
-            ["open", "/Applications/EbbTop.app"].map(String::from).to_vec()
+            ["open", "/Applications/EbbTop.app"]
+                .map(String::from)
+                .to_vec()
         );
     }
 
