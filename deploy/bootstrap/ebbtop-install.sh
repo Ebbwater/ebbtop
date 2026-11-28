@@ -2,7 +2,7 @@
 # ebbtop-install.sh: one command installs the prebuilt EbbTop agent.
 #
 #   curl -fsSL https://github.com/Ebbwater/ebbtop/releases/latest/download/ebbtop-install.sh | bash
-#   curl -fsSL .../ebbtop-install.sh | bash -s -- --version v0.2.9
+#   curl -fsSL .../ebbtop-install.sh | bash -s -- --version v0.3.1
 #
 # The same published script serves both platforms. It selects the package from
 # `uname -s` and `uname -m` BEFORE it resolves a release, so an unsupported
@@ -43,7 +43,7 @@
 #      and the token file path - never the token value
 #
 # Flags:
-#   --version <tag>   pin a published release tag, exactly as tagged (v0.2.9)
+#   --version <tag>   pin a published release tag, exactly as tagged (v0.3.1)
 #   --archive <path>  install from a local tarball: no API, no download
 #   --yes, -y         take the default answer, no prompt (scripted installs)
 #   --dry-run, -n     print the plan, change nothing
@@ -171,7 +171,7 @@ The package is selected from uname -s and uname -m before any download:
   Linux x86_64         ebbtop-agent-linux-x86_64.tar.gz    systemd user service
   macOS Apple Silicon  ebbtop-agent-macos-arm64.tar.gz     per-user LaunchAgent
 
-  --version <tag>   pin a published release tag, exactly as tagged (v0.2.9)
+  --version <tag>   pin a published release tag, exactly as tagged (v0.3.1)
   --archive <path>  install from a local tarball: no API, no download
   --yes, -y         take the default answer, no prompt (scripted installs)
   --dry-run, -n     print the plan, change nothing
@@ -974,7 +974,7 @@ PORT="$DEFAULT_PORT"
 while (( $# )); do
   case "$1" in
     --version)
-      [[ $# -ge 2 && -n "$2" ]] || { echo "$PROG: --version needs a release tag, for example v0.2.9" >&2; exit 2; }
+      [[ $# -ge 2 && -n "$2" ]] || { echo "$PROG: --version needs a release tag, for example v0.3.1" >&2; exit 2; }
       PIN="$2"; shift 2 ;;
     --version=*)
       PIN="${1#*=}"; shift ;;
