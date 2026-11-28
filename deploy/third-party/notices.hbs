@@ -1,0 +1,30 @@
+EbbTop third-party notices
+==========================
+
+This file lists the crates compiled into the EbbTop desktop application and
+monitoring agent, with the license each carries, followed by the full text of
+every license — as those licenses require. EbbTop itself is MIT-licensed; its
+text is in the LICENSE file in the repository and beside the downloads. The
+bundled Noto Sans SC and Noto Sans TC fonts are SIL OFL 1.1; their license
+ships beside the executable (LICENSE-OFL.txt) and is readable inside the
+application, and the fonts epaint compiles in are covered by OFL-1.1 and the
+Ubuntu Font Licence below.
+
+Generated from Cargo.lock with cargo-about; the configuration and template
+live in deploy/third-party/. Regenerate this file in the same commit as any
+dependency change.
+
+Crates
+--------------------------------------------------------------------------------
+{{#each crates}}
+- {{package.name}} {{package.version}} ({{license}})
+{{/each}}
+
+License texts
+--------------------------------------------------------------------------------
+{{#each overview}}
+### {{{name}}}
+
+{{{text}}}
+
+{{/each}}

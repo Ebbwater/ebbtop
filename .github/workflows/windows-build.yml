@@ -92,7 +92,7 @@ jobs:
       - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v4
         with:
-          # A tag reads v0.2.9; a manual run uses the run number because a
+          # A tag reads v0.3.1; a manual run uses the run number because a
           # branch name may contain "/" and upload-artifact rejects that.
           name: EbbTop-Windows-x64-${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}
           if-no-files-found: error
@@ -103,6 +103,7 @@ jobs:
             dist/install.ps1
             dist/setup.ps1
             dist/LICENSE-OFL.txt
+            dist/THIRD-PARTY-NOTICES
             dist/SHA256SUMS
             dist/BUILD
             dist/VERSIONINFO.txt

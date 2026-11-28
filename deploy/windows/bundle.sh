@@ -9,6 +9,6 @@ archive=EbbTop-Windows-x64.zip
 tmp="$(mktemp -d .windows-bundle.XXXXXXXX)"
 trap 'rm -rf -- "$tmp"' EXIT
 zip -q -MM -X -j "$tmp/$archive" ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 \
-    LICENSE-OFL.txt SHA256SUMS BUILD "$SCRIPT_DIR/Install EbbTop.cmd"
+    LICENSE-OFL.txt THIRD-PARTY-NOTICES SHA256SUMS BUILD "$SCRIPT_DIR/Install EbbTop.cmd"
 unzip -tq "$tmp/$archive"
 mv -f -- "$tmp/$archive" "$archive"

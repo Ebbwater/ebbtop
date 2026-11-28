@@ -18,6 +18,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+NOTICES_SRC="$ROOT/THIRD-PARTY-NOTICES"
 INSTALLER="$ROOT/deploy/macos/install-agent.sh"
 PLIST="$ROOT/deploy/macos/ebbtop-agent.plist.in"
 PACKAGER="$ROOT/deploy/macos/package-agent.sh"
@@ -211,7 +212,8 @@ make_pkg() { # <out> <version> <stage> [plist-marker]
     echo "target=aarch64-apple-darwin"
     echo "min_macos=13.0"
   } > "$stage/BUILD"
-  ( cd "$stage" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist > SHA256SUMS )
+  cp "$NOTICES_SRC" "$stage/THIRD-PARTY-NOTICES"
+  ( cd "$stage" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist THIRD-PARTY-NOTICES > SHA256SUMS )
 }
 
 new_home() { # <name> -> FIXHOME
@@ -296,7 +298,7 @@ case_package_refusals() {
   bad="$WORK/bad-plist-secret"
   cp -a "$GOOD" "$bad"
   printf 'EBBTOP_TOKEN=%064d\n' 0 >> "$bad/ebbtop-agent.plist"
-  ( cd "$bad" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist > SHA256SUMS )
+  ( cd "$bad" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist THIRD-PARTY-NOTICES > SHA256SUMS )
   rc=0; out="$(RUN_ENV="EBBTOP_ADDR=100.64.0.5" run_installer "$bad" --prebuilt)" || rc=$?
   [[ $rc -ne 0 ]] || { fail "$name" "a plist with a token assignment was accepted"; return; }
   printf '%s' "$out" | grep -q 'assigns a credential or a bind address' || { fail "$name" "no plist-secret refusal: $out"; return; }
@@ -306,7 +308,7 @@ case_package_refusals() {
   bad="$WORK/bad-not-a-macho"
   cp -a "$GOOD" "$bad"
   install -m 755 "$INSTALLER" "$bad/ebbtop-agent"   # a shell script, not a Mach-O
-  ( cd "$bad" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist > SHA256SUMS )
+  ( cd "$bad" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist THIRD-PARTY-NOTICES > SHA256SUMS )
   rc=0; out="$(RUN_ENV="EBBTOP_ADDR=100.64.0.5" run_installer "$bad" --prebuilt)" || rc=$?
   [[ $rc -ne 0 ]] || { fail "$name" "a non-Mach-O binary was accepted"; return; }
   printf '%s' "$out" | grep -q 'not a Mach-O executable' || { fail "$name" "no Mach-O refusal: $out"; return; }
@@ -499,16 +501,16 @@ case_bash32() {
   # against a correct archive and against an extra-member archive.
   local good_pkg="$WORK/b32-members-good.tgz" bad_pkg="$WORK/b32-members-bad.tgz" mrc=0
   local badstage="$WORK/b32-members-stage"
-  ( cd "$GOOD" && tar -czf "$good_pkg" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh )
+  ( cd "$GOOD" && tar -czf "$good_pkg" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES )
   # A copy, never $GOOD itself: the installer must not see a polluted package.
   cp -a "$GOOD" "$badstage"
   ( cd "$badstage" && echo extra > sneaky.env \
-      && tar -czf "$bad_pkg" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh sneaky.env )
-  "$b32" -c '. "$1"; member_set_matches "$2" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh' \
+      && tar -czf "$bad_pkg" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES sneaky.env )
+  "$b32" -c '. "$1"; member_set_matches "$2" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES' \
       _ "$MEMBERCHECK" "$good_pkg" > "$WORK/b32.members.out" 2>&1 || mrc=$?
   [[ $mrc -eq 0 ]] || { fail "$name" "the member proof failed under Bash 3.2 on a CORRECT archive (exit $mrc): $(cat "$WORK/b32.members.out")"; return; }
   mrc=0
-  "$b32" -c '. "$1"; member_set_matches "$2" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh' \
+  "$b32" -c '. "$1"; member_set_matches "$2" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES' \
       _ "$MEMBERCHECK" "$bad_pkg" > "$WORK/b32.members.bad.out" 2>&1 || mrc=$?
   [[ $mrc -eq 1 ]] || { fail "$name" "the member proof did not refuse an extra member under Bash 3.2 (exit $mrc): $(cat "$WORK/b32.members.bad.out")"; return; }
   grep -qF 'sneaky.env' "$WORK/b32.members.bad.out" || { fail "$name" "the 3.2 refusal did not name the extra member: $(cat "$WORK/b32.members.bad.out")"; return; }

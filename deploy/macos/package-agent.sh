@@ -24,8 +24,8 @@ NAME=ebbtop-agent-macos-arm64
 TARGET_TRIPLE=aarch64-apple-darwin
 DIST="$ROOT/dist"
 BIN="${EBBTOP_AGENT_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/$TARGET_TRIPLE/release/ebbtop-agent}"
-MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh)
-PAYLOAD=(BUILD ebbtop-agent ebbtop-agent.plist)
+MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES)
+PAYLOAD=(BUILD ebbtop-agent ebbtop-agent.plist THIRD-PARTY-NOTICES)
 
 log() { echo "package-agent: $*"; }
 die() { echo "package-agent: $*" >&2; exit 1; }
@@ -92,6 +92,9 @@ install -m 755 "$ROOT/deploy/macos/install-agent.sh" "$stage/install-agent.sh"
 # The plist template is packaged as-is: the installer renders the two paths
 # and the port at install time, so one archive serves any user and any home.
 install -m 644 "$ROOT/deploy/macos/ebbtop-agent.plist.in" "$stage/ebbtop-agent.plist"
+# License attribution for the crates compiled into the binary (cargo-about;
+# regenerate in the same commit as any dependency change).
+install -m 644 "$ROOT/THIRD-PARTY-NOTICES" "$stage/THIRD-PARTY-NOTICES"
 
 # BUILD is self-describing metadata: version and commit, nothing host-specific.
 {

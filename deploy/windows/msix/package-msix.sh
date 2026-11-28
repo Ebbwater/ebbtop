@@ -73,6 +73,9 @@ cp dist/ebbtop.exe "$STAGE/ebbtop.exe"
 # checked-in license text ships beside the executable, and verify-msix.py
 # reads it back out of the packed bytes.
 cp crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt "$STAGE/LICENSE-OFL.txt"
+# License attribution for the crates compiled into the executable (cargo-about;
+# regenerate in the same commit as any dependency change).
+cp THIRD-PARTY-NOTICES "$STAGE/THIRD-PARTY-NOTICES"
 cp "$HERE/AppxManifest.xml" "$STAGE/AppxManifest.xml"
 python3 "$HERE/make-assets.py" "$STAGE" >/dev/null
 

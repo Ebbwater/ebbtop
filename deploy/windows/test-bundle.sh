@@ -4,19 +4,22 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
-sources=(ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt BUILD)
+sources=(ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt THIRD-PARTY-NOTICES BUILD)
 members=("${sources[@]}" SHA256SUMS 'Install EbbTop.cmd')
-# The license fixture is the repository's real OFL notice: the zip must ship
-# those exact bytes, not a placeholder standing in for them.
+# The license fixtures are the repository's real notices: the zip must ship
+# those exact bytes, not placeholders standing in for them.
 LICENSE_SRC="$(cd "$ROOT/../.." && pwd)/crates/ebbtop-gui/assets/fonts/LICENSE-OFL.txt"
 [[ -f "$LICENSE_SRC" ]] || { printf 'missing %s\n' "$LICENSE_SRC" >&2; exit 1; }
+NOTICES_SRC="$(cd "$ROOT/../.." && pwd)/THIRD-PARTY-NOTICES"
+[[ -f "$NOTICES_SRC" ]] || { printf 'missing %s\n' "$NOTICES_SRC" >&2; exit 1; }
 mkdir "$TMP/dist with spaces" "$TMP/extracted"
 cd "$TMP/dist with spaces"
 for name in ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 BUILD; do
   printf 'fixture for %s\n' "$name" > "$name"
 done
 cp "$LICENSE_SRC" LICENSE-OFL.txt
-sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt > SHA256SUMS
+cp "$NOTICES_SRC" THIRD-PARTY-NOTICES
+sha256sum ebbtop.exe ebbtop-probe.exe install.ps1 setup.ps1 LICENSE-OFL.txt THIRD-PARTY-NOTICES > SHA256SUMS
 printf 'never bundle this\n' > stale-file
 
 bash "$ROOT/bundle.sh" "$PWD"
@@ -56,6 +59,13 @@ if bash "$ROOT/bundle.sh" "$PWD" > "$TMP/refusal" 2>&1; then
 fi
 sha256sum -c "$TMP/previous"
 mv "$TMP/LICENSE-OFL.txt" LICENSE-OFL.txt
+mv THIRD-PARTY-NOTICES "$TMP/THIRD-PARTY-NOTICES"
+if bash "$ROOT/bundle.sh" "$PWD" > "$TMP/refusal" 2>&1; then
+  printf 'packager accepted a missing third-party notices file\n' >&2
+  exit 1
+fi
+sha256sum -c "$TMP/previous"
+mv "$TMP/THIRD-PARTY-NOTICES" THIRD-PARTY-NOTICES
 
 printf 'Expecting checksum refusal for the modified executable\n'
 printf 'changed after the checksum was generated\n' >> ebbtop.exe

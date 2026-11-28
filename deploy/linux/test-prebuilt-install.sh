@@ -14,6 +14,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+NOTICES_SRC="$ROOT/THIRD-PARTY-NOTICES"
 ARCHIVE="${EBBTOP_ARCHIVE:-$ROOT/dist/ebbtop-agent-linux-x86_64.tar.gz}"
 BIN="${CARGO_TARGET_DIR:-$ROOT/target}/release/ebbtop-agent"
 MODE=all
@@ -391,7 +392,8 @@ repack_v2() { # $1 = source package dir, $2 = destination archive
   # A different binary than v1 (trailing bytes are ignored by the ELF loader),
   # so replacing the installed file is observable.
   printf '\nfixture-v2\n' >> "$stage/ebbtop-agent"
-  ( cd "$stage" && sha256sum BUILD ebbtop-agent ebbtop-agent.service > SHA256SUMS )
+  cp "$NOTICES_SRC" "$stage/THIRD-PARTY-NOTICES"
+  ( cd "$stage" && sha256sum BUILD ebbtop-agent ebbtop-agent.service THIRD-PARTY-NOTICES > SHA256SUMS )
   tar --format=gnu -czf "$dest" -C "$stage" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh
 }
 
@@ -961,7 +963,8 @@ pairing_pkg() { # $1 = destination dir, $2 = yes|no: mark the binary as pairing-
     strip_pair_literal "$dest/ebbtop-agent" \
       || fail "$name" "could not strip the --pair literal to build the negative fixture"
   fi
-  ( cd "$dest" && sha256sum BUILD ebbtop-agent ebbtop-agent.service > SHA256SUMS )
+  cp "$NOTICES_SRC" "$dest/THIRD-PARTY-NOTICES"
+  ( cd "$dest" && sha256sum BUILD ebbtop-agent ebbtop-agent.service THIRD-PARTY-NOTICES > SHA256SUMS )
 }
 
 case_pairing_and_purge() {
