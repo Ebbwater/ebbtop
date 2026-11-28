@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """Rewrite the EbbTop product page's version and digest facts from a release.
 
-The page states a version, a ZIP member count and seven SHA-256 digests. Those
+The page states a version, a ZIP member count and SHA-256 digests. Those
 are facts about published bytes, so they are derived here from the assembled
 release set (dist/release/SHA256SUMS plus the files themselves) rather than
 edited by hand.
 
 Usage:
-  python3 deploy/release/update-site-facts.py <site/ebbtop/index.html> <dist/release>
+  python3 deploy/release/update-site-facts.py <site/ebbtop/index.html> <dist/release> [published date]
+
+The published date (e.g. "27 November 2026") is optional: given, the version
+banner is rewritten with it; omitted, only the version is touched and the
+existing date stands (a date is a fact about the already-published page).
 
 It rewrites only the values it owns and prints what changed. Anything it cannot
 find exactly once is an error, so a page that drifted in shape stops the run
-instead of being silently half-updated.
+instead of being silently half-updated. Exception: an asset listed in
+OPTIONAL_ASSETS whose checksum row the page does not carry yet is reported and
+skipped — the row arrives with the next page edit, and a new asset must not
+block updating the rows the page already has.
 """
 import hashlib
 import pathlib
@@ -26,7 +33,7 @@ if not version:
     sys.exit(f"no version line in {RELEASE/'BUILD'}")
 VERSION = version.group(1)
 
-ASSETS = [
+REQUIRED_ASSETS = [
     "EbbTop-Windows-x64.zip",
     "ebbtop.exe",
     "ebbtop-probe.exe",
@@ -35,6 +42,9 @@ ASSETS = [
     "install.ps1",
     "setup.ps1",
 ]
+# Shipped since 0.3.1 (Apple Silicon agent). A release set always carries
+# the file; the site's checksum table gains its row at the next page edit.
+OPTIONAL_ASSETS = ["ebbtop-agent-macos-arm64.tar.gz"]
 
 
 def digest(name):
@@ -45,7 +55,13 @@ def digest(name):
     return h.hexdigest()
 
 
-facts = {n: (digest(n), (RELEASE / n).stat().st_size) for n in ASSETS}
+facts = {n: (digest(n), (RELEASE / n).stat().st_size) for n in REQUIRED_ASSETS}
+# Optional assets may be absent from a pre-0.3.1 release set; an absent file
+# simply skips the row step (the page cannot reference bytes that no release
+# set in play carries).
+for name in OPTIONAL_ASSETS:
+    if (RELEASE / name).exists():
+        facts[name] = (digest(name), (RELEASE / name).stat().st_size)
 
 # The ZIP member count is read from the archive, not assumed.
 import zipfile
@@ -68,13 +84,24 @@ def sub_once(pattern, replacement, what, string):
     html = new
 
 
-# Version banner and spec rows.
-sub_once(
-    r"(Version )0\.\d+\.\d+(, published )\d+ \w+ \d{4}",
-    rf"\g<1>{VERSION}\g<2>25 November 2026",
-    "version banner",
-    html,
-)
+# Version banner (and, when given, the publish date). The date is a fact the
+# caller owns — it is when the release was actually published, which this
+# script cannot know from the assembled bytes.
+PUBLISHED = sys.argv[3] if len(sys.argv) > 3 else None
+if PUBLISHED:
+    sub_once(
+        r"(Version )0\.\d+\.\d+(, published )\d+ \w+ \d{4}",
+        rf"\g<1>{VERSION}\g<2>{PUBLISHED}",
+        "version banner",
+        html,
+    )
+else:
+    sub_once(
+        r"(Version )0\.\d+\.\d+(, published )\d+ \w+ \d{4}",
+        rf"\g<1>{VERSION}\g<2>",
+        "version banner",
+        html,
+    )
 sub_once(
     r'(<span class="spec-key">Version</span><span class="spec-val">)0\.\d+\.\d+(, x64</span>)',
     rf"\g<1>{VERSION}\g<2>",
@@ -83,7 +110,7 @@ sub_once(
 )
 zip_mb = facts["EbbTop-Windows-x64.zip"][1] / 1_000_000
 sub_once(
-    r'(<span class="spec-key">Size</span><span class="spec-val">)[\d.]+ MB, 7 files(</span>)',
+    r'(<span class="spec-key">Size</span><span class="spec-val">)[\d.]+ MB, \d+ files(</span>)',
     rf"\g<1>{zip_mb:.1f} MB, {members} files\g<2>",
     "Windows spec size",
     html,
@@ -96,26 +123,41 @@ sub_once(
     html,
 )
 
-# Checksum table rows: bytes and digest for each named asset.
-for name in ASSETS:
+# Checksum table rows: bytes and digest for each named asset. Required rows
+# stop the run on drift; an optional asset without its row yet is a warning.
+for name in REQUIRED_ASSETS:
     sha, size = facts[name]
     row = re.compile(
         r'(<tr><td class="strong">' + re.escape(name) + r'</td><td class="num">)[\d,]+'
         r'(</td><td class="mono">)[0-9a-f]{64}(</td></tr>)'
     )
     sub_once(row, rf"\g<1>{size:,}\g<2>{sha}\g<3>", f"checksum row {name}", html)
+for name in OPTIONAL_ASSETS:
+    if name not in facts:
+        print(f"  note: {name} is not in this release set; skipping its checksum row")
+        continue
+    sha, size = facts[name]
+    row = re.compile(
+        r'(<tr><td class="strong">' + re.escape(name) + r'</td><td class="num">)[\d,]+'
+        r'(</td><td class="mono">)[0-9a-f]{64}(</td></tr>)'
+    )
+    new, n = row.subn(rf"\g<1>{size:,}\g<2>{sha}\g<3>", html)
+    if n == 1:
+        if new != html:
+            changes.append(f"checksum row {name}")
+        html = new
+    elif n == 0:
+        print(
+            f"  note: {name} ships in this release but the page has no checksum row for it yet"
+        )
+    else:
+        sys.exit(f"checksum row {name}: expected 0 or 1 match, found {n}")
 
 # The member-count sentence.
 sub_once(
     r"The ZIP holds (seven|eight|\w+) files:",
     f"The ZIP holds {'eight' if members == 8 else members} files:",
     "member sentence count",
-    html,
-)
-sub_once(
-    r"(<code>setup\.ps1</code>, )<code>SHA256SUMS</code>",
-    r"\g<1><code>LICENSE-OFL.txt</code>, <code>SHA256SUMS</code>",
-    "member sentence list",
     html,
 )
 
