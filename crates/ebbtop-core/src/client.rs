@@ -18,6 +18,22 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::time::{MissedTickBehavior, timeout};
 use tokio_tungstenite::tungstenite::Message;
 
+/// Inbound message cap for the client's WebSocket. Real agent frames are
+/// 10-100 KB compressed (inflate is capped at 32 MiB in `wire`), and the
+/// largest legitimate request is a handful of bytes; tungstenite's 64 MiB
+/// default would let a hostile agent park a 64 MiB buffer per message
+/// before the decoder ever sees it. 4 MiB is ~40x the largest real frame.
+const MAX_WS_MESSAGE: usize = 4 * 1024 * 1024;
+
+// The struct is #[non_exhaustive] upstream, so it cannot be built with a
+// struct expression from here; mutate the default instead.
+#[allow(clippy::field_reassign_with_default)]
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    let mut cfg = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    cfg.max_message_size = Some(MAX_WS_MESSAGE);
+    cfg
+}
+
 use crate::wire::{
     self, DiskInfo, Frame, KillJob, KillResult, Metrics, ProcessMetricsResponse, Processes,
 };
@@ -217,9 +233,12 @@ pub async fn probe_once(
 ) -> Result<ProbeOk, String> {
     let r: anyhow::Result<ProbeOk> = async {
         let url = connect_url(base, token)?;
-        let (mut ws, _) = timeout(deadline, tokio_tungstenite::connect_async(url.as_str()))
-            .await
-            .map_err(|_| anyhow::anyhow!("connect timed out"))??;
+        let (mut ws, _) = timeout(
+            deadline,
+            tokio_tungstenite::connect_async_with_config(url.as_str(), Some(ws_config()), false),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("connect timed out"))??;
         let m = request(
             &mut ws,
             "get_metrics",
@@ -509,7 +528,7 @@ async fn session<F: FnMut(Event)>(
     let url = connect_url(&cfg.url, cfg.token.as_deref())?;
     let (mut ws, _) = timeout(
         cfg.connect_timeout,
-        tokio_tungstenite::connect_async(url.as_str()),
+        tokio_tungstenite::connect_async_with_config(url.as_str(), Some(ws_config()), false),
     )
     .await
     .map_err(|_| anyhow::anyhow!("connect timed out"))??;

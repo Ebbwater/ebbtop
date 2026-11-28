@@ -201,7 +201,11 @@ pub fn workload_label(key: &str) -> String {
     }
     if let Some(id) = key.strip_prefix("libpod-") {
         let n = id.len().min(12);
-        return format!("libpod-{}", &id[..n]);
+        // get(..n), not &id[..n]: a byte index can land inside a multi-byte
+        // UTF-8 char. Unreachable through values workload_key produces
+        // (container ids are ASCII hex), but this fn is public and takes
+        // any string, so slice defensively instead of panicking.
+        return format!("libpod-{}", id.get(..n).unwrap_or(id));
     }
     key.strip_suffix(".service").unwrap_or(key).to_string()
 }
@@ -233,7 +237,9 @@ pub fn group_by_workload(rows: &[Process]) -> Vec<WorkloadGroup> {
                 let g = &mut out[i];
                 g.pids += 1;
                 g.cpu_usage += r.cpu_usage;
-                g.mem_bytes += r.mem_bytes;
+                // Wire values are untrusted: near-u64::MAX counters must not
+                // panic a debug build or wrap a release one.
+                g.mem_bytes = g.mem_bytes.saturating_add(r.mem_bytes);
             }
             None => {
                 index.insert(key.clone(), out.len());
@@ -356,6 +362,30 @@ mod tests {
             "/user.slice/user-1000.slice/user@1000.service/app.slice/davy-pg.service/runtime";
         assert_eq!(workload_key(&payload), "davy-pg.service");
         assert_eq!(workload_key(conmon), "davy-pg.service");
+    }
+
+    /// Wire values are untrusted: near-u64::MAX RSS rows must saturate the
+    /// per-workload sum instead of panicking (debug) or wrapping (release).
+    #[test]
+    fn workload_mem_sum_saturates_instead_of_overflowing() {
+        let rows = vec![
+            pg("web.service", u64::MAX, 1.0),
+            pg("web.service", 100, 1.0),
+        ];
+        let groups = group_by_workload(&rows);
+        assert_eq!(groups[0].mem_bytes, u64::MAX);
+    }
+
+    /// `workload_label` is public and takes any string; a multi-byte
+    /// character at the 12-byte cut must slice defensively, not panic.
+    #[test]
+    fn workload_label_slices_on_char_boundaries() {
+        let key = format!(
+            "libpod-{}",
+            "ab\u{e9}".repeat(8) /* 24 bytes, cut lands mid-char */
+        );
+        let label = workload_label(&key);
+        assert!(label.starts_with("libpod-"), "{label}");
     }
 
     #[test]

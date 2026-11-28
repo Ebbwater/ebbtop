@@ -11,6 +11,17 @@ use crate::wire::{DiskInfo, KillResult, Metrics, ProcessMetricsResponse, Process
 /// 5 minutes at 1 s.
 pub const HISTORY_LEN: usize = 300;
 
+/// Distinct names tracked per name-keyed history map (`net`, `disk_io`,
+/// `gpu_pct`, `gpu_mem_pct`). The time dimension of every ring is capped at
+/// [`HISTORY_LEN`]; this caps the *name* dimension. A real host has a
+/// handful of interfaces, disks and GPUs and never approaches it; a hostile
+/// or malfunctioning agent that fabricates thousands of distinct names per
+/// frame would otherwise allocate a 300-point ring per name — unbounded
+/// client memory. Names absent from the newest sample are dropped first
+/// (GPU swap, VPN interface churn), then a deterministic by-name eviction
+/// keeps a single-frame flood bounded at the cap.
+pub const MAX_TRACKED_NAMES: usize = 64;
+
 #[derive(Debug, Clone)]
 pub struct Ring<T> {
     cap: usize,
@@ -224,6 +235,24 @@ fn pct(used: u64, total: u64) -> f64 {
     }
 }
 
+/// Enforce [`MAX_TRACKED_NAMES`] on one name-keyed history map. Only runs
+/// once the map is over the cap, so a real host pays nothing: rings for
+/// names absent from the newest sample go first, then the by-name eviction
+/// bounds a flood of fabricated names. `seen` holds the newest sample's
+/// names for this map.
+fn bound_names<V>(map: &mut HashMap<String, Ring<V>>, seen: &[String]) {
+    if map.len() <= MAX_TRACKED_NAMES {
+        return;
+    }
+    map.retain(|name, _| seen.iter().any(|s| s == name));
+    while map.len() > MAX_TRACKED_NAMES {
+        let Some(oldest) = map.keys().min().cloned() else {
+            break;
+        };
+        map.remove(&oldest);
+    }
+}
+
 impl State {
     pub fn apply(&mut self, ev: Event, now_ms: u64) {
         match ev {
@@ -340,6 +369,34 @@ impl State {
                     .push((t, pct(g.mem_used_bytes, g.mem_total_bytes)));
             }
         }
+        // Memory bound against a hostile or malfunctioning agent (see
+        // [`bound_names`]/[`MAX_TRACKED_NAMES`]): only runs over cap, so a
+        // real host pays nothing. The name lists are built lazily at that
+        // point, not per frame.
+        if self.net.len() > MAX_TRACKED_NAMES {
+            let seen: Vec<String> = m.networks.iter().map(|n| n.name.clone()).collect();
+            bound_names(&mut self.net, &seen);
+        }
+        if self.disk_io.len() > MAX_TRACKED_NAMES {
+            let seen: Vec<String> = m.disk_io.iter().map(|d| d.name.clone()).collect();
+            bound_names(&mut self.disk_io, &seen);
+        }
+        if self.gpu_pct.len() > MAX_TRACKED_NAMES {
+            let seen: Vec<String> = m
+                .gpus
+                .as_ref()
+                .map(|g| g.iter().map(|g| g.name.clone()).collect())
+                .unwrap_or_default();
+            bound_names(&mut self.gpu_pct, &seen);
+        }
+        if self.gpu_mem_pct.len() > MAX_TRACKED_NAMES {
+            let seen: Vec<String> = m
+                .gpus
+                .as_ref()
+                .map(|g| g.iter().map(|g| g.name.clone()).collect())
+                .unwrap_or_default();
+            bound_names(&mut self.gpu_mem_pct, &seen);
+        }
         self.prev_metrics_t = Some(t);
         self.metrics = Some(m);
         self.metrics_recv_ms = recv_ms;
@@ -448,7 +505,7 @@ proc_interval_p95={} proc_lag_p95={} gaps={} repeats={} reconnects={} samples={}
             .map(|m| {
                 m.networks
                     .iter()
-                    .map(|n| (n.name.clone(), n.received + n.transmitted))
+                    .map(|n| (n.name.clone(), n.received.saturating_add(n.transmitted)))
                     .collect()
             })
             .unwrap_or_default();
@@ -493,6 +550,19 @@ mod tests {
         }
     }
 
+    fn metrics_with_networks(t: u64, names: &[String]) -> Metrics {
+        let mut m = metrics(t, 1);
+        m.networks = names
+            .iter()
+            .map(|n| NetworkInfo {
+                name: n.clone(),
+                received: 1,
+                transmitted: 1,
+            })
+            .collect();
+        m
+    }
+
     #[test]
     fn ring_caps() {
         let mut r = Ring::new(3);
@@ -509,6 +579,68 @@ mod tests {
         assert_eq!(percentile(&v, 95.0), Some(95));
         assert_eq!(percentile(&[7], 95.0), Some(7));
         assert_eq!(percentile(&[], 50.0), None);
+    }
+
+    /// Wire values are untrusted: a hostile agent naming hundreds of
+    /// interfaces/GPUs per frame must not grow client memory without limit.
+    /// Without the cap this test allocates one 300-point ring per name.
+    #[test]
+    fn fabricated_name_flood_is_bounded() {
+        let mut s = State::default();
+        // Frame 1: 200 distinct names, no rings yet (no previous sample).
+        let names1: Vec<String> = (0..200).map(|i| format!("i{i}")).collect();
+        s.apply(
+            Event::Metrics {
+                m: metrics_with_networks(1_000, &names1),
+                recv_ms: 1_000,
+            },
+            0,
+        );
+        // Frame 2: 200 more distinct names — every one is "current" in its
+        // frame, so creation-based caps alone would not stop the growth.
+        let names2: Vec<String> = (200..400).map(|i| format!("i{i}")).collect();
+        s.apply(
+            Event::Metrics {
+                m: metrics_with_networks(2_000, &names2),
+                recv_ms: 2_000,
+            },
+            0,
+        );
+        assert!(
+            s.net.len() <= MAX_TRACKED_NAMES,
+            "net rings must stay capped, got {}",
+            s.net.len()
+        );
+    }
+
+    /// A real host is untouched by the cap: one interface across samples
+    /// keeps exactly its ring, whatever the eviction order would be.
+    #[test]
+    fn small_name_maps_are_untouched_by_the_cap() {
+        let mut s = State::default();
+        for t in 1..5u64 {
+            s.apply(
+                Event::Metrics {
+                    m: metrics_with_networks(t * 1_000, &["eth0".to_string()]),
+                    recv_ms: t * 1_000,
+                },
+                0,
+            );
+        }
+        assert_eq!(s.net.len(), 1);
+        assert!(s.net.contains_key("eth0"));
+    }
+
+    /// Near-u64::MAX counters from a hostile frame must not panic (debug) or
+    /// wrap (release) in the summary paths.
+    #[test]
+    fn interface_sums_saturate_instead_of_overflowing() {
+        let mut s = State::default();
+        let mut m = metrics(1_000, 1);
+        m.networks[0].received = u64::MAX - 10;
+        m.networks[0].transmitted = u64::MAX - 3;
+        s.apply(Event::Metrics { m, recv_ms: 1_000 }, 0);
+        let _ = s.interfaces(); // saturating_add: no panic, sane ordering
     }
 
     #[test]

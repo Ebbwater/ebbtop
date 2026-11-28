@@ -239,7 +239,12 @@ const MAX_INFLATED: u64 = 32 * 1024 * 1024;
 
 fn maybe_gunzip(b: &[u8]) -> anyhow::Result<std::borrow::Cow<'_, [u8]>> {
     if b.len() >= 2 && b[..2] == GZIP_MAGIC {
-        let mut out = Vec::with_capacity(b.len() * 4);
+        // Start small and let the Vec grow under the take() limit. The
+        // previous 4x-compressed-size pre-allocation let a hostile frame
+        // pick an immediate ~256 MiB allocation (tungstenite caps messages
+        // at 64 MiB) before a byte was decompressed; real frames are
+        // 10-100 KB compressed, so the growth cost is a few reallocs.
+        let mut out = Vec::with_capacity(64 * 1024);
         flate2::read::GzDecoder::new(b)
             .take(MAX_INFLATED + 1)
             .read_to_end(&mut out)?;
@@ -433,6 +438,135 @@ mod tests {
             m.cpu_model.as_deref(),
             Some("Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz")
         );
+    }
+
+    // ---- Hostile-decode edges: the agent (or a man in the middle on the
+    // plain-ws transport) controls every frame, so a truncated, corrupt, or
+    // oversized one must return Err, never panic and never allocate
+    // attacker-scaled memory.
+
+    /// A gzip stream that ends mid-file (agent died mid-send) is an error.
+    #[test]
+    fn truncated_gzip_is_an_error_not_a_panic() {
+        let full = gz(METRICS.as_bytes());
+        for chop in [1, 4, 16] {
+            let cut = &full[..full.len() - chop];
+            assert!(
+                decode_metrics(Frame::Binary(cut)).is_err(),
+                "truncating {chop} bytes must fail"
+            );
+        }
+    }
+
+    /// Flipped bytes inside the compressed data (CRC mismatch) are an error.
+    #[test]
+    fn corrupt_gzip_body_is_an_error() {
+        let mut bad = gz(METRICS.as_bytes());
+        let mid = bad.len() / 2;
+        bad[mid] ^= 0xff;
+        assert!(decode_metrics(Frame::Binary(&bad)).is_err());
+    }
+
+    /// A highly compressible frame far past [`MAX_INFLATED`] is refused by
+    /// the take() cap, and the refusal must not first allocate the inflated
+    /// size (the old compressed*4 pre-allocation let the frame pick an
+    /// immediate ~256 MiB allocation).
+    #[test]
+    fn gzip_bomb_past_the_cap_is_refused() {
+        let bomb = vec![b'a'; MAX_INFLATED as usize + 1024];
+        // Best compression keeps the fixture small: a 20,000x+ ratio is
+        // exactly what an attacker would send.
+        let mut e = GzEncoder::new(Vec::new(), Compression::best());
+        e.write_all(&bomb).unwrap();
+        let small = e.finish().unwrap();
+        assert!(
+            small.len() < 64 * 1024,
+            "fixture must stay small: {}",
+            small.len()
+        );
+        let err = decode_metrics(Frame::Binary(&small))
+            .expect_err("a frame inflating past MAX_INFLATED must be refused");
+        assert!(err.to_string().contains("too large"), "{err}");
+    }
+
+    /// A large but legal frame (under the cap) still decodes after the
+    /// pre-allocation clamp, so the fix cost real frames nothing.
+    #[test]
+    fn large_but_legal_gzip_still_decodes() {
+        let big = format!(
+            r#"{{"sampled_at_ms":1762500000123,"cpu_total":12.5,"cpu_per_core":[10.0],"mem_total":1000,"mem_used":250,"swap_total":0,"swap_used":0,"hostname":"{}","cpu_temp_c":null,"disks":[],"networks":[],"top_processes":[],"gpus":null}}"#,
+            "k".repeat(600_000)
+        );
+        let m = decode_metrics(Frame::Binary(&gz(big.as_bytes())))
+            .expect("a 600 KB hostname frame is legal");
+        assert_eq!(m.hostname.len(), 600_000);
+    }
+
+    /// A protobuf frame that ends mid-field is an error.
+    #[test]
+    fn truncated_protobuf_is_an_error_not_a_panic() {
+        let mut buf = Vec::new();
+        <Processes as prost::Message>::encode(
+            &Processes {
+                process_count: 2,
+                rows: vec![Process {
+                    pid: 1,
+                    name: "worker".into(),
+                    ..Default::default()
+                }],
+                sampled_at_ms: 1_700_000_000_000,
+            },
+            &mut buf,
+        )
+        .unwrap();
+        for chop in [1, 5, 20] {
+            let cut = &buf[..buf.len().saturating_sub(chop).max(1)];
+            assert!(
+                decode_processes(Frame::Binary(cut)).is_err(),
+                "truncating {chop} bytes must fail"
+            );
+        }
+    }
+
+    /// A string field carrying invalid UTF-8 (binary frames skip the ws
+    /// UTF-8 validation text frames get) is an error, not a panic.
+    #[test]
+    fn protobuf_invalid_utf8_name_is_an_error() {
+        // Field 2 (rows), wire type 2: tag 0x12, len 3, then bytes that are
+        // not valid UTF-8 (\xff\xfe plus a nul).
+        let frame = [0x12u8, 0x03, 0xff, 0xfe, 0x00];
+        assert!(decode_processes(Frame::Binary(&frame)).is_err());
+    }
+
+    /// Random garbage is refused cleanly; structurally valid-but-empty
+    /// frames decode to their defaults (an empty payload is a legal
+    /// protobuf message, so that is decode behavior, not an error).
+    #[test]
+    fn garbage_binary_frames_are_errors() {
+        assert!(decode_processes(Frame::Binary(&[0xff, 0xff, 0xff])).is_err());
+        let empty = decode_processes(Frame::Binary(&[])).unwrap();
+        assert_eq!(empty.rows.len(), 0);
+        // [8,150,1] is a legal process_count=150 with no rows: it decodes.
+        let ok = decode_processes(Frame::Binary(&[0x08, 0x96, 0x01])).unwrap();
+        assert_eq!(ok.process_count, 150);
+        assert_eq!(ok.rows.len(), 0);
+    }
+
+    /// Wrong JSON types (a hostile agent or a typo'd shim) are errors.
+    #[test]
+    fn wrong_json_types_are_errors() {
+        let s = METRICS.replace(
+            r#""sampled_at_ms":1762500000123"#,
+            r#""sampled_at_ms":"not-a-number""#,
+        );
+        assert!(decode_metrics(Frame::Text(&s)).is_err());
+        let s = METRICS.replace(r#""mem_total":1000"#, r#""mem_total":-1"#);
+        assert!(decode_metrics(Frame::Text(&s)).is_err());
+        let s = METRICS.replace(
+            r#""networks":["#,
+            r#""networks":"not-an-array","disks_x":[],"_x":["#,
+        );
+        assert!(decode_metrics(Frame::Text(&s)).is_err());
     }
 
     #[test]
