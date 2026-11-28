@@ -26,6 +26,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+NOTICES_SRC="$ROOT/THIRD-PARTY-NOTICES"
 SCRIPT="$ROOT/deploy/bootstrap/ebbtop-install.sh"
 MAC_INSTALLER="$ROOT/deploy/macos/install-agent.sh"
 MAC_PLIST="$ROOT/deploy/macos/ebbtop-agent.plist.in"
@@ -348,8 +349,9 @@ make_mac_pkg() {
     echo "target=aarch64-apple-darwin"
     echo "min_macos=13.0"
   } > "$stage/BUILD"
-  ( cd "$stage" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist > SHA256SUMS )
-  ( cd "$stage" && tar -czf "$out" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh )
+  cp "$NOTICES_SRC" "$stage/THIRD-PARTY-NOTICES"
+  ( cd "$stage" && shasum -a 256 BUILD ebbtop-agent ebbtop-agent.plist THIRD-PARTY-NOTICES > SHA256SUMS )
+  ( cd "$stage" && tar -czf "$out" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES )
 }
 
 # API JSON with (or without) the macOS asset.
@@ -1031,7 +1033,7 @@ case_bash32_member_refusal() {
   local stage="$WORK/b32m-stage" bad="$WORK/b32m.tar.gz"
   make_mac_pkg "$bad" 0.3.0 "$MAC_INSTALLER" "$MAC_PLIST" "$stage"
   echo 'extra' > "$stage/extra-file"
-  ( cd "$stage" && tar -czf "$bad" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh extra-file )
+  ( cd "$stage" && tar -czf "$bad" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES extra-file )
   make_mac_api "$STUB_STATE/api-latest.json" v0.3.0 "$(pkg_digest "$bad")"
   cp "$bad" "$STUB_STATE/download-body"
   run_script "$BASH32" "$out" --yes || rc=$?

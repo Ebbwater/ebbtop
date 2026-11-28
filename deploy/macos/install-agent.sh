@@ -52,8 +52,8 @@ ROLLBACK_ADDR=''     # the bind address to probe when verifying a rollback
 PLIST_BAK="$LA_DIR/.$LABEL.plist.bak"
 
 # Exactly the members the archive carries, and the ones SHA256SUMS covers.
-PKG_MEMBERS="BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh"
-PKG_SUMMED="BUILD ebbtop-agent ebbtop-agent.plist"
+PKG_MEMBERS="BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES"
+PKG_SUMMED="BUILD ebbtop-agent ebbtop-agent.plist THIRD-PARTY-NOTICES"
 
 usage() {
   cat >&2 <<'USAGE'
@@ -191,12 +191,12 @@ verify_package() {
       || die "malformed SHA256SUMS line: '$line'"
     name="${BASH_REMATCH[1]}"
     case "$name" in
-      BUILD|ebbtop-agent|ebbtop-agent.plist) ;;
+      BUILD|ebbtop-agent|ebbtop-agent.plist|THIRD-PARTY-NOTICES) ;;
       *) die "SHA256SUMS names an unexpected member: '$name'" ;;
     esac
     count=$((count + 1))
   done < "$dir/SHA256SUMS"
-  (( count == 3 )) || die "SHA256SUMS must cover exactly 3 files ($PKG_SUMMED), found $count"
+  (( count == ${#PKG_SUMMED[@]} )) || die "SHA256SUMS must cover exactly ${#PKG_SUMMED[@]} files ($PKG_SUMMED), found $count"
   for member in $PKG_SUMMED; do
     grep -q "  $member\$" "$dir/SHA256SUMS" || die "SHA256SUMS does not cover '$member'"
   done

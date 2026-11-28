@@ -21,6 +21,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+NOTICES_SRC="$ROOT/THIRD-PARTY-NOTICES"
 SCRIPT="$ROOT/deploy/bootstrap/ebbtop-install.sh"
 REPO_INSTALLER="$ROOT/deploy/install-agent.sh"
 REPO_UNIT="$ROOT/deploy/ebbtop-agent.service"
@@ -308,8 +309,9 @@ make_pkg() { # <out> <version> [glibc floor]
   cp "$REPO_UNIT" "$stage/ebbtop-agent.service"
   cp "$REPO_INSTALLER" "$stage/install-agent.sh"
   chmod 755 "$stage/install-agent.sh"
-  ( cd "$stage" && sha256sum BUILD ebbtop-agent ebbtop-agent.service > SHA256SUMS )
-  ( cd "$stage" && tar -czf "$out" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh )
+  cp "$NOTICES_SRC" "$stage/THIRD-PARTY-NOTICES"
+  ( cd "$stage" && sha256sum BUILD ebbtop-agent ebbtop-agent.service THIRD-PARTY-NOTICES > SHA256SUMS )
+  ( cd "$stage" && tar -czf "$out" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES )
   PKG_STAGE="$stage"
 }
 
@@ -457,11 +459,11 @@ mkdir -p "$WORK/tamper"
 tar -xzf "$GOOD_PKG" -C "$WORK/tamper"
 printf '#!/bin/sh\necho tampered\n' > "$WORK/tamper/ebbtop-agent"
 chmod 755 "$WORK/tamper/ebbtop-agent"
-( cd "$WORK/tamper" && tar -czf "$TAMPERED_PKG" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh )
+( cd "$WORK/tamper" && tar -czf "$TAMPERED_PKG" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES )
 
 ESCAPE_PKG="$WORK/escape.tar.gz"
 printf 'not part of any package\n' > "$WORK/escape-target"
-( cd "$WORK" && tar -czf "$ESCAPE_PKG" -C "$GOOD_STAGE" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh \
+( cd "$WORK" && tar -czf "$ESCAPE_PKG" -C "$GOOD_STAGE" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES \
     -P ../escape-target 2>/dev/null )
 
 FLOOR_PKG="$WORK/high-floor.tar.gz"
@@ -472,7 +474,7 @@ make_pkg "$FLOOR_PKG" 0.2.9 2.99
 LYING_PKG="$WORK/lying-installer.tar.gz"
 mkdir -p "$WORK/lying"
 cp "$GOOD_STAGE/BUILD" "$GOOD_STAGE/SHA256SUMS" "$GOOD_STAGE/ebbtop-agent" \
-   "$GOOD_STAGE/ebbtop-agent.service" "$WORK/lying/"
+   "$GOOD_STAGE/ebbtop-agent.service" "$GOOD_STAGE/THIRD-PARTY-NOTICES" "$WORK/lying/"
 cat > "$WORK/lying/install-agent.sh" <<'STUB'
 #!/usr/bin/env bash
 echo "verified: SHA256SUMS ok for BUILD ebbtop-agent ebbtop-agent.service"
@@ -484,7 +486,7 @@ echo "loaded: path=$HOME/services/ebbtop-agent/bin/ebbtop-agent"
 echo "linger: yes (unit starts at boot)"
 STUB
 chmod 755 "$WORK/lying/install-agent.sh"
-( cd "$WORK/lying" && tar -czf "$LYING_PKG" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh )
+( cd "$WORK/lying" && tar -czf "$LYING_PKG" BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES )
 
 # ===========================================================================
 # 1. latest release, verified digest, verified manifest, delegated install,

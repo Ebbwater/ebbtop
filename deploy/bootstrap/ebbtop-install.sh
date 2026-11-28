@@ -250,7 +250,7 @@ detect_platform() {
   case "$PLATFORM" in
     linux)
       ASSET='ebbtop-agent-linux-x86_64.tar.gz'
-      PKG_MEMBERS='BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh'
+      PKG_MEMBERS='BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES'
       SVC="$HOME/services/ebbtop-agent"
       ENVFILE="$SVC/agent.env"
       TOKENFILE="$SVC/ebbtop.token"
@@ -262,7 +262,7 @@ detect_platform() {
       ;;
     macos)
       ASSET='ebbtop-agent-macos-arm64.tar.gz'
-      PKG_MEMBERS='BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh'
+      PKG_MEMBERS='BUILD SHA256SUMS ebbtop-agent ebbtop-agent.plist install-agent.sh THIRD-PARTY-NOTICES'
       SVC="${EBBTOP_STATE_DIR:-$HOME/Library/Application Support/ebbtop-agent}"
       ENVFILE="$SVC/agent.env"
       TOKENFILE="$SVC/ebbtop.token"

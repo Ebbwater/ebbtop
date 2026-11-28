@@ -71,9 +71,9 @@ migrate_from_kmon() {
 
 # --- prebuilt package path -------------------------------------------------
 # The archive carries exactly these five members at its top level.
-PKG_MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh)
+PKG_MEMBERS=(BUILD SHA256SUMS ebbtop-agent ebbtop-agent.service install-agent.sh THIRD-PARTY-NOTICES)
 # SHA256SUMS covers the payload: build metadata, binary and unit.
-PKG_SUMMED=(BUILD ebbtop-agent ebbtop-agent.service)
+PKG_SUMMED=(BUILD ebbtop-agent ebbtop-agent.service THIRD-PARTY-NOTICES)
 
 # A bind address must be an IP literal on this host's tailnet/LAN. Wildcard
 # and loopback-only addresses are refused: the agent must never listen beyond
@@ -131,7 +131,7 @@ verify_package() {
       || die "malformed SHA256SUMS line: '$line'"
     name="${BASH_REMATCH[1]}"
     case "$name" in
-      BUILD|ebbtop-agent|ebbtop-agent.service) ;;
+      BUILD|ebbtop-agent|ebbtop-agent.service|THIRD-PARTY-NOTICES) ;;
       *) die "SHA256SUMS names an unexpected member: '$name'" ;;
     esac
     seen["sum:$name"]=1
